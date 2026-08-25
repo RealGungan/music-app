@@ -54,28 +54,22 @@ class StagingState:
             raise RuntimeError("StagingState not configured yet")
         return cls._instance
 
-    def _library_playlists(self):
-        """All *.m3u anywhere under music_root (legacy layouts included)."""
+    def _walk_m3us(self, base):
+        """All *.m3u anywhere under base."""
         found = {}
-        for root, dirs, files in os.walk(self.music_root):
-            dirs[:] = [d for d in dirs if d != "_Staging"]
+        for root, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if d != "_Staging"
+                       and d != ".git"]
             for f in files:
                 if f.endswith(".m3u"):
                     found.setdefault(f[:-4], os.path.join(root, f))
         return found
 
     def playlist_paths(self):
-        """Merge Playlists-dir m3us with any found in the library,
-        deduped by name."""
+        """Every known playlist: playlist_dir (recursive) + library."""
         out = {}
-        try:
-            names = sorted(os.listdir(self.playlist_dir))
-        except OSError:
-            names = []
-        for n in names:
-            if n.endswith(".m3u"):
-                out[n[:-4]] = os.path.join(self.playlist_dir, n)
-        for name, p in self._library_playlists().items():
+        out.update(self._walk_m3us(self.playlist_dir))
+        for name, p in self._walk_m3us(self.music_root).items():
             out.setdefault(name, p)
         yield from sorted(out.items())
 

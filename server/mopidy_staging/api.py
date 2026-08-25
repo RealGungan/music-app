@@ -347,13 +347,22 @@ class PlaylistDetailHandler(BaseHandler):
                         p = cand if os.path.exists(cand) else alt
                     exists = os.path.exists(p)
                     url = None
+                    pldir = os.path.normpath(self.state.playlist_dir)
                     if exists:
                         try:
                             rp = os.path.relpath(p, root)
                         except ValueError:
                             rp = None
-                        if rp and not rp.startswith(".."):
+                        if rp and not rp.startswith("..") \
+                                and not rp.startswith(".." + os.sep):
                             url = "/staging/file/" + rp
+                        else:
+                            try:
+                                rp2 = os.path.relpath(p, pldir)
+                            except ValueError:
+                                rp2 = None
+                            if rp2 and not rp2.startswith("."):
+                                url = "/staging/pl/" + rp2
                     base = os.path.basename(ln[:-4]
                                             if ln.endswith(".mp3")
                                             else ln)
@@ -435,8 +444,13 @@ class CoverHandler(BaseHandler):
     async def get(self):
         f = self.get_argument("f")
         root = os.path.normpath(self.state.music_root)
-        path = os.path.normpath(os.path.join(root, f))
-        if not path.startswith(root + os.sep) and path != root:
+        base_dir = root
+        if f.startswith("pl:"):
+            f = f[3:]
+            base_dir = os.path.normpath(self.state.playlist_dir)
+        path = os.path.normpath(os.path.join(base_dir, f))
+        allowed = path.startswith(base_dir + os.sep) or path == base_dir
+        if not allowed:
             raise tornado.web.HTTPError(400, "bad path")
 
         got = await self.offload(self._extract, path) \
@@ -526,5 +540,7 @@ def make_staging_app_factory():
             (r"/api/resolve/([^/]+)", ResolveHandler),
             (r"/file/(.*)", tornado.web.StaticFileHandler,
              {"path": music_root}),
+            (r"/pl/(.*)", tornado.web.StaticFileHandler,
+             {"path": StagingState.instance().playlist_dir}),
         ]
     return factory
