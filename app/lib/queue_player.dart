@@ -18,6 +18,7 @@ class QueuePlayer {
         .listen((d) => position.value = d);
     _player.onDurationChanged
         .listen((d) => trackDuration.value = d);
+    _player.onPlayerStateChanged.listen((s) => status.value = s);
   }
 
   static final QueuePlayer instance = QueuePlayer._();
@@ -31,6 +32,9 @@ class QueuePlayer {
   final ValueNotifier<bool> shuffleEnabled = ValueNotifier(false);
   final ValueNotifier<String> currentThumb = ValueNotifier('');
   final ValueNotifier<double> volume = ValueNotifier(1.0);
+  final ValueNotifier<PlayerState> status =
+      ValueNotifier(PlayerState.stopped);
+  final ValueNotifier<int> queueIndex = ValueNotifier(-1);
   final ValueNotifier<Duration> position = ValueNotifier(Duration.zero);
   final ValueNotifier<Duration> trackDuration = ValueNotifier(Duration.zero);
 
@@ -90,8 +94,10 @@ class QueuePlayer {
   Future<void> stop() => _player.stop();
 
   Future<void> _playCurrent() async {
+    queueIndex.value = index;
     if (index < 0 || index >= items.length) {
       currentTitle.value = '';
+      currentThumb.value = '';
       return;
     }
     currentTitle.value = items[index].title;

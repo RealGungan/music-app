@@ -72,12 +72,11 @@ class MiniPlayerBar extends StatelessWidget {
                   ],
                 ),
               ),
-              StreamBuilder<PlayerState>(
-                stream: qp.stateStream,
-                builder: (ctx, snap) {
-                  final playing = snap.data == PlayerState.playing;
-                  final started = snap.data != null &&
-                      snap.data != PlayerState.stopped;
+              ValueListenableBuilder<PlayerState>(
+                valueListenable: qp.status,
+                builder: (ctx, st, _) {
+                  final playing = st == PlayerState.playing;
+                  final started = st != PlayerState.stopped;
                   return IconButton(
                     visualDensity: VisualDensity.compact,
                     icon: Icon(playing

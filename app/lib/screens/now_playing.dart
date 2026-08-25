@@ -131,11 +131,10 @@ class NowPlayingPage extends StatelessWidget {
                           iconSize: 38,
                           icon: const Icon(Icons.skip_previous),
                           onPressed: qp.previous),
-                      StreamBuilder<PlayerState>(
-                        stream: qp.stateStream,
-                        builder: (ctx, snap) {
-                          final playing =
-                              snap.data == PlayerState.playing;
+                      ValueListenableBuilder<PlayerState>(
+                        valueListenable: qp.status,
+                        builder: (ctx, st, _) {
+                          final playing = st == PlayerState.playing;
                           return Material(
                             color: Colors.white,
                             shape: const CircleBorder(),
@@ -176,6 +175,49 @@ class NowPlayingPage extends StatelessWidget {
                         ),
                       ),
                     ],
+                  ),
+                  // Up next (queue)
+                  ValueListenableBuilder<int>(
+                    valueListenable: qp.queueIndex,
+                    builder: (ctx, cur, _) {
+                      if (qp.items.length < 2) {
+                        return const SizedBox.shrink();
+                      }
+                      return Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('UP NEXT',
+                                style: TextStyle(
+                                    fontSize: 11.5,
+                                    letterSpacing: .8,
+                                    fontWeight: FontWeight.w800,
+                                    color: Colors.white54)),
+                            for (final (i, it) in qp.items.indexed)
+                              if (i != cur)
+                                ListTile(
+                                  dense: true,
+                                  visualDensity:
+                                      VisualDensity.compact,
+                                  leading: i == cur + 1 ||
+                                          (cur == qp.items.length - 1 &&
+                                              i == 0)
+                                      ? const Icon(Icons.play_arrow,
+                                          size: 16,
+                                          color: Spots.green)
+                                      : null,
+                                  title: Text(it.title,
+                                      maxLines: 1,
+                                      overflow:
+                                          TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                          fontSize: 13)),
+                                ),
+                          ],
+                        ),
+                      );
+                    },
                   ),
                   // volume meter slider
                   Padding(

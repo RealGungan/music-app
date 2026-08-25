@@ -149,7 +149,9 @@ class _SearchScreenState extends State<SearchScreen> {
                           ]);
                           if (a == 'play') {
                             QueuePlayer.instance.playOne(QueueItem(
-                                l.baseName, widget.api.fileUrl(l.url)));
+                                l.baseName,
+                                widget.api.fileUrl(l.url),
+                                thumbUrl: widget.api.coverUrl(l.url)));
                           } else if (a == 'keep' && context.mounted) {
                             showKeepDialog(context, widget.api,
                                 baseName: l.baseName);
