@@ -46,6 +46,13 @@ CREATE TABLE IF NOT EXISTS events (
     payload TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS added_meta (
+    playlist TEXT NOT NULL,
+    base_name TEXT NOT NULL,
+    added_at REAL,
+    album_image TEXT,
+    PRIMARY KEY (playlist, base_name)
+);
 CREATE TABLE IF NOT EXISTS resolved_urls (
     video_id TEXT PRIMARY KEY,
     url TEXT NOT NULL,

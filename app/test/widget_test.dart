@@ -2,17 +2,32 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:music_app/main.dart';
+import 'package:music_app/bottom_player.dart';
 import 'package:music_app/screens/now_playing.dart';
 import 'package:music_app/queue_player.dart';
 
 void main() {
-  testWidgets('app shell renders', (tester) async {
+  testWidgets('desktop shell renders sidebar + player bar', (tester) async {
+    tester.view.physicalSize = const Size(1400, 800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(MusicApp(
+      initialServer: 'http://127.0.0.1:6680',
+      onServerChanged: (_) {},
+    ));
+    await tester.pump();
+    expect(find.text('Your Library'), findsOneWidget); // sidebar
+    expect(find.byType(BottomPlayerBar), findsOneWidget);
+  });
+
+  testWidgets('mobile shell renders nav bar + mini player', (tester) async {
     await tester.pumpWidget(MusicApp(
       initialServer: 'http://127.0.0.1:6680',
       onServerChanged: (_) {},
     ));
     await tester.pump();
     expect(find.byType(NavigationBar), findsOneWidget);
+    expect(find.byType(BottomPlayerBar), findsNothing); // no desktop bar
   });
 
   testWidgets('mini player controls are visible when a track plays',
@@ -31,7 +46,8 @@ void main() {
     qp.items = [QueueItem('x', 'http://x/a.mp3')];
     qp.index = 0;
     qp.currentTitle.value = 'Some Song';
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
 
     // every control must exist AND be hittable (visible, not clipped)
     for (final icon in [Icons.skip_next]) {

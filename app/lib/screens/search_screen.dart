@@ -168,7 +168,7 @@ class _SearchScreenState extends State<SearchScreen> {
                         CoverArt(
                             seed: d.channel + d.title,
                             networkUrl:
-                                'https://i.ytimg.com/vi/${d.videoId}/mqdefault.jpg'),
+                                'https://i.ytimg.com/vi/${d.videoId}/hqdefault.jpg'),
                         if (_resolvingId == d.videoId)
                           Container(width: 56, height: 56,
                               color: Colors.black54,
@@ -178,23 +178,25 @@ class _SearchScreenState extends State<SearchScreen> {
                       ]),
                       title: Text('${d.artist} - ${d.title}',
                           maxLines: 1, overflow: TextOverflow.ellipsis),
-                      subtitle: Row(children: [
-                        if (d.tier == 0)
-                          const Padding(
-                            padding: EdgeInsets.only(right: 6),
-                            child: Text('OFFICIAL',
+                      subtitle: Text.rich(
+                        TextSpan(children: [
+                          if (d.tier == 0)
+                            const TextSpan(
+                                text: 'OFFICIAL   ',
                                 style: TextStyle(
                                     fontSize: 10,
                                     fontWeight: FontWeight.w800,
+                                    letterSpacing: .5,
                                     color: Spots.green)),
-                          ),
-                        Expanded(
-                          child: Text('${d.channel} · ${_fmt(d.durationS)}',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(color: Colors.white54)),
-                        ),
-                      ]),
+                          TextSpan(
+                              text:
+                                  '${d.channel} · ${_fmt(d.durationS)}',
+                              style: const TextStyle(
+                                  color: Colors.white54)),
+                        ]),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                       onTap: () => _stream(d),
                       trailing: IconButton(
                         icon: const Icon(Icons.more_vert),

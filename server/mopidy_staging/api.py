@@ -372,6 +372,15 @@ class PlaylistDetailHandler(BaseHandler):
                         "exists": exists,
                         "url": url,
                     })
+        meta = {}
+        for r in self.state.db.query(
+                "SELECT * FROM added_meta WHERE playlist=?", (name,)):
+            meta[r["base_name"]] = r
+        for e in entries:
+            m = meta.get(e["base_name"])
+            if m:
+                e["added_at"] = m["added_at"]
+                e["album_image"] = m["album_image"]
         self.write_json({"name": name, "entries": entries})
 
 
@@ -473,16 +482,145 @@ class CoverHandler(BaseHandler):
         if state_row:
             self.redirect(
                 "https://i.ytimg.com/vi/"
-                + state_row["video_id"] + "/mqdefault.jpg", permanent=False)
+                + state_row["video_id"] + "/hqdefault.jpg", permanent=False)
             return
 
-        # fallback 2: Deezer album art by artist - title
+        # fallback 2: imported album image from playlist exports
+        img_row = None
+        for r in self.state.db.query(
+                "SELECT album_image FROM added_meta WHERE base_name=? "
+                "AND album_image IS NOT NULL", (base_name,)):
+            img_row = r
+            break
+        if img_row and img_row["album_image"]:
+            self.redirect(img_row["album_image"], permanent=False)
+            return
+
+        # fallback 3: Deezer album art by artist - title
         if os.path.exists(path):
             cover = await self.offload(self._deezer_cover_url, base_name)
             if cover:
                 self.redirect(cover, permanent=False)
                 return
         raise tornado.web.HTTPError(404, "no artwork")
+
+
+class SimilarHandler(BaseHandler):
+    """Seed tracks for the endless queue: same-artist songs."""
+
+    async def get(self):
+        artist = self.get_argument("artist", "").strip()
+        genre = self.get_argument("genre", "").strip()
+        exclude = [x for x in
+                   self.get_argument("exclude", "").split("||") if x]
+        n = int(self.get_argument("n", "8"))
+        query = f"{genre} music" if genre else f"{artist} songs"
+        if not query.strip():
+            raise tornado.web.HTTPError(400, "missing query")
+        cands = await self.offload(
+            self.state.pipeline.scorer.search_ytmusic, query)
+        from .scorer import norm as _norm
+        excl = {_norm(t) for t in exclude}
+        out = []
+        for c in cands:
+            if _norm(c["title"]) in excl:
+                continue
+            if any(_norm(f"{artist} - {c['title']}") == _norm(e)
+                   for e in exclude):
+                continue
+            out.append({
+                "video_id": c["video_id"],
+                "title": c["title"],
+                "channel": c["channel"],
+                "duration_s": c["duration_s"],
+            })
+            if len(out) >= n:
+                break
+        self.write_json({"similar": out})
+
+
+class LyricsHandler(BaseHandler):
+    """Parsed .lrc for a library file, when present."""
+
+    async def get(self):
+        import re as _re
+        f = self.get_argument("f")
+        root = os.path.normpath(self.state.music_root)
+        path = os.path.normpath(os.path.join(root, f))
+        if not path.startswith(root + os.sep):
+            raise tornado.web.HTTPError(400, "bad path")
+        lrc = os.path.splitext(path)[0] + ".lrc"
+        if not os.path.exists(lrc):
+            raise tornado.web.HTTPError(404, "no lyrics")
+        out = []
+        ts = _re.compile(r"\[(\d+):(\d+)(?:[.:](\d+))?\]")
+        plain = []
+        with open(lrc, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                m = ts.findall(line)
+                text = ts.sub("", line).strip()
+                if not text:
+                    continue
+                if m:
+                    for mm in m:
+                        mins, secs, frac = int(mm[0]), int(mm[1]), mm[2]
+                        ms = (mins * 60 + secs) * 1000 +                              int((frac or "0").ljust(3, "0")[:3])
+                        out.append({"t": ms, "text": text})
+                else:
+                    plain.append(text)
+        out.sort(key=lambda x: x["t"])
+        self.write_json({"synced": out,
+                         "plain": None if out else "\n".join(plain)})
+
+
+class TracksHandler(BaseHandler):
+    """Whole-library index for Artists browse mode."""
+
+    async def get(self):
+        root = self.state.music_root
+        items = []
+        for rpath, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if d != "_Staging"]
+            for fn in files:
+                if not fn.endswith(".mp3"):
+                    continue
+                base = fn[:-4]
+                rel = os.path.relpath(os.path.join(rpath, fn), root)
+                artist = base.split(" - ")[0].strip() if " - " in base else ""
+                items.append({"base_name": base, "folder":
+                              os.path.dirname(rel), "url":
+                              "/staging/file/" + rel, "artist": artist})
+        self.write_json({"tracks": items})
+
+
+class ImportMetaHandler(BaseHandler):
+    """Ingest Spotify-export metadata: added-at dates + album art."""
+
+    async def post(self, name):
+        import datetime as _dt
+        body = self.body_json()
+        if not isinstance(body, list):
+            raise tornado.web.HTTPError(400, "expected a list")
+        n = 0
+        for row in body:
+            base = (row.get("base_name") or "").strip()
+            if not base:
+                continue
+            added = row.get("added_at")
+            ts = None
+            if added:
+                try:
+                    iso = str(added).replace("Z", "+00:00")
+                    ts = _dt.datetime.fromisoformat(iso).timestamp()
+                except ValueError:
+                    ts = None
+            self.state.db.execute(
+                """INSERT OR REPLACE INTO added_meta
+                   (playlist, base_name, added_at, album_image)
+                   VALUES(?,?,?,?)""",
+                (name, base, ts, row.get("album_image")))
+            n += 1
+        self.write_json({"imported": n})
 
 
 class PlaylistEntryHandler(BaseHandler):
@@ -500,7 +638,9 @@ class PlaylistEntryHandler(BaseHandler):
                 s = ln.strip()
                 if not s or s.startswith("#"):
                     continue
-                if os.path.basename(s) != base:
+                bn = os.path.basename(s)
+                stem = bn[:-4] if bn.endswith('.mp3') else bn
+                if base not in (bn, stem):
                     kept.append(s)
         with open(m3u, "w", encoding="utf-8") as fh:
             fh.write("\n".join(kept) + ("\n" if kept else ""))
@@ -535,9 +675,13 @@ def make_staging_app_factory():
             (r"/api/keep", KeepHandler),
             (r"/api/cover", CoverHandler),
             (r"/api/playlists", PlaylistsHandler),
+            (r"/api/playlists/([^/]+)/meta", ImportMetaHandler),
             (r"/api/playlists/([^/]+)/entries", PlaylistEntryHandler),
             (r"/api/playlists/([^/]+)", PlaylistDetailHandler),
             (r"/api/resolve/([^/]+)", ResolveHandler),
+            (r"/api/similar", SimilarHandler),
+            (r"/api/lyrics", LyricsHandler),
+            (r"/api/tracks", TracksHandler),
             (r"/file/(.*)", tornado.web.StaticFileHandler,
              {"path": music_root}),
             (r"/pl/(.*)", tornado.web.StaticFileHandler,

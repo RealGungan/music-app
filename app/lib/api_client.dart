@@ -6,10 +6,19 @@ class LocalResult {
   final String baseName;
   final String folder;
   final String url;
-  LocalResult({required this.baseName, required this.folder, required this.url});
+  final String artist;
+  LocalResult(
+      {required this.baseName,
+      required this.folder,
+      required this.url,
+      this.artist = ''});
 
   factory LocalResult.fromJson(Map<String, dynamic> j) => LocalResult(
-      baseName: j['base_name'], folder: j['folder'] ?? '', url: j['url']);
+        baseName: j['base_name'],
+        folder: j['folder'] ?? '',
+        url: j['url'],
+        artist: j['artist'] ?? '',
+      );
 }
 
 class DiscoveryResult {
@@ -133,18 +142,37 @@ class PlaylistEntry {
   final String path;
   final bool exists;
   final String? url;
+  final int? addedAt; // epoch seconds, when known from an export
+  final String? albumImage;
   PlaylistEntry(
       {required this.baseName,
       required this.path,
       required this.exists,
-      this.url});
+      this.url,
+      this.addedAt,
+      this.albumImage});
 
   factory PlaylistEntry.fromJson(Map<String, dynamic> j) => PlaylistEntry(
         baseName: j['base_name'],
         path: j['path'],
         exists: j['exists'] ?? false,
         url: j['url'],
+        addedAt: j['added_at'],
+        albumImage: j['album_image'],
       );
+}
+
+class LyricLine {
+  final int tMs;
+  final String text;
+  LyricLine(this.tMs, this.text);
+}
+
+class Lyrics {
+  final List<LyricLine> synced;
+  final String? plain;
+  bool get hasSynced => synced.isNotEmpty;
+  Lyrics(this.synced, this.plain);
 }
 
 class ApiException implements Exception {
@@ -161,8 +189,23 @@ class ApiClient {
   final String baseUrl;
   final http.Client _client;
 
+  static const _timeout = Duration(seconds: 45);
+
+  Future<T> _guard<T>(Future<T> future) =>
+      future.timeout(_timeout, onTimeout: () => throw ApiException(
+          0,
+          'server took longer than 45s — check WiFi / server address'));
+
   Uri _uri(String path, [Map<String, String>? q]) =>
       Uri.parse('$baseUrl/staging$path').replace(queryParameters: q);
+
+  Future<http.Response> _get(Uri u, {Map<String, String>? h}) =>
+      _guard(_client.get(u, headers: h));
+  Future<http.Response> _post(Uri u, {Object? b, Map<String, String>? h}) =>
+      _guard(_client.post(u, headers: h, body: b));
+  Future<http.Response> _delete(Uri u,
+          {Object? b, Map<String, String>? h}) =>
+      _guard(_client.delete(u, headers: h, body: b));
 
   Map<String, dynamic> _decode(http.Response r) {
     final body = utf8.decode(r.bodyBytes);
@@ -179,7 +222,7 @@ class ApiClient {
   }
 
   Future<SearchResultPage> search(String q) async {
-    final j = _decode(await _client.get(_uri('/api/search', {'q': q})));
+    final j = _decode(await _get(_uri('/api/search', {'q': q})));
     return SearchResultPage(
       local: (j['local'] as List)
           .map((e) => LocalResult.fromJson(e))
@@ -191,19 +234,18 @@ class ApiClient {
   }
 
   Future<String> stage(String artist, String title) async {
-    final j = _decode(await _client.post(_uri('/api/stage'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'artist': artist, 'title': title})));
+    final j = _decode(await _post(_uri('/api/stage'),
+        b: jsonEncode({'artist': artist, 'title': title})));
     return j['id'] as String;
   }
 
   Future<List<JobStatus>> jobs() async {
-    final j = _decode(await _client.get(_uri('/api/jobs')));
+    final j = _decode(await _get(_uri('/api/jobs')));
     return (j['jobs'] as List).map((e) => JobStatus.fromJson(e)).toList();
   }
 
   Future<List<DownloadRow>> downloads({String? status}) async {
-    final j = _decode(await _client.get(_uri('/api/downloads',
+    final j = _decode(await _get(_uri('/api/downloads',
         status != null ? {'status': status} : null)));
     return (j['downloads'] as List)
         .map((e) => DownloadRow.fromJson(e))
@@ -211,67 +253,61 @@ class ApiClient {
   }
 
   Future<List<Candidate>> candidates(String downloadId) async {
-    final j = _decode(await _client.get(_uri('/api/downloads/$downloadId')));
+    final j = _decode(await _get(_uri('/api/downloads/$downloadId')));
     return (j['candidates'] as List)
         .map((e) => Candidate.fromJson(e))
         .toList();
   }
 
   Future<void> redownload(String downloadId, String videoId) async {
-    _decode(await _client.post(_uri('/api/redownload'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'download_id': downloadId, 'video_id': videoId})));
+    _decode(await _post(_uri('/api/redownload'),
+        b: jsonEncode({'download_id': downloadId, 'video_id': videoId})));
   }
 
   Future<void> remove(String downloadId) async {
-    _decode(await _client.delete(_uri('/api/downloads/$downloadId')));
+    _decode(await _delete(_uri('/api/downloads/$downloadId')));
   }
 
   Future<void> keep(String downloadId, String playlist) async {
-    _decode(await _client.post(_uri('/api/keep'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'download_id': downloadId, 'playlist': playlist})));
+    _decode(await _post(_uri('/api/keep'),
+        b: jsonEncode({'download_id': downloadId, 'playlist': playlist})));
   }
 
   Future<List<PlaylistInfo>> playlists() async {
-    final j = _decode(await _client.get(_uri('/api/playlists')));
+    final j = _decode(await _get(_uri('/api/playlists')));
     return (j['playlists'] as List)
         .map((e) => PlaylistInfo.fromJson(e))
         .toList();
   }
 
   Future<List<PlaylistEntry>> playlistEntries(String name) async {
-    final j =
-        _decode(await _client.get(_uri('/api/playlists/$name')));
+    final j = _decode(await _get(_uri('/api/playlists/$name')));
     return (j['entries'] as List)
         .map((e) => PlaylistEntry.fromJson(e))
         .toList();
   }
 
   Future<void> createPlaylist(String name) async {
-    _decode(await _client.post(_uri('/api/playlists'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'name': name})));
+    _decode(await _post(_uri('/api/playlists'),
+        b: jsonEncode({'name': name})));
   }
 
   Future<void> removeFromPlaylist(String name,
       {required String baseName}) async {
-    _decode(await _client.delete(_uri('/api/playlists/$name/entries'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'base_name': baseName})));
+    _decode(await _delete(_uri('/api/playlists/$name/entries'),
+        b: jsonEncode({'base_name': baseName})));
   }
 
   Future<void> deletePlaylist(String name) async {
-    _decode(await _client.delete(_uri('/api/playlists/$name')));
+    _decode(await _delete(_uri('/api/playlists/$name')));
   }
 
   /// Universal 'add to playlist'. Works for staged, downloading,
   /// already-kept and never-downloaded tracks alike.
   Future<void> addToPlaylist(
       {String? downloadId, String? baseName, required String playlist}) async {
-    _decode(await _client.post(_uri('/api/keep'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
+    _decode(await _post(_uri('/api/keep'),
+        b: jsonEncode({
           if (downloadId != null) 'download_id': downloadId,
           if (baseName != null) 'base_name': baseName,
           'playlist': playlist,
@@ -279,8 +315,67 @@ class ApiClient {
   }
 
   Future<String> resolve(String videoId) async {
-    final j = _decode(await _client.get(_uri('/api/resolve/$videoId')));
+    final j = _decode(await _get(_uri('/api/resolve/$videoId')));
     return j['url'] as String;
+  }
+
+  Future<List<DiscoveryResult>> similar(String query,
+      {List<String> excludeTitles = const [], int n = 8}) async {
+    final j = _decode(await _get(_uri('/api/similar', {
+      'q': query,
+      'n': '$n',
+      'exclude': excludeTitles.join('||'),
+    })));
+    return (j['similar'] as List)
+        .map((e) => DiscoveryResult(
+              videoId: e['video_id'],
+              artist: query,
+              title: e['title'],
+              channel: e['channel'] ?? '',
+              durationS: e['duration_s'] ?? 0,
+              score: 0,
+              tier: 1,
+              streamUri: 'staging:yt:${e['video_id']}',
+            ))
+        .toList();
+  }
+
+  Future<Lyrics?> lyrics(String fileRelUrl) async {
+    final f = fileRelUrl.replaceFirst('/staging/file/', '');
+    try {
+      final j = _decode(await _client
+          .get(_uri('/api/lyrics', {'f': Uri.encodeComponent(f)})));
+      return Lyrics(
+        [for (final l in (j['synced'] as List))
+          LyricLine(l['t'] as int, l['text'] as String)],
+        j['plain'] as String?,
+      );
+    } on ApiException catch (e) {
+      if (e.statusCode == 404) return null;
+      rethrow;
+    }
+  }
+
+  Future<List<LocalResult>> allTracks() async {
+    final j = _decode(await _get(_uri('/api/tracks')));
+    return (j['tracks'] as List)
+        .map((e) => LocalResult.fromJson({
+              'base_name': e['base_name'],
+              'folder': e['folder'],
+              'url': e['url'],
+            }))
+        .toList();
+  }
+
+  /// Reachability probe: GET /staging/
+  Future<void> ping() async {
+    await _get(Uri.parse('$baseUrl/staging/'));
+  }
+
+  /// Server info (paths, expiry) from GET /staging/
+  Future<Map<String, dynamic>> info() async {
+    final r = await _get(Uri.parse('$baseUrl/staging/'));
+    return _decode(r);
   }
 
   /// Absolute URL for playing a library file through the server.

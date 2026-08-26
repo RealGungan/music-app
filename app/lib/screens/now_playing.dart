@@ -1,13 +1,28 @@
 import 'package:audioplayers/audioplayers.dart' show PlayerState;
 import 'package:flutter/material.dart';
 
+import '../api_client.dart';
+
 import '../queue_player.dart';
 import '../theme.dart';
+import 'queue_page.dart';
 
 /// Full-screen now-playing page. Fixed-size layout only (no flex) so
 /// every control always lands on-screen.
 class NowPlayingPage extends StatelessWidget {
-  const NowPlayingPage({super.key});
+  const NowPlayingPage({super.key, this.api});
+  final ApiClient? api;
+
+  Future<Lyrics?> _lyrics() async {
+    final item = QueuePlayer.instance.currentItem;
+    final f = item?.filePath;
+    if (f == null || api == null) return null;
+    try {
+      return await api!.lyrics(f);
+    } catch (_) {
+      return null;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -15,6 +30,11 @@ class NowPlayingPage extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         actions: [
+          IconButton(
+              tooltip: 'Queue',
+              icon: const Icon(Icons.queue_music_outlined),
+              onPressed: () => Navigator.push(context,
+                  MaterialPageRoute(builder: (_) => const QueuePage()))),
           IconButton(
               icon: const Icon(Icons.keyboard_arrow_down),
               onPressed: () => Navigator.pop(context)),
@@ -218,6 +238,66 @@ class NowPlayingPage extends StatelessWidget {
                         ),
                       );
                     },
+                  ),
+                  // synced lyrics
+                  ValueListenableBuilder<Duration>(
+                    valueListenable: qp.position,
+                    builder: (ctx, pos, _) => ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 150),
+                      child: FutureBuilder<Lyrics?>(
+                        future: _lyrics(),
+                        builder: (ctx, snap) {
+                          final l = snap.data;
+                          if (l == null ||
+                              (!l.hasSynced &&
+                                  (l.plain == null ||
+                                      l.plain!.isEmpty))) {
+                            return const SizedBox.shrink();
+                          }
+                          if (!l.hasSynced) {
+                            return Padding(
+                              padding:
+                                  const EdgeInsets.symmetric(vertical: 8),
+                              child: Text(l.plain!,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                      fontSize: 12.5,
+                                      color: Colors.white54)),
+                            );
+                          }
+                          int active = -1;
+                          for (var i = 0; i < l.synced.length; i++) {
+                            if (l.synced[i].tMs <= pos.inMilliseconds) {
+                              active = i;
+                            }
+                          }
+                          return ListView.builder(
+                            shrinkWrap: true,
+                            itemCount: l.synced.length,
+                            itemBuilder: (ctx, i) {
+                              final on = i == active;
+                              return Padding(
+                                padding: const EdgeInsets.symmetric(
+                                    vertical: 3),
+                                child: Text(
+                                  l.synced[i].text,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    fontSize: on ? 15 : 13,
+                                    fontWeight: on
+                                        ? FontWeight.w800
+                                        : FontWeight.w400,
+                                    color: on
+                                        ? Colors.white
+                                        : Colors.white38,
+                                  ),
+                                ),
+                              );
+                            },
+                          );
+                        },
+                      ),
+                    ),
                   ),
                   // volume meter slider
                   Padding(
