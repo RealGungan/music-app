@@ -7,9 +7,10 @@ import '../theme.dart';
 import 'keep_dialog.dart';
 
 class DownloadsScreen extends StatefulWidget {
-  const DownloadsScreen({super.key, required this.api});
+  const DownloadsScreen({super.key, required this.api, this.onBack});
 
   final ApiClient api;
+  final VoidCallback? onBack;
 
   @override
   State<DownloadsScreen> createState() => _DownloadsScreenState();
@@ -258,6 +259,11 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
         SliverAppBar(
           pinned: true,
           toolbarHeight: 72,
+          leading: widget.onBack == null
+              ? null
+              : IconButton(
+                  icon: const Icon(Icons.arrow_back),
+                  onPressed: widget.onBack),
           title: Column(crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min, children: [
             Text('Staging',

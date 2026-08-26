@@ -378,6 +378,12 @@ class ApiClient {
     return _decode(r);
   }
 
+  /// Whether the server can discover non-library songs (yt-dlp present).
+  Future<bool> discoveryAvailable() async {
+    final j = await info();
+    return j['discovery_available'] == true;
+  }
+
   /// Absolute URL for playing a library file through the server.
   String fileUrl(String relativeFileUrl) => '$baseUrl$relativeFileUrl';
 

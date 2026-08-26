@@ -9,10 +9,15 @@ import 'keep_dialog.dart';
 
 /// Spotify-style home: greeting + shortcut cards for playlists.
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key, required this.api, required this.onOpenPlaylist});
+  const HomeScreen(
+      {super.key,
+      required this.api,
+      required this.onOpenPlaylist,
+      required this.onOpenSettings});
 
   final ApiClient api;
   final void Function(PlaylistInfo) onOpenPlaylist;
+  final VoidCallback onOpenSettings;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -37,6 +42,12 @@ class _HomeScreenState extends State<HomeScreen> {
                     ?.copyWith(fontWeight: FontWeight.w900)),
           ),
           const SizedBox(width: 12),
+          IconButton(
+            tooltip: 'Settings',
+            icon: const Icon(Icons.settings_outlined,
+                size: 22, color: Colors.white70),
+            onPressed: widget.onOpenSettings,
+          ),
           ToggleButtons(
             isSelected: [_tab == 0, _tab == 1],
             onPressed: (i) => setState(() => _tab = i),

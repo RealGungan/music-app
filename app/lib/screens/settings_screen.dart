@@ -21,6 +21,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _checking;
   String? _error;
   Map<String, dynamic>? _info;
+  bool? _discovery;
 
   @override
   void initState() {
@@ -37,6 +38,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       try {
         final j = await widget.api.info();
         _info = j;
+        _discovery = await widget.api.discoveryAvailable();
       } catch (_) {}
       _error = null;
     } catch (e) {
@@ -137,6 +139,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
               subtitle: Text('${_info!['expiry_days']} days',
                   style: const TextStyle(fontSize: 11.5))),
         ],
+        ListTile(
+          leading: Icon(
+              Icons.travel_explore,
+              size: 22,
+              color: _discovery == null
+                  ? Colors.white38
+                  : (_discovery! ? Spots.green : Colors.redAccent)),
+          title: const Text('Song discovery'),
+          subtitle: Text(_discovery == null
+              ? 'Checking…'
+              : _discovery!
+                  ? 'YouTube + YouTube Music active'
+                  : 'Unavailable — yt-dlp missing on server. Rebuild the container.'),
+        ),
         const SizedBox(height: 10),
         _section('Playback'),
         ValueListenableBuilder<double>(

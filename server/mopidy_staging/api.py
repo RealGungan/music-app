@@ -5,6 +5,7 @@ JSON-RPC stays available for desktop MPD-style clients.
 """
 
 import json
+import shutil
 import logging
 import os
 import re
@@ -62,6 +63,7 @@ class IndexHandler(BaseHandler):
             "staging_dir": s.staging_dir,
             "folders": s.folders,
             "expiry_days": s.expiry_days,
+            "discovery_available": shutil.which(s.yt_dlp_bin) is not None,
         })
 
 
