@@ -4,6 +4,7 @@ import '../api_client.dart';
 import '../queue_player.dart';
 import '../theme.dart';
 import '../widgets.dart' show CoverArt;
+import 'artists_view.dart';
 import 'keep_dialog.dart';
 
 /// Spotify-style home: greeting + shortcut cards for playlists.
@@ -66,49 +67,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _artistsList() {
-    return FutureBuilder<List<LocalResult>>(
-      future: widget.api.allTracks(),
-      builder: (ctx, snap) {
-        if (snap.connectionState != ConnectionState.done) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final tracks = snap.data ?? [];
-        final byArtist = <String, List<LocalResult>>{};
-        for (final t in tracks) {
-          if (t.baseName.contains(' - ')) {
-            byArtist.putIfAbsent(t.artist, () => []).add(t);
-          }
-        }
-        final artists = byArtist.keys.toList()..sort();
-        return ListView.builder(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 40),
-          itemCount: artists.length,
-          itemBuilder: (ctx, i) {
-            final a = artists[i];
-            return ListTile(
-              leading: CircleAvatar(
-                backgroundColor: Spots.subtle,
-                child: Text(a.isEmpty ? '?' : a[0].toUpperCase(),
-                    style: const TextStyle(color: Colors.white70)),
-              ),
-              title: Text(a, maxLines: 1, overflow: TextOverflow.ellipsis),
-              subtitle: Text('${byArtist[a]!.length} songs',
-                  style: const TextStyle(fontSize: 12)),
-              onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (_) => ArtistPage(
-                          api: widget.api,
-                          artist: a,
-                          tracks: byArtist[a]!)),
-                );
-              },
-            );
-          },
-        );
-      },
-    );
+    return ArtistsView(api: widget.api);
   }
 
   Widget _playlistsGrid() {
@@ -126,7 +85,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 maxCrossAxisExtent: 260,
                 mainAxisSpacing: 14,
                 crossAxisSpacing: 14,
-                childAspectRatio: 2.6,
+                childAspectRatio: 2.35,
               ),
               delegate: SliverChildBuilderDelegate(
                 (ctx, i) {

@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 
@@ -134,7 +136,7 @@ class QueuePlayer extends ChangeNotifier {
 
   Future<void> playOne(QueueItem it) => playList([it]);
 
-  Future<void> toggleShuffle() async {
+  Future<void> toggleShuffle({Random? rng}) async {
     if (items.isEmpty) return;
     _shuffle = !_shuffle;
     shuffleEnabled.value = _shuffle;
@@ -142,7 +144,9 @@ class QueuePlayer extends ChangeNotifier {
 
     if (_shuffle) {
       final head = items.sublist(0, index + 1);
-      final tail = items.sublist(index + 1)..shuffle();
+      final tail = items.sublist(index + 1);
+      tail.shuffle(rng ?? Random());
+      items = [...head, ...tail];
       items = [...head, ...tail];
     } else if (_original.isNotEmpty) {
       final restored = _original.where(items.contains).toList();

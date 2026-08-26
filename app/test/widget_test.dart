@@ -77,7 +77,8 @@ void main() {
         w is Icon && cs.contains(w.icon);
     final shuffleish = find.byWidgetPredicate(
         (w) => anyOf(w, [Icons.shuffle, Icons.shuffle_outlined]));
-    expect(shuffleish, findsOneWidget, reason: 'shuffle missing');
+    expect(shuffleish, findsAtLeastNWidgets(1),
+        reason: 'shuffle missing');
     for (final icon in [
       Icons.skip_previous,
       Icons.skip_next,

@@ -6,6 +6,7 @@ import '../api_client.dart';
 import '../queue_player.dart';
 import '../theme.dart';
 import 'queue_page.dart';
+import 'queue_panel.dart';
 
 /// Full-screen now-playing page. Fixed-size layout only (no flex) so
 /// every control always lands on-screen.
@@ -107,27 +108,20 @@ class NowPlayingPage extends StatelessWidget {
                                     Duration(milliseconds: v.round())),
                               ),
                             ),
-                            Transform.translate(
-                              offset: const Offset(0, -14),
-                              child: Padding(
-                                padding:
-                                    const EdgeInsets.symmetric(horizontal: 12),
-                                child: Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceBetween,
-                                  children: [
-                                    Text(_fmt(pos),
-                                        style: TextStyle(
-                                            fontSize: 11.5,
-                                            color: Colors.white54)),
-                                    Text(_fmt(dur),
-                                        style: TextStyle(
-                                            fontSize: 11.5,
-                                            color: Colors.white54)),
-                                  ],
-                                ),
-                              ),
-                            ),
+                            Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(_fmt(pos),
+                            style: const TextStyle(
+                                fontSize: 11.5, color: Colors.white54)),
+                        Text(_fmt(dur),
+                            style: const TextStyle(
+                                fontSize: 11.5, color: Colors.white54)),
+                      ],
+                    ),
+                  ),
                           ]);
                         },
                       ),
@@ -196,62 +190,18 @@ class NowPlayingPage extends StatelessWidget {
                       ),
                     ],
                   ),
-                  // Up next (queue)
-                  ValueListenableBuilder<int>(
-                    valueListenable: qp.queueIndex,
-                    builder: (ctx, cur, _) {
-                      if (qp.items.length < 2) {
-                        return const SizedBox.shrink();
-                      }
-                      return Padding(
-                        padding: const EdgeInsets.only(top: 6),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('UP NEXT',
-                                style: TextStyle(
-                                    fontSize: 11.5,
-                                    letterSpacing: .8,
-                                    fontWeight: FontWeight.w800,
-                                    color: Colors.white54)),
-                            for (final (i, it) in qp.items.indexed)
-                              if (i != cur)
-                                ListTile(
-                                  dense: true,
-                                  visualDensity:
-                                      VisualDensity.compact,
-                                  leading: i == cur + 1 ||
-                                          (cur == qp.items.length - 1 &&
-                                              i == 0)
-                                      ? const Icon(Icons.play_arrow,
-                                          size: 16,
-                                          color: Spots.green)
-                                      : null,
-                                  title: Text(it.title,
-                                      maxLines: 1,
-                                      overflow:
-                                          TextOverflow.ellipsis,
-                                      style: const TextStyle(
-                                          fontSize: 13)),
-                                ),
-                          ],
-                        ),
-                      );
-                    },
-                  ),
                   // synced lyrics
                   ValueListenableBuilder<Duration>(
                     valueListenable: qp.position,
                     builder: (ctx, pos, _) => ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 150),
+                      constraints: const BoxConstraints(maxHeight: 140),
                       child: FutureBuilder<Lyrics?>(
                         future: _lyrics(),
                         builder: (ctx, snap) {
                           final l = snap.data;
                           if (l == null ||
                               (!l.hasSynced &&
-                                  (l.plain == null ||
-                                      l.plain!.isEmpty))) {
+                                  (l.plain == null || l.plain!.isEmpty))) {
                             return const SizedBox.shrink();
                           }
                           if (!l.hasSynced) {
@@ -260,7 +210,7 @@ class NowPlayingPage extends StatelessWidget {
                                   const EdgeInsets.symmetric(vertical: 8),
                               child: Text(l.plain!,
                                   textAlign: TextAlign.center,
-                                  style: TextStyle(
+                                  style: const TextStyle(
                                       fontSize: 12.5,
                                       color: Colors.white54)),
                             );
@@ -274,31 +224,40 @@ class NowPlayingPage extends StatelessWidget {
                           return ListView.builder(
                             shrinkWrap: true,
                             itemCount: l.synced.length,
-                            itemBuilder: (ctx, i) {
-                              final on = i == active;
-                              return Padding(
-                                padding: const EdgeInsets.symmetric(
-                                    vertical: 3),
-                                child: Text(
-                                  l.synced[i].text,
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    fontSize: on ? 15 : 13,
-                                    fontWeight: on
-                                        ? FontWeight.w800
-                                        : FontWeight.w400,
-                                    color: on
-                                        ? Colors.white
-                                        : Colors.white38,
-                                  ),
+                            itemBuilder: (ctx, i) => Padding(
+                              padding:
+                                  const EdgeInsets.symmetric(vertical: 3),
+                              child: Text(
+                                l.synced[i].text,
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: i == active ? 15 : 13,
+                                  fontWeight: i == active
+                                      ? FontWeight.w800
+                                      : FontWeight.w400,
+                                  color: i == active
+                                      ? Colors.white
+                                      : Colors.white38,
                                 ),
-                              );
-                            },
+                              ),
+                            ),
                           );
                         },
                       ),
                     ),
                   ),
+                  const SizedBox(height: 14),
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text('QUEUE',
+                        style: TextStyle(
+                            fontSize: 12,
+                            letterSpacing: .8,
+                            fontWeight: FontWeight.w800,
+                            color: Colors.white54)),
+                  ),
+                  SizedBox(height: 380, child: const QueuePanel()),
+                  const SizedBox(height: 10),
                   // volume meter slider
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 28),

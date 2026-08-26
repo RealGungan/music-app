@@ -11,9 +11,10 @@ import 'player.dart' show MiniPlayerBar;
 import 'queue_player.dart';
 import 'screens/downloads_screen.dart';
 import 'screens/home_screen.dart';
+import 'screens/library_tab.dart';
 import 'screens/playlist_detail.dart';
+import 'screens/queue_panel.dart';
 import 'screens/search_screen.dart';
-import 'screens/settings_screen.dart';
 
 // desktop content region lives in _content(); overlays push playlist pages
 import 'build_id.dart';
@@ -282,17 +283,19 @@ class _MusicShellState extends State<MusicShell> {
   }
 
   // ------------------------------------------------------------- desktop
+  // ------------------------------------------------------------- desktop
   Widget _desktop() {
     return Scaffold(
       backgroundColor: Spots.base,
       body: Column(children: [
+        if (_connError != null) ..._connBanner(),
         Expanded(
           child: Row(children: [
             SideBar(
               api: _api,
               serverUrl: _normalize(_serverUrl),
               onEditServer: _editServer,
-              rootIndex: _root,
+              rootIndex: _root > 2 ? 2 : _root,
               onSelectRoot: (i) => setState(() {
                 _root = i;
                 _overlay.clear();
@@ -325,9 +328,8 @@ class _MusicShellState extends State<MusicShell> {
   }
 
   Widget _content() {
-    final showRoot = _overlay.isEmpty;
     return Stack(children: [
-      IndexedStack(index: showRoot ? _root : -1, children: [
+      IndexedStack(index: _overlay.isEmpty ? _root : -1, children: [
         HomeScreen(api: _api, onOpenPlaylist: (p) => setState(() => _overlay
           ..remove(p)
           ..add(p))),
@@ -351,98 +353,50 @@ class _MusicShellState extends State<MusicShell> {
     ]);
   }
 
-  // -------------------------------------------------------------- mobile
   Widget _mobile() {
     return Scaffold(
       backgroundColor: Spots.base,
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        toolbarHeight: 56,
-        title: Text(_root == 0
-            ? 'Home'
-            : _root == 1
-                ? 'Search'
-                : 'Staging',
-            style: const TextStyle(fontWeight: FontWeight.w800)),
-        actions: [
-          Stack(clipBehavior: Clip.none, children: [
-            IconButton(
-              tooltip: 'Settings',
-              icon: const Icon(Icons.settings_outlined,
-                  size: 22, color: Colors.white70),
-              onPressed: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (_) => SettingsScreen(
-                          api: _api,
-                          serverUrl: _normalize(_serverUrl),
-                          onServerChanged: (u) {
-                            setState(() {
-                              _serverUrl = u;
-                              _api =
-                                  ApiClient(baseUrl: _normalize(u));
-                              _overlay.clear();
-                            });
-                            widget.onServerChanged(u);
-                            _sidebarKey = UniqueKey();
-                            _checkConn();
-                          }))),
+      body: Column(children: [
+        if (_connError != null) ..._connBanner(),
+        Expanded(
+          child: Stack(children: [
+            IndexedStack(
+              index: _overlay.isEmpty ? _root : -1,
+              children: [
+                HomeScreen(api: _api, onOpenPlaylist: _openPlaylistMobile),
+                SearchScreen(
+                  api: _api,
+                  onStageStarted: (msg) => ScaffoldMessenger.of(context)
+                      .showSnackBar(SnackBar(content: Text(msg))),
+                ),
+                LibraryTab(
+                  api: _api,
+                  onOpenPlaylist: _openPlaylistMobile,
+                  onGotoStaging: () => setState(() => _root = 3),
+                ),
+                DownloadsScreen(api: _api),
+              ],
             ),
-            if (_connError != null)
-              Positioned(
-                right: 8,
-                top: 8,
-                child: Container(
-                  width: 9,
-                  height: 9,
-                  decoration: const BoxDecoration(
-                      color: Colors.redAccent,
-                      shape: BoxShape.circle),
+            if (_overlay.isNotEmpty)
+              Material(
+                color: Spots.base,
+                child: PlaylistDetailScreen(
+                  key: ValueKey(_overlay.last.name),
+                  api: _api,
+                  playlist: _overlay.last,
+                  onPop: () => setState(() => _overlay.removeLast()),
                 ),
               ),
-          ]),
-        ],
-      ),
-      body: Column(children: [
-        if (_connError != null)
-          Material(
-            color: Colors.red.shade900,
-            child: InkWell(
-              onTap: _checkConn,
-              child: Padding(
-                padding: const EdgeInsets.all(10),
-                child: Row(children: [
-                  const Icon(Icons.wifi_off,
-                      size: 16, color: Colors.white),
-                  const SizedBox(width: 8),
-                  Expanded(
-                      child: Text(_connError!,
-                          style:
-                              const TextStyle(fontSize: 12))),
-                  const Text('TAP TO RETRY',
-                      style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700)),
-                ]),
-              ),
-            ),
-          ),
-        Expanded(
-          child: IndexedStack(index: _root, children: [
-            HomeScreen(api: _api, onOpenPlaylist: _openPlaylistMobile),
-            SearchScreen(
-              api: _api,
-              onStageStarted: (msg) => ScaffoldMessenger.of(context)
-                  .showSnackBar(SnackBar(content: Text(msg))),
-            ),
-            DownloadsScreen(api: _api),
           ]),
         ),
         const MiniPlayerBar(),
       ]),
       bottomNavigationBar: NavigationBar(
-        selectedIndex: _root,
-        onDestinationSelected: (i) => setState(() => _root = i),
+        selectedIndex: _root > 2 ? 0 : (_root == 3 ? 3 : _root),
+        onDestinationSelected: (i) => setState(() {
+          _root = i;
+          _overlay.clear();
+        }),
         backgroundColor: Colors.black,
         indicatorColor: Colors.transparent,
         destinations: const [
@@ -455,6 +409,14 @@ class _MusicShellState extends State<MusicShell> {
               selectedIcon: Icon(Icons.search),
               label: 'Search'),
           NavigationDestination(
+              icon: Icon(Icons.library_music_outlined),
+              selectedIcon: Icon(Icons.library_music),
+              label: 'Library'),
+          NavigationDestination(
+              icon: Icon(Icons.library_music_outlined),
+              selectedIcon: Icon(Icons.library_music),
+              label: 'Library'),
+          NavigationDestination(
               icon: Icon(Icons.download_outlined),
               selectedIcon: Icon(Icons.download_rounded),
               label: 'Staging'),
@@ -464,12 +426,37 @@ class _MusicShellState extends State<MusicShell> {
   }
 
   void _openPlaylistMobile(PlaylistInfo p) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-          builder: (_) => PlaylistDetailScreen(api: _api, playlist: p)),
-    ).then((_) => setState(() => _sidebarKey = UniqueKey()));
+    setState(() {
+      _overlay
+        ..remove(p)
+        ..add(p);
+    });
   }
+
+  List<Widget> _connBanner() => [
+        Material(
+          color: Colors.red.shade900,
+          child: InkWell(
+            onTap: _checkConn,
+            child: Padding(
+              padding: const EdgeInsets.all(10),
+              child: Row(children: [
+                const Icon(Icons.wifi_off,
+                    size: 16, color: Colors.white),
+                const SizedBox(width: 8),
+                Expanded(
+                    child: Text(_connError!,
+                        style:
+                            const TextStyle(fontSize: 12))),
+                const Text('TAP TO RETRY',
+                    style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700)),
+              ]),
+            ),
+          ),
+        )
+      ];
 
   Future<void> _playPlaylist(PlaylistInfo p, {required bool shuffled}) async {
     try {
@@ -493,298 +480,5 @@ class _MusicShellState extends State<MusicShell> {
         width: 300,
         child: QueuePanel(
             onClose: () => setState(() => _queueOpen = false)));
-  }
-}
-
-/// Spotify-style queue: circle multi-select, right-click menu,
-/// drag-to-reorder, repeat + shuffle toggles.
-class QueuePanel extends StatefulWidget {
-  const QueuePanel({super.key, this.onClose});
-  final VoidCallback? onClose;
-
-  @override
-  State<QueuePanel> createState() => _QueuePanelState();
-}
-
-class _QueuePanelState extends State<QueuePanel> {
-  final Set<int> _selected = {};
-  final qp = QueuePlayer.instance;
-
-  void _toggleSel(int i) => setState(() {
-        _selected.contains(i) ? _selected.remove(i) : _selected.add(i);
-      });
-
-  void _jump(int i) {
-    if (_selected.isNotEmpty) setState(() => _selected.clear());
-    qp.jumpTo(i);
-  }
-
-  
-
-  Widget _circleContent(QueueItem it, bool current, bool sel, int i) {
-    if (current) {
-      return const Icon(Icons.graphic_eq, size: 15, color: Spots.green);
-    }
-    if (sel) {
-      return const Icon(Icons.check, size: 15, color: Spots.green);
-    }
-    final num = Text('${i + 1}',
-        style: const TextStyle(fontSize: 10.5, color: Colors.white38));
-    if (it.thumbUrl != null) {
-      return ClipOval(
-        child: Image.network(it.thumbUrl!,
-            width: 26,
-            height: 26,
-            fit: BoxFit.cover,
-            errorBuilder: (_, __, ___) => num),
-      );
-    }
-    return num;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: Listenable.merge([qp, qp.status]),
-      builder: (ctx, _) {
-        return Container(
-          color: Colors.black,
-          margin: const EdgeInsets.fromLTRB(8, 8, 8, 8),
-          padding: const EdgeInsets.fromLTRB(12, 12, 6, 12),
-          child: Column(children: [
-            Row(children: [
-              const Text('Queue',
-                  style:
-                      TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
-              const Spacer(),
-              Tooltip(
-                message: 'Repeat',
-                child: InkWell(
-                  onTap: qp.cycleRepeat,
-                  borderRadius: BorderRadius.circular(14),
-                  child: Padding(
-                    padding: const EdgeInsets.all(5),
-                    child: ValueListenableBuilder<RepeatMode>(
-                      valueListenable: qp.repeat,
-                      builder: (ctx, rep, _) => Icon(
-                          switch (rep) {
-                            RepeatMode.one => Icons.repeat_one,
-                            RepeatMode.all => Icons.repeat,
-                            _ => Icons.repeat_outlined,
-                          },
-                          size: 17,
-                          color: rep == RepeatMode.off
-                              ? Colors.white54
-                              : Spots.green),
-                    ),
-                  ),
-                ),
-              ),
-              Tooltip(
-                message: 'Shuffle queue',
-                child: InkWell(
-                  onTap: qp.toggleShuffle,
-                  borderRadius: BorderRadius.circular(14),
-                  child: Padding(
-                    padding: const EdgeInsets.all(5),
-                    child: ValueListenableBuilder<bool>(
-                      valueListenable: qp.shuffleEnabled,
-                      builder: (ctx, shuf, _) => Icon(Icons.shuffle,
-                          size: 17,
-                          color: shuf ? Spots.green : Colors.white54),
-                    ),
-                  ),
-                ),
-              ),
-              InkWell(
-                onTap: widget.onClose,
-                child: const Padding(
-                    padding: EdgeInsets.all(4),
-                    child:
-                        Icon(Icons.close, size: 18, color: Colors.white54)),
-              ),
-            ]),
-            const SizedBox(height: 8),
-            AnimatedSize(
-              duration: const Duration(milliseconds: 120),
-              child: _selected.isEmpty
-                  ? const SizedBox.shrink()
-                  : Row(children: [
-                      Text('${_selected.length} selected',
-                          style: const TextStyle(
-                              fontSize: 11.5, color: Colors.white54)),
-                      const Spacer(),
-                      TextButton.icon(
-                        style: TextButton.styleFrom(
-                            foregroundColor: Colors.white,
-                            textStyle: const TextStyle(fontSize: 12)),
-                        onPressed: () => setState(() {
-                          qp.playNext(Set.of(_selected));
-                          _selected.clear();
-                        }),
-                        icon: const Icon(Icons.low_priority, size: 15),
-                        label: const Text('Play next'),
-                      ),
-                      TextButton.icon(
-                        style: TextButton.styleFrom(
-                            foregroundColor: Colors.redAccent,
-                            textStyle: const TextStyle(fontSize: 12)),
-                        onPressed: () => setState(() {
-                          qp.removeAt(Set.of(_selected));
-                          _selected.clear();
-                        }),
-                        icon: const Icon(Icons.playlist_remove, size: 15),
-                        label: const Text('Remove'),
-                      ),
-                    ]),
-            ),
-            Expanded(
-              child: AnimatedBuilder(
-                animation: qp.revision,
-                builder: (ctx, _) {
-                  final cur2 = qp.queueIndex.value;
-                  if (qp.items.isEmpty) {
-                    return const Center(
-                        child: Text('Nothing in queue',
-                            style: TextStyle(color: Colors.white38)));
-                  }
-                  return ReorderableListView.builder(
-                    buildDefaultDragHandles: false,
-                    proxyDecorator: (child, idx, anim) => Material(
-                        color: Spots.elevated,
-                        elevation: 6,
-                        borderRadius: BorderRadius.circular(8),
-                        child: child),
-                    onReorder: (oldI, newI) {
-                      if (newI > oldI) newI -= 1;
-                      qp.reorder(oldI, newI);
-                    },
-                    itemCount: qp.items.length,
-                    itemBuilder: (ctx, i) {
-                      final it = qp.items[i];
-                      final current = i == cur2 && qp.hasTrack;
-                      final sel = _selected.contains(i);
-                      return ReorderableDragStartListener(
-                      key: ValueKey('${i}_${it.title}_${it.url}'),
-                      index: i,
-                      child: GestureDetector(
-                        onSecondaryTapUp: (d) =>
-                            _menu(context, d.globalPosition, i),
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: current
-                                ? Spots.green.withOpacity(.08)
-                                : sel
-                                    ? Colors.white.withOpacity(.06)
-                                    : null,
-                            borderRadius: BorderRadius.circular(6),
-                            border: Border.all(
-                                color: current
-                                    ? Spots.green.withOpacity(.35)
-                                    : Colors.transparent),
-                          ),
-                          child: ListTile(
-                            dense: true,
-                            visualDensity: VisualDensity.compact,
-                            leading: GestureDetector(
-                              onTap: () => _toggleSel(i),
-                              child: Container(
-                                width: 30,
-                                height: 30,
-                                alignment: Alignment.center,
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  border: Border.all(
-                                      color: sel
-                                          ? Spots.green
-                                          : Colors.white24,
-                                      width: 1.5),
-                                  color: sel
-                                      ? Spots.green.withOpacity(.2)
-                                      : Colors.transparent,
-                                ),
-                                child: _circleContent(it, current, sel, i),
-                              ),
-                            ),
-                            title: Text(it.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                    fontSize: 12.5,
-                                    fontWeight: current
-                                        ? FontWeight.w700
-                                        : FontWeight.w500,
-                                    color: current
-                                        ? Spots.green
-                                        : sel
-                                            ? Colors.white
-                                            : Colors.white70)),
-                            onTap: () => _jump(i),
-                          ),
-                        ),
-                      ),
-                    );
-                  },
-                );
-              }),
-            ),
-            const Padding(
-              padding: EdgeInsets.only(top: 4, left: 4),
-              child: Text('Auto-adds more when the queue runs out',
-                  style: TextStyle(fontSize: 10.5, color: Colors.white38)),
-            ),
-          ]),
-        );
-      },
-    );
-  }
-
-  /// Right-click: acts on the clicked row when nothing (or only it) is
-  /// selected; otherwise on the whole selection.
-  Future<void> _menu(BuildContext ctx, Offset pos, int rowIdx) async {
-    final targets =
-        _selected.isEmpty || _selected.length == 1 && _selected.contains(rowIdx)
-            ? <int>{rowIdx}
-            : Set.of(_selected);
-    final isSingle = targets.length == 1 && targets.first == rowIdx;
-    if (!isSingle) setState(() {}); // show menu over selection
-    final action = await showMenu<String>(
-      context: ctx,
-      position: RelativeRect.fromLTRB(pos.dx, pos.dy, pos.dx + 1, pos.dy + 1),
-      color: Spots.elevated,
-      items: const [
-        PopupMenuItem(
-            value: 'play',
-            child: ListTile(
-                dense: true,
-                leading: Icon(Icons.play_arrow, size: 18),
-                title: Text('Play'))),
-        PopupMenuItem(
-            value: 'next',
-            child: ListTile(
-                dense: true,
-                leading: Icon(Icons.low_priority, size: 18),
-                title: Text('Play next'))),
-        PopupMenuItem(
-            value: 'remove',
-            child: ListTile(
-                dense: true,
-                leading: Icon(Icons.playlist_remove, size: 18),
-                title: Text('Remove from queue'))),
-      ],
-    );
-    if (!mounted || action == null) return;
-    setState(() {
-      switch (action) {
-        case 'play':
-          _selected.clear();
-          qp.jumpTo(rowIdx);
-        case 'next':
-          qp.playNext(targets);
-        case 'remove':
-          qp.removeAt(targets);
-      }
-      _selected.clear(); // always drop selection after an action
-    });
   }
 }
