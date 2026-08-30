@@ -1,0 +1,4 @@
+# NASMusic server dependencies
+ytmusicapi>=1.0
+yt-dlp
+mutagen

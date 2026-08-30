@@ -1,91 +1,63 @@
 import 'package:flutter/material.dart';
 
-/// Spotify-flavoured design tokens.
+/// Dark spot-themed palette used across the app.
 class Spots {
-  static const green = Color(0xFF1DB954);
-  static const greenDark = Color(0xFF169C46);
-  static const base = Color(0xFF121212);
-  static const elevated = Color(0xFF1F1F1F);
-  static const subtle = Color(0xFF2A2A2A);
+  static const Color green = Color(0xFF1DB954);
+  static const Color base = Color(0xFF0E0E13);
+  static const Color elevated = Color(0xFF1A1A22);
+  static const Color subtle = Color(0xFF26262F);
 
   static ThemeData dark() {
-    final cs = ColorScheme.fromSeed(
+    final scheme = ColorScheme.fromSeed(
       seedColor: green,
       brightness: Brightness.dark,
       surface: base,
     );
     return ThemeData(
       useMaterial3: true,
-      colorScheme: cs,
+      colorScheme: scheme.copyWith(
+        primary: green,
+        surface: base,
+        onSurface: Colors.white.withValues(alpha: .92),
+      ),
       scaffoldBackgroundColor: base,
+      navigationBarTheme: const NavigationBarThemeData(
+        backgroundColor: elevated,
+        height: 62,
+      ),
       appBarTheme: const AppBarTheme(
-        backgroundColor: Colors.transparent,
+        backgroundColor: base,
         elevation: 0,
         centerTitle: false,
       ),
-      cardTheme: CardThemeData(
-        color: elevated,
-        elevation: 0,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      ),
-      listTileTheme: ListTileThemeData(
-        iconColor: cs.onSurface.withOpacity(.87),
-        minLeadingWidth: 0,
-      ),
-      navigationBarTheme: NavigationBarThemeData(
-        backgroundColor: base,
-        indicatorColor: Colors.transparent,
-        height: 64,
-        iconTheme: WidgetStateProperty.resolveWith((states) => IconThemeData(
-              size: 26,
-              color: states.contains(WidgetState.selected)
-                  ? Colors.white
-                  : Colors.white54,
-            )),
-        labelTextStyle: WidgetStateProperty.resolveWith((states) =>
-            TextStyle(
-                fontSize: 10.5,
-                fontWeight: FontWeight.w600,
-                color: states.contains(WidgetState.selected)
-                    ? Colors.white
-                    : Colors.white54)),
-      ),
       snackBarTheme: const SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
+        backgroundColor: elevated,
       ),
-      dividerTheme: DividerThemeData(color: Colors.white12),
-      sliderTheme: SliderThemeData(
-        activeTrackColor: green,
-        thumbColor: Colors.white,
-        inactiveTrackColor: subtle,
-        trackHeight: 3,
+      dialogTheme: DialogThemeData(
+        backgroundColor: elevated,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       ),
-      filledButtonTheme: FilledButtonThemeData(
-        style: FilledButton.styleFrom(
-          backgroundColor: green,
-          foregroundColor: Colors.black,
-          textStyle: const TextStyle(fontWeight: FontWeight.w700),
-        ),
+      bottomSheetTheme: const BottomSheetThemeData(
+        backgroundColor: elevated,
       ),
     );
   }
 
-  /// Deterministic gradient cover for a given name.
   static LinearGradient coverGradient(String seed) {
-    final hues = [
-      [const Color(0xFF1f4037), const Color(0xFF99f2c8)],
-      [const Color(0xFF41295a), const Color(0xFF2F0743)],
-      [const Color(0xFF373B44), const Color(0xFF4286f4)],
-      [const Color(0xFF603813), const Color(0xFFb29f94)],
-      [const Color(0xFF16222A), const Color(0xFF3A6073)],
-      [const Color(0xFF5f2c82), const Color(0xFF49a09d)],
+    const palette = <List<Color>>[
+      [Color(0xFF1B4965), Color(0xFF15202B)],
+      [Color(0xFF2E6E4E), Color(0xFF14261C)],
+      [Color(0xFF6E3A2E), Color(0xFF241512)],
+      [Color(0xFF5A3A6E), Color(0xFF1C1524)],
+      [Color(0xFF6E5A2E), Color(0xFF221C12)],
+      [Color(0xFF1E5A6E), Color(0xFF102027)],
     ];
-    var h = 0;
-    for (final c in seed.codeUnits) {
-      h = (h * 31 + c) & 0x7fffffff;
-    }
-    final pair = hues[h % hues.length];
+    final colors = palette[seed.hashCode.abs() % palette.length];
     return LinearGradient(
-        colors: pair, begin: Alignment.topLeft, end: Alignment.bottomRight);
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+      colors: colors,
+    );
   }
 }
