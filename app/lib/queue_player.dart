@@ -168,6 +168,23 @@ bool skinShowsPlaying(PlayerState? state, {required bool lastPlaying}) {
   return state == PlayerState.playing;
 }
 
+/// Watchdog comparator (pure, unit-tested): true when the rendered skin
+/// disagrees with direct native truth — catches stream-subscription death,
+/// dual-engine divergence, stale selector, whatever the cause.
+bool skinMismatch({required bool skinShows, required bool nativePlaying}) =>
+    skinShows != nativePlaying;
+
+/// skin-mismatch log line: kind/state/expected for logClientError.
+String skinMismatchMessage({
+  required bool skinShows,
+  required bool nativePlaying,
+  required String engine,
+  required String handler,
+}) =>
+    'skin=${skinShows ? 'playing' : 'paused'} '
+    'expected=${nativePlaying ? 'playing' : 'paused'} '
+    'engine=$engine handler=$handler';
+
 /// App-wide playback queue with shuffle — the "streaming engine".
 class QueuePlayer {
   QueuePlayer._() {

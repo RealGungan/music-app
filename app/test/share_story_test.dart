@@ -217,9 +217,30 @@ void main() {
           link: 'https://x', caption: 'cap');
       expect(cp.ok, false);
       expect(cp.detail, contains('exception'));
+      final saved = await saveCoverCopyCaptionDetailed(caption: 'cap');
+      expect(saved.ok, false);
+      expect(saved.detail, contains('exception'));
     } finally {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(ch, null);
     }
+  });
+
+  test('unresolvable gate: both no-resolve only (Morphe/modded default)', () {
+    const noPkg =
+        'fail: launch-failed err=no IG package found artExists=true artSize=42';
+    expect(
+      instagramTargetsUnresolvable(storyDetail: noPkg, directDetail: noPkg),
+      true,
+    );
+    expect(
+      instagramTargetsUnresolvable(storyDetail: 'ok', directDetail: noPkg),
+      false,
+    );
+    expect(
+      instagramTargetsUnresolvable(storyDetail: noPkg, directDetail: 'ok'),
+      false,
+    );
+    expect(instagramOpenToast, contains('open Instagram'));
   });
 }

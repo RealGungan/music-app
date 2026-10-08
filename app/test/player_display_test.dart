@@ -3,7 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nasmusic/now_playing.dart' show durationLabel;
 import 'package:nasmusic/playback_engine.dart';
-import 'package:nasmusic/queue_player.dart' show QueuePlayer, skinShowsPlaying;
+import 'package:nasmusic/queue_player.dart'
+    show QueuePlayer, skinMismatch, skinMismatchMessage, skinShowsPlaying;
 
 String _fmt(Duration d) {
   final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
@@ -77,6 +78,26 @@ void main() {
       expect(seen.last, PlayerState.paused);
       expect(skinShowsPlaying(seen.last, lastPlaying: true), false);
       await sub.cancel();
+    });
+
+    test('watchdog: mismatch fires only on skin vs direct-truth split', () {
+      expect(skinMismatch(skinShows: true, nativePlaying: true), false);
+      expect(skinMismatch(skinShows: false, nativePlaying: false), false);
+      expect(skinMismatch(skinShows: true, nativePlaying: false), true);
+      expect(skinMismatch(skinShows: false, nativePlaying: true), true);
+    });
+
+    test('watchdog log carries kind/state/expected', () {
+      final m = skinMismatchMessage(
+        skinShows: true,
+        nativePlaying: false,
+        engine: 'playing',
+        handler: 'paused',
+      );
+      expect(m, contains('playing'));
+      expect(m, contains('paused'));
+      expect(m, contains('skin='));
+      expect(m, contains('expected='));
     });
   });
 }

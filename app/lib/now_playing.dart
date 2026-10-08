@@ -174,6 +174,10 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
   final Map<String, ({String ytLink, String spLink, String subject})>
   _shareCache = {};
   Timer? _truthPoll;
+  // Last rendered play/pause skin (set during build): the 1s watchdog
+  // compares it against direct native truth (qp.playing via getState reply,
+  // NOT the stream object) and forces a rebuild + logs on mismatch.
+  bool? _lastSkinPlaying;
 
   @override
   void initState() {
@@ -203,16 +207,31 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
     qp.currentTitle.addListener(_prewarmShare);
     qp.currentTitle.addListener(_clearSeekStateOnTrackChange);
     _prewarmShare();
-    // Visible-screen truth poll (500ms): a native MediaPlayer-JNI pause on
-    // focus loss fires outside Dart while the engine still shows playing
-    // (skin lie + double-tap). pollVisibleTruth re-asks handler truth;
-    // the state-stream reply repaints the icon. Bg-gated (resumed only).
-    _truthPoll = Timer.periodic(const Duration(milliseconds: 500), (_) {
+    // Watchdog (1s, visible screen only): re-ask handler truth via getState,
+    // then compare the RENDERED skin vs DIRECT native state (qp.playing — not
+    // the stream object). On mismatch force a rebuild + log skin-mismatch
+    // (kind/state/expected). Catches stream-subscription death, dual-engine
+    // divergence, stale selector — whatever the cause. Bg-gated (resumed only).
+    _truthPoll = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
         return;
       }
       qp.pollVisibleTruth();
+      final skin = _lastSkinPlaying;
+      if (skin == null) return;
+      final native = qp.playing;
+      if (!skinMismatch(skinShows: skin, nativePlaying: native)) return;
+      qp.report(
+        'skin-mismatch',
+        skinMismatchMessage(
+          skinShows: skin,
+          nativePlaying: native,
+          engine: qp.engineStateName,
+          handler: qp.handlerStateName,
+        ),
+      );
+      if (mounted) setState(() {});
     });
   }
 
@@ -856,25 +875,33 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
                                   : PlayerState.paused,
                               builder: (_, snap) => ListenableBuilder(
                                 listenable: qp.stateSyncing,
-                                builder: (_, __) => IconButton(
-                                  visualDensity: VisualDensity.compact,
-                                  constraints: const BoxConstraints(
-                                      minWidth: 48, minHeight: 48),
-                                  iconSize: 60,
-                                  color: Colors.white,
-                                  onPressed: (_edit || qp.stateSyncing.value)
-                                      ? null
-                                      : () => qp.resumeOrPause(),
-                                  // Sole truth = native state-stream; cached
-                                  // qp.playing only seeds the first frame.
-                                  icon: Icon(
-                                    skinShowsPlaying(snap.data,
-                                            lastPlaying: qp.playing)
-                                        ? Icons.pause_circle_filled
-                                        : Icons.play_circle_fill,
+                                builder: (_, __) {
+                                  // Record the RENDERED skin for the 1s watchdog
+                                  // (field write during build only — no setState).
+                                  final shows = skinShowsPlaying(
+                                    snap.data,
+                                    lastPlaying: qp.playing,
+                                  );
+                                  _lastSkinPlaying = shows;
+                                  return IconButton(
+                                    visualDensity: VisualDensity.compact,
+                                    constraints: const BoxConstraints(
+                                        minWidth: 48, minHeight: 48),
+                                    iconSize: 60,
                                     color: Colors.white,
-                                  ),
-                                ),
+                                    onPressed: (_edit || qp.stateSyncing.value)
+                                        ? null
+                                        : () => qp.resumeOrPause(),
+                                    // Sole truth = native state-stream; cached
+                                    // qp.playing only seeds the first frame.
+                                    icon: Icon(
+                                      shows
+                                          ? Icons.pause_circle_filled
+                                          : Icons.play_circle_fill,
+                                      color: Colors.white,
+                                    ),
+                                  );
+                                },
                               ),
                             ),
                     ),
@@ -1466,6 +1493,11 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
       shareTrace('resolve cached=true');
     }
     if (!mounted) return;
+    final payload = p;
+    if (payload == null) {
+      shareTrace('resolve null payload');
+      return;
+    }
     if (target == _ShareTarget.instagram) {
       // Tier 1 Stories (minimal background image, no sticker) → tier 2 direct
       // share (IG itself opens) → tier 3 generic sheet → clipboard. A user
@@ -1474,7 +1506,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
       // + art exists/size + authority) to User errors so one retest reveals
       // the cause.
       final api = ServerContext.of(context);
-      final story = await shareStoryDetailed(link: p.spLink);
+      final story = await shareStoryDetailed(link: payload.spLink);
       if (!story.ok) {
         unawaited(
           api.logClientError('share-ig-story', '${cur.title} ${story.detail}'),
@@ -1484,7 +1516,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
         DebugInfo.share('ig-story', '');
         return;
       }
-      final caption = storyCaption(p.subject, p.spLink);
+      final caption = storyCaption(payload.subject, payload.spLink);
       final direct = await shareDirectDetailed(text: caption);
       if (!direct.ok) {
         unawaited(
@@ -1495,6 +1527,54 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
         );
       }
       if (instagramGenericNeeded(storyOk: story.ok, directOk: direct.ok)) {
+        // Unresolvable Stories/direct targets (Morphe/modded): DEFAULT to
+        // save-cover + copy-caption + toast, WITHOUT auto-launching doomed
+        // intents (they just flash IG open/closed). Launch only on explicit
+        // retry tap below.
+        if (instagramTargetsUnresolvable(
+          storyDetail: story.detail,
+          directDetail: direct.detail,
+        )) {
+          unawaited(
+            api.logClientError(
+              'share-ig-unresolvable',
+              '${cur.title} story=${story.detail} direct=${direct.detail}',
+            ),
+          );
+          final saved = await saveCoverCopyCaptionDetailed(caption: caption);
+          if (!saved.ok) {
+            unawaited(
+              api.logClientError(
+                'share-ig-save',
+                '${cur.title} ${saved.detail}',
+              ),
+            );
+          }
+          await Clipboard.setData(ClipboardData(text: caption));
+          DebugInfo.share('ig-saved', saved.detail);
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(tr(instagramOpenToast)),
+              duration: const Duration(seconds: 4),
+              action: SnackBarAction(
+                label: tr('Retry'),
+                onPressed: () async {
+                  // Explicit retry tap ONLY: now the doomed launches may run.
+                  final fb = await shareInstagramFallbackDetailed(
+                    caption: caption,
+                  );
+                  if (fb.ok) return;
+                  await shareCopyLinkOpenInstagramDetailed(
+                    link: payload.spLink,
+                    caption: caption,
+                  );
+                },
+              ),
+            ),
+          );
+          return;
+        }
         // Final tier: save cover to gallery + copy caption + launch IG
         // (always works, no fragile API) before the generic sheet.
         final fb = await shareInstagramFallbackDetailed(caption: caption);
@@ -1510,7 +1590,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
         // Always-works tier: copy link + open Instagram (no artwork needed —
         // survives Morphe builds that reject the art intents, or no cover).
         final cp = await shareCopyLinkOpenInstagramDetailed(
-            link: p.spLink, caption: caption);
+            link: payload.spLink, caption: caption);
         if (!cp.ok) {
           unawaited(
             api.logClientError(
@@ -1556,12 +1636,12 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
           );
           return;
         }
-        await _shipShare(context, link: caption, subject: p.subject);
+        await _shipShare(context, link: caption, subject: payload.subject);
       }
       return;
     }
-    final link = target == _ShareTarget.spotify ? p.spLink : p.ytLink;
-    await _shipShare(context, link: link, subject: p.subject);
+    final link = target == _ShareTarget.spotify ? payload.spLink : payload.ytLink;
+    await _shipShare(context, link: link, subject: payload.subject);
   }
 
   Future<void> _shipShare(
