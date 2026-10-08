@@ -51,8 +51,7 @@ class ShareTierResult {
 }
 
 /// True when a native tier reply means success ('ok' or legacy bool true).
-bool shareTierOk(Object? sent) =>
-    sent == true || sent == 'ok' || sent == 'OK';
+bool shareTierOk(Object? sent) => sent == true || sent == 'ok' || sent == 'OK';
 
 /// Platform call with detail: returns ok + native diagnostic string.
 Future<ShareTierResult> shareStoryDetailed({required String link}) async {
@@ -90,9 +89,15 @@ Future<ShareTierResult> shareDirectDetailed({required String text}) async {
 }
 
 /// True when a native IG detail means "Instagram can't handle a share"
-/// (neither full nor Lite resolved) — the chooser row must be gated, not
-/// fallen through to the generic sheet silently.
-bool instagramNoResolve(String detail) => detail.contains('no-resolve');
+/// (neither full nor Lite launched). Launch-first: the native side tries
+/// startActivity per package and reports the caught exception, so a missing
+/// IG surfaces as launch-failed + ActivityNotFoundException (the legacy
+/// no-resolve string is kept for older builds). The chooser row is only
+/// ever labeled by this, never hard-blocked — the tiers are always attempted.
+bool instagramNoResolve(String detail) =>
+    detail.contains('no-resolve') ||
+    (detail.contains('launch-failed') &&
+        detail.contains('ActivityNotFoundException'));
 
 /// Share-time gate: true when Instagram can handle a share on this device.
 /// Fail-open (true) on desktop / errors so the row never vanishes spuriously.

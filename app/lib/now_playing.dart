@@ -23,6 +23,18 @@ import 'widgets.dart';
 /// Which service a shared song link should point at.
 enum _ShareTarget { ytmusic, spotify, instagram }
 
+/// Position to DISPLAY given a committed seek target. Pure so unit tests pin
+/// it: hold the seek target while the engine is still >2s away on either
+/// side (forward seeks lag below it, backward seeks linger above it) and for
+/// at most 3s — otherwise the readout flashes old -> new -> settled.
+int displayMs(int posMs, int? seekTargetMs, int seekAtMs, int nowMs) {
+  final t = seekTargetMs;
+  if (t == null) return posMs;
+  final far = (posMs < t - 2000) || (posMs > t + 2000);
+  if (nowMs - seekAtMs > 3000 || !far) return posMs;
+  return t;
+}
+
 /// Transition route for the Now Playing screen: fades the player content in
 /// over a soft dim, while the album art itself flies in from the mini
 /// player's thumbnail via a shared Hero ([kPlayerArtHeroTag]) — a smooth
@@ -118,16 +130,14 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
   /// catching up, else the real engine position.
   int _shownMs(int posMs) {
     final t = _seekTargetMs;
-    if (t == null) return posMs;
-    // Hold the target while the engine is more than 2s away on EITHER
-    // side (forward seeks lag below it, backward seeks linger above
-    // it) — otherwise the readout flashes old -> new -> settled.
-    final far = (posMs < t - 2000) || (posMs > t + 2000);
-    if (DateTime.now().millisecondsSinceEpoch - _seekAtMs > 3000 || !far) {
-      _seekTargetMs = null;
-      return posMs;
-    }
-    return t;
+    final shown = displayMs(
+      posMs,
+      t,
+      _seekAtMs,
+      DateTime.now().millisecondsSinceEpoch,
+    );
+    if (shown != t) _seekTargetMs = null;
+    return shown;
   }
 
   /// Record a committed seek (scrub release / wave release / tap).
@@ -155,7 +165,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
   /// share button opens the chooser instantly instead of waiting on the
   /// network resolve of the YouTube video id.
   final Map<String, ({String ytLink, String spLink, String subject})>
-      _shareCache = {};
+  _shareCache = {};
 
   @override
   void initState() {
@@ -183,12 +193,22 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
       }
     });
     qp.currentTitle.addListener(_prewarmShare);
+    qp.currentTitle.addListener(_clearSeekStateOnTrackChange);
     _prewarmShare();
+  }
+
+  /// Track switch invalidates any in-flight scrub/seek-target display state:
+  /// holding the PREVIOUS song's seek target (or finger position) into the
+  /// new song flashes its timestamp on the fresh zeroed bar.
+  void _clearSeekStateOnTrackChange() {
+    _scrubMs = null;
+    _seekTargetMs = null;
   }
 
   @override
   void dispose() {
     qp.currentTitle.removeListener(_prewarmShare);
+    qp.currentTitle.removeListener(_clearSeekStateOnTrackChange);
     _artController.dispose();
     _closeCtrl.dispose();
     _queueCtrl.dispose();
@@ -437,8 +457,10 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
     // Height currently on screen (the finger may have pulled it partway up),
     // so the grow tween starts seamlessly instead of jumping.
     final releaseH =
-        (_queueTargetH - _queueDrag.clamp(-_queueFullH, _queueFullH))
-            .clamp(96.0, _queueFullH);
+        (_queueTargetH - _queueDrag.clamp(-_queueFullH, _queueFullH)).clamp(
+          96.0,
+          _queueFullH,
+        );
     setState(() {
       _queueDragging = false;
       if (v < -350 || (_queueDrag < 0 && _queueDrag < -40)) {
@@ -481,9 +503,10 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
         // Mid↔full grows ease via the size tween instead of jumping targets.
         final h = _queueSizeAnimating
             ? _queueSizeFrom +
-                (_queueSizeTo - _queueSizeFrom) *
-                    Curves.easeOutCubic.transform(
-                        _queueSizeCtrl.value.clamp(0.0, 1.0))
+                  (_queueSizeTo - _queueSizeFrom) *
+                      Curves.easeOutCubic.transform(
+                        _queueSizeCtrl.value.clamp(0.0, 1.0),
+                      )
             : _queueTargetH;
         final hidden = 1 - _queueCtrl.value;
         final dragRemainder = _queueDragging
@@ -502,7 +525,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
             Positioned.fill(
               child: GestureDetector(
                 onTap: _closeQueue,
-onVerticalDragStart: _queueDragging ? null : _queueDragStart,
+                onVerticalDragStart: _queueDragging ? null : _queueDragStart,
                 onVerticalDragUpdate: _queueDragUpdate,
                 onVerticalDragEnd: _queueDragEnd,
                 onVerticalDragCancel: () =>
@@ -521,8 +544,7 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
                 child: _QueueSheet(
                   qp: qp,
                   heightPx: dragHeight,
-                  onVerticalDragStart:
-                      _queueDragging ? null : _queueDragStart,
+                  onVerticalDragStart: _queueDragging ? null : _queueDragStart,
                   onVerticalDragUpdate: _queueDragUpdate,
                   onVerticalDragEnd: _queueDragEnd,
                 ),
@@ -611,93 +633,120 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
                   child: _MetaSection(api: ServerContext.of(context)),
                 ),
                 const SizedBox(height: 16),
-                ValueListenableBuilder<Duration>(
-                  valueListenable: qp.position,
-                  builder: (_, pos, __) => ValueListenableBuilder<Duration>(
-                    valueListenable: qp.trackDuration,
-                    builder: (_, dur, ___) {
-                      final liveMs = _shownMs(pos.inMilliseconds);
-                      final progress = _scrubMs != null &&
-                              dur > Duration.zero
-                          // Scrubbing: pin the bar to the finger (same
-                          // flash reason as the time label below).
-                          ? (_scrubMs! / dur.inMilliseconds).clamp(0.0, 1.0)
-                          : (dur > Duration.zero)
-                              ? liveMs
-                                    .clamp(0, dur.inMilliseconds)
-                                    .toDouble() /
-                                  dur.inMilliseconds
-                              : 0.0;
-                      // Progress style picks the Slider or SoundCloud-style
-                      // waves (edit-layout setting, persisted in UiStore).
-                      return ListenableBuilder(
-                        listenable: UiStore.instance,
-                        builder: (_, __) =>
-                            UiStore.instance.progressStyle == 'waves'
-                            ? _WaveSeekBar(
-                                qp: qp,
-                                edit: _edit,
-                                fraction: progress.clamp(0.0, 1.0),
-                                onSeek: (ms) => _commitSeek(ms),
-                              )
-                            : Slider(
-                                value: (_shownMs(pos.inMilliseconds)
-                                        .toDouble())
-                                    .clamp(
-                                        0.0,
-                                        (dur > Duration.zero)
-                                            ? dur.inMilliseconds.toDouble()
-                                            : 1.0),
-                                max: (dur > Duration.zero)
-                                    ? dur.inMilliseconds.toDouble()
-                                    : 1,
-                                activeColor: Spots.green,
-                                inactiveColor: Spots.subtle,
-                                onChanged: _edit
-                                    ? (_) {}
-                                    : (v) => setState(
-                                        () => _scrubMs = v),
-                                onChangeEnd: (v) {
-                                  final ms = v.round();
-                                  setState(() => _scrubMs = null);
-                                  _commitSeek(ms);
+                // Track-keyed stamp: the slider + both time labels rebuild as
+                // a FRESH subtree on every track switch, so a stale position
+                // or duration value can never flash the previous song's stamp.
+                // The engine zeroes both notifiers synchronously before
+                // publishing the new title, so the fresh build reads 0:00.
+                ValueListenableBuilder<String>(
+                  valueListenable: qp.currentTitle,
+                  builder: (_, trackId, __) => KeyedSubtree(
+                    key: ValueKey(trackId),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        ValueListenableBuilder<Duration>(
+                          valueListenable: qp.position,
+                          builder: (_, pos, __) =>
+                              ValueListenableBuilder<Duration>(
+                                valueListenable: qp.trackDuration,
+                                builder: (_, dur, ___) {
+                                  final liveMs = _shownMs(pos.inMilliseconds);
+                                  final progress =
+                                      _scrubMs != null && dur > Duration.zero
+                                      // Scrubbing: pin the bar to the finger (same
+                                      // flash reason as the time label below).
+                                      ? (_scrubMs! / dur.inMilliseconds).clamp(
+                                          0.0,
+                                          1.0,
+                                        )
+                                      : (dur > Duration.zero)
+                                      ? liveMs
+                                                .clamp(0, dur.inMilliseconds)
+                                                .toDouble() /
+                                            dur.inMilliseconds
+                                      : 0.0;
+                                  // Progress style picks the Slider or SoundCloud-style
+                                  // waves (edit-layout setting, persisted in UiStore).
+                                  return ListenableBuilder(
+                                    listenable: UiStore.instance,
+                                    builder: (_, __) =>
+                                        UiStore.instance.progressStyle ==
+                                            'waves'
+                                        ? _WaveSeekBar(
+                                            qp: qp,
+                                            edit: _edit,
+                                            fraction: progress.clamp(0.0, 1.0),
+                                            onSeek: (ms) => _commitSeek(ms),
+                                          )
+                                        : Slider(
+                                            value:
+                                                (_shownMs(
+                                                  pos.inMilliseconds,
+                                                ).toDouble()).clamp(
+                                                  0.0,
+                                                  (dur > Duration.zero)
+                                                      ? dur.inMilliseconds
+                                                            .toDouble()
+                                                      : 1.0,
+                                                ),
+                                            max: (dur > Duration.zero)
+                                                ? dur.inMilliseconds.toDouble()
+                                                : 1,
+                                            activeColor: Spots.green,
+                                            inactiveColor: Spots.subtle,
+                                            onChanged: _edit
+                                                ? (_) {}
+                                                : (v) => setState(
+                                                    () => _scrubMs = v,
+                                                  ),
+                                            onChangeEnd: (v) {
+                                              final ms = v.round();
+                                              setState(() => _scrubMs = null);
+                                              _commitSeek(ms);
+                                            },
+                                          ),
+                                  );
                                 },
                               ),
-                      );
-                    },
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  child: Row(
-                    children: [
-                      ValueListenableBuilder<Duration>(
-                        valueListenable: qp.position,
-                        builder: (_, p, __) => Text(
-                          // While scrubbing or waiting for a committed
-                          // seek to land, show the target so the readout
-                          // never flashes back to the old timestamp.
-                          _fmt(Duration(
-                              milliseconds:
-                                  _shownMs(p.inMilliseconds))),
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: Colors.white54,
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          child: Row(
+                            children: [
+                              ValueListenableBuilder<Duration>(
+                                valueListenable: qp.position,
+                                builder: (_, p, __) => Text(
+                                  // While scrubbing or waiting for a committed
+                                  // seek to land, show the target so the readout
+                                  // never flashes back to the old timestamp.
+                                  _fmt(
+                                    Duration(
+                                      milliseconds: _shownMs(p.inMilliseconds),
+                                    ),
+                                  ),
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.white54,
+                                  ),
+                                ),
+                              ),
+                              const Spacer(),
+                              ValueListenableBuilder<Duration>(
+                                valueListenable: qp.trackDuration,
+                                builder: (_, d, __) => Text(
+                                  _fmt(d),
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.white54,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      ),
-                      const Spacer(),
-                      ValueListenableBuilder<Duration>(
-                        valueListenable: qp.trackDuration,
-                        builder: (_, d, __) => Text(
-                          _fmt(d),
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: Colors.white54,
-                          ),
-                        ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -716,17 +765,22 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
                                 decoration: candidate.isNotEmpty
                                     ? BoxDecoration(
                                         border: Border.all(
-                                            color: Spots.green, width: 2),
-                                        borderRadius:
-                                            BorderRadius.circular(20),
+                                          color: Spots.green,
+                                          width: 2,
+                                        ),
+                                        borderRadius: BorderRadius.circular(20),
                                       )
                                     : null,
                                 child: _transportButton(
-                                    UiStore.instance.transportLeft, _edit),
+                                  UiStore.instance.transportLeft,
+                                  _edit,
+                                ),
                               ),
                             )
                           : _transportButton(
-                              UiStore.instance.transportLeft, _edit),
+                              UiStore.instance.transportLeft,
+                              _edit,
+                            ),
                     ),
                     IconButton(
                       visualDensity: VisualDensity.compact,
@@ -747,7 +801,7 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
                                 ),
                               ),
                             )
-                            : StreamBuilder<PlayerState>(
+                          : StreamBuilder<PlayerState>(
                               stream: qp.stateStream,
                               initialData: qp.playing
                                   ? PlayerState.playing
@@ -788,17 +842,22 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
                                 decoration: candidate.isNotEmpty
                                     ? BoxDecoration(
                                         border: Border.all(
-                                            color: Spots.green, width: 2),
-                                        borderRadius:
-                                            BorderRadius.circular(20),
+                                          color: Spots.green,
+                                          width: 2,
+                                        ),
+                                        borderRadius: BorderRadius.circular(20),
                                       )
                                     : null,
                                 child: _transportButton(
-                                    UiStore.instance.transportRight, _edit),
+                                  UiStore.instance.transportRight,
+                                  _edit,
+                                ),
                               ),
                             )
                           : _transportButton(
-                              UiStore.instance.transportRight, _edit),
+                              UiStore.instance.transportRight,
+                              _edit,
+                            ),
                     ),
                     const SizedBox(width: 8),
                   ],
@@ -876,11 +935,14 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
           final order = UiStore.instance.playerOrder;
           final fixed = {
             UiStore.instance.transportLeft,
-            UiStore.instance.transportRight
+            UiStore.instance.transportRight,
           };
           final ids = List<String>.of(order.where((k) => !fixed.contains(k)))
-            ..addAll(buttons.keys
-                .where((k) => !order.contains(k) && !fixed.contains(k)));
+            ..addAll(
+              buttons.keys.where(
+                (k) => !order.contains(k) && !fixed.contains(k),
+              ),
+            );
           return ReorderableListView.builder(
             scrollDirection: Axis.horizontal,
             buildDefaultDragHandles: false,
@@ -913,10 +975,7 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
                 // holding still lifts the button to drop on a flank slot.
                 child: LongPressDraggable<String>(
                   data: id,
-                  feedback: Material(
-                    color: Colors.transparent,
-                    child: btn,
-                  ),
+                  feedback: Material(color: Colors.transparent, child: btn),
                   childWhenDragging: Opacity(opacity: .3, child: btn),
                   child: btn,
                 ),
@@ -1046,11 +1105,12 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
     // persisted order still lists them).
     final fixed = {
       UiStore.instance.transportLeft,
-      UiStore.instance.transportRight
+      UiStore.instance.transportRight,
     };
     final ids = List<String>.of(order.where((k) => !fixed.contains(k)))
-      ..addAll(buttons.keys
-          .where((k) => !order.contains(k) && !fixed.contains(k)));
+      ..addAll(
+        buttons.keys.where((k) => !order.contains(k) && !fixed.contains(k)),
+      );
     return [
       for (final id in ids)
         if (buttons[id] != null) buttons[id]!(),
@@ -1149,13 +1209,16 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
   void _prewarmShare() {
     final cur = qp.current;
     if (cur == null || _shareCache.containsKey(cur.title)) return;
-    _resolveShare(cur).then((p) {
-      if (qp.current?.title == cur.title) _shareCache[cur.title] = p;
-    }).catchError((_) {});
+    _resolveShare(cur)
+        .then((p) {
+          if (qp.current?.title == cur.title) _shareCache[cur.title] = p;
+        })
+        .catchError((_) {});
   }
 
   Future<({String ytLink, String spLink, String subject})> _resolveShare(
-      QueueItem cur) async {
+    QueueItem cur,
+  ) async {
     var artist = cur.lyricsArtist ?? '';
     var title = cur.lyricsTitle ?? '';
     if (artist.isEmpty && title.isEmpty) {
@@ -1177,11 +1240,7 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
       _resolveYtShareLink(cur, a, t),
       _resolveSpotifyShareLink(a, t),
     ]);
-    return (
-      ytLink: results[0],
-      spLink: results[1],
-      subject: '$a - $t'.trim(),
-    );
+    return (ytLink: results[0], spLink: results[1], subject: '$a - $t'.trim());
   }
 
   /// YouTube link: prefer the track's own resolved video id; only fall back to
@@ -1225,13 +1284,14 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
   Future<void> _shareCurrent() async {
     final cur = qp.current;
     if (cur == null) return;
-    // Gate the IG row at share time: when neither IG package resolves, the
-    // row shows "not installed" and taps explain instead of silently
-    // dropping to the generic sheet (log-proven: resolve=false both pkgs).
+    // Label-only IG probe: when no IG package resolves, the row is greyed
+    // with "not installed" — but the tap STILL attempts the tiers
+    // (launch-first: blocked queries must not block a working startActivity).
     var igAvailable = true;
     try {
-      igAvailable = await instagramAvailable()
-          .timeout(const Duration(milliseconds: 1500));
+      igAvailable = await instagramAvailable().timeout(
+        const Duration(milliseconds: 1500),
+      );
     } catch (_) {
       igAvailable = true; // fail-open: never hide the row on a slow probe
     }
@@ -1260,12 +1320,18 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
               onTap: () => Navigator.pop(ctx, _ShareTarget.spotify),
             ),
             ListTile(
-              leading: Icon(Icons.photo_camera_outlined,
-                  color: igAvailable ? null : Colors.grey),
+              leading: Icon(
+                Icons.photo_camera_outlined,
+                color: igAvailable ? null : Colors.grey,
+              ),
               title: Text(tr('Instagram')),
-              subtitle: Text(tr(igAvailable
-                  ? 'Story with artwork'
-                  : 'Instagram app not installed')),
+              subtitle: Text(
+                tr(
+                  igAvailable
+                      ? 'Story with artwork'
+                      : 'Instagram app not installed',
+                ),
+              ),
               onTap: () => Navigator.pop(ctx, _ShareTarget.instagram),
             ),
           ],
@@ -1273,17 +1339,11 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
       ),
     );
     if (target == null || !mounted) return;
-    if (target == _ShareTarget.instagram && !igAvailable) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(tr(
-              'Instagram isn\'t installed — share to YouTube Music or Spotify instead')),
-          duration: const Duration(seconds: 3),
-        ),
-      );
-      return;
-    }
 
+    // Launch-first: the IG gate is LABEL ONLY (package queries can be
+    // blocked while startActivity still works), so the tiers below are always
+    // attempted. A genuinely missing IG proves itself via launch-failed +
+    // ActivityNotFoundException in both tier details → explain then.
     // Both targets come from ONE resolve: a song prewarms as soon as it starts
     // playing, so the tap is instant; only very-fast taps fall through.
     var p = _shareCache[cur.title];
@@ -1296,25 +1356,34 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
       // Tier 1 Stories (sticker + attribution) → tier 2 direct IG content
       // share (IG itself opens) → tier 3 generic sheet → clipboard. A user
       // cancel inside Instagram is unobservable (fire-and-forget composer).
-      // Each failed tier logs its native diagnostic (exception +
-      // resolveActivity + art exists/size + authority) to User errors so
-      // one retest reveals the cause.
+      // Each failed tier logs its native diagnostic (caught launch exception
+      // + art exists/size + authority) to User errors so one retest reveals
+      // the cause.
       final api = ServerContext.of(context);
       final story = await shareStoryDetailed(link: p.spLink);
       if (!story.ok) {
-        unawaited(api.logClientError(
-            'share-ig-story', '${cur.title} ${story.detail}'));
+        unawaited(
+          api.logClientError('share-ig-story', '${cur.title} ${story.detail}'),
+        );
       }
       if (story.ok) return;
       final caption = storyCaption(p.subject, p.spLink);
       final direct = await shareDirectDetailed(text: caption);
       if (!direct.ok) {
-        unawaited(api.logClientError(
-            'share-ig-direct', '${cur.title} ${direct.detail}'));
+        unawaited(
+          api.logClientError(
+            'share-ig-direct',
+            '${cur.title} ${direct.detail}',
+          ),
+        );
       }
       if (instagramGenericNeeded(storyOk: story.ok, directOk: direct.ok)) {
-        unawaited(api.logClientError('share-ig-fallback',
-            '${cur.title} story=${story.detail} direct=${direct.detail}'));
+        unawaited(
+          api.logClientError(
+            'share-ig-fallback',
+            '${cur.title} story=${story.detail} direct=${direct.detail}',
+          ),
+        );
         // Gated case raced past the chooser (uninstalled between gate and
         // tap): explain, don't silently drop to the system sheet.
         if (instagramNoResolve(story.detail) &&
@@ -1322,8 +1391,11 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
           if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text(tr(
-                  'Instagram isn\'t installed — share to YouTube Music or Spotify instead')),
+              content: Text(
+                tr(
+                  'Instagram isn\'t installed — share to YouTube Music or Spotify instead',
+                ),
+              ),
               duration: const Duration(seconds: 3),
             ),
           );
@@ -1349,12 +1421,16 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
         'subject': subject,
       });
       if (shareTierOk(sent)) return;
-      unawaited(ServerContext.of(context).logClientError(
-          'share-sheet', '$subject sheet=${sent ?? 'null'}'));
+      unawaited(
+        ServerContext.of(context)
+            .logClientError('share-sheet', '$subject sheet=${sent ?? 'null'}'),
+      );
     } catch (e) {
       // Desktop has no share sheet — fall through to the clipboard.
-      unawaited(ServerContext.of(context)
-          .logClientError('share-sheet', '$subject exception: $e'));
+      unawaited(
+        ServerContext.of(context)
+            .logClientError('share-sheet', '$subject exception: $e'),
+      );
     }
     if (!context.mounted) return;
     await Clipboard.setData(ClipboardData(text: link));
@@ -1581,13 +1657,19 @@ class _MetaSectionState extends State<_MetaSection> {
       try {
         await widget.api.addToPlaylist(baseName: t, playlist: name);
         if (mounted) {
-          toast(context, "${tr('Added to')} $name", icon: Icons.playlist_add_check);
+          toast(
+            context,
+            "${tr('Added to')} $name",
+            icon: Icons.playlist_add_check,
+          );
         }
       } catch (e) {
-        if (mounted) toast(context, "${tr('Failed')}: $e", icon: Icons.error_outline);
+        if (mounted)
+          toast(context, "${tr('Failed')}: $e", icon: Icons.error_outline);
       }
     });
   }
+
   /// Download the current song to the phone. Lives in the title row,
   /// left of the heart (green mark on the mock).
   Widget _downloadButton() {
@@ -1618,8 +1700,7 @@ class _MetaSectionState extends State<_MetaSection> {
     }
     final url = qp.current?.url ?? '';
     if (url.isEmpty) {
-      toast(context, tr('No file to download yet'),
-          icon: Icons.error_outline);
+      toast(context, tr('No file to download yet'), icon: Icons.error_outline);
       return;
     }
     final thumb = qp.current?.thumbUrl;
@@ -1638,7 +1719,12 @@ class _MetaSectionState extends State<_MetaSection> {
     );
     try {
       final pl = qp.fromPlaylist.value ? (qp.playlistName ?? '') : '';
-      await OfflineStore.download(base: base, url: url, thumb: thumb, playlist: pl);
+      await OfflineStore.download(
+        base: base,
+        url: url,
+        thumb: thumb,
+        playlist: pl,
+      );
       if (mounted) {
         Navigator.pop(context);
         toast(context, tr('Saved to phone'), icon: Icons.check_circle);
@@ -1701,10 +1787,7 @@ class _MetaSectionState extends State<_MetaSection> {
                       right: 4,
                       child: _LikeButton(api: widget.api, baseName: t),
                     ),
-                    Positioned(
-                      right: 48,
-                      child: _downloadButton(),
-                    ),
+                    Positioned(right: 48, child: _downloadButton()),
                     Positioned(
                       left: 4,
                       child: IconButton(
@@ -1738,7 +1821,7 @@ class _MetaSectionState extends State<_MetaSection> {
                     _LikeButton(api: widget.api, baseName: t),
                     IconButton(
                       visualDensity: VisualDensity.compact,
-                        tooltip: tr('Add to playlist'),
+                      tooltip: tr('Add to playlist'),
                       onPressed: () => _pickPlaylist(t),
                       icon: const Icon(
                         Icons.playlist_add,
@@ -1772,30 +1855,29 @@ class _MetaSectionState extends State<_MetaSection> {
                   // Both boxes shrink to content; the chips themselves
                   // already size to their text (Row mainAxisSize.min).
                   Widget artistBox(Widget child) => ConstrainedBox(
-                        constraints: BoxConstraints(maxWidth: boxW),
-                        child: child,
-                      );
+                    constraints: BoxConstraints(maxWidth: boxW),
+                    child: child,
+                  );
                   Widget albumBox(Widget child) => ConstrainedBox(
-                        constraints: BoxConstraints(maxWidth: boxW),
-                        child: child,
-                      );
+                    constraints: BoxConstraints(maxWidth: boxW),
+                    child: child,
+                  );
                   return Row(
                     mainAxisAlignment: MainAxisAlignment.start,
                     children: [
                       if (hasArtist)
-                        artistBox(_chip(
-                          Icons.person,
-                          _meta!.artist!,
-                          () => _artistsPopup(_meta!.artist!),
-                        )),
-                      if (hasArtist && album != null)
-                        const SizedBox(width: 8),
+                        artistBox(
+                          _chip(
+                            Icons.person,
+                            _meta!.artist!,
+                            () => _artistsPopup(_meta!.artist!),
+                          ),
+                        ),
+                      if (hasArtist && album != null) const SizedBox(width: 8),
                       if (album != null)
-                        albumBox(_chip(
-                          Icons.album_outlined,
-                          album,
-                          _openAlbum,
-                        )),
+                        albumBox(
+                          _chip(Icons.album_outlined, album, _openAlbum),
+                        ),
                     ],
                   );
                 },
@@ -1843,9 +1925,7 @@ class _MetaSectionState extends State<_MetaSection> {
           children: [
             Icon(icon, size: 15, color: Spots.green),
             const SizedBox(width: 6),
-          Flexible(
-            child: text,
-          ),
+            Flexible(child: text),
           ],
         ),
       ),
@@ -1904,11 +1984,13 @@ class _WaveSeekBarState extends State<_WaveSeekBar> {
             onHorizontalDragStart: edit
                 ? null
                 : (d) => setState(
-                    () => _dragF = (d.localPosition.dx / w).clamp(0.0, 1.0)),
+                    () => _dragF = (d.localPosition.dx / w).clamp(0.0, 1.0),
+                  ),
             onHorizontalDragUpdate: edit
                 ? null
                 : (d) => setState(
-                    () => _dragF = (d.localPosition.dx / w).clamp(0.0, 1.0)),
+                    () => _dragF = (d.localPosition.dx / w).clamp(0.0, 1.0),
+                  ),
             onHorizontalDragEnd: (_) {
               final f = _dragF;
               setState(() => _dragF = null);
@@ -2075,12 +2157,14 @@ class _LikeButtonState extends State<_LikeButton> {
         _shared = st.downloaded;
       });
       unawaited(
-          PrefetchStore.setLiked(widget.baseName, st.liked, widget.baseName));
+        PrefetchStore.setLiked(widget.baseName, st.liked, widget.baseName),
+      );
     } catch (_) {
       if (!mounted || seq != _seq) return;
-      setState(() =>
-          _liked = PrefetchStore.likedFor(widget.baseName, widget.baseName) ??
-              false);
+      setState(
+        () => _liked =
+            PrefetchStore.likedFor(widget.baseName, widget.baseName) ?? false,
+      );
     }
   }
 
@@ -2091,7 +2175,8 @@ class _LikeButtonState extends State<_LikeButton> {
       if (_liked == true) {
         await widget.api.removeFromPlaylist('Liked', baseName: widget.baseName);
         unawaited(
-            PrefetchStore.setLiked(widget.baseName, false, widget.baseName));
+          PrefetchStore.setLiked(widget.baseName, false, widget.baseName),
+        );
         if (mounted) {
           setState(() => _liked = false);
           toast(
@@ -2106,7 +2191,8 @@ class _LikeButtonState extends State<_LikeButton> {
           playlist: 'Liked',
         );
         unawaited(
-            PrefetchStore.setLiked(widget.baseName, true, widget.baseName));
+          PrefetchStore.setLiked(widget.baseName, true, widget.baseName),
+        );
         if (mounted) {
           setState(() => _liked = true);
           toast(context, tr('Added to Liked songs'), icon: Icons.favorite);
@@ -2178,8 +2264,9 @@ class _QueueSheetState extends State<_QueueSheet> {
     // Start scrolled so the current song is in the viewport the moment the
     // queue opens (rows are ~64px). The item is then built, _rowKeys[target]
     // is populated, and ensureVisible can anchor it at the top.
-    final initialOffset =
-        (n > 0 && tgt > 0) ? (tgt * 64.0).clamp(0.0, (n - 1) * 64.0) : 0.0;
+    final initialOffset = (n > 0 && tgt > 0)
+        ? (tgt * 64.0).clamp(0.0, (n - 1) * 64.0)
+        : 0.0;
     _scroll = ScrollController(initialScrollOffset: initialOffset);
     _registerSongListener();
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToPlaying());
@@ -2391,10 +2478,10 @@ class _QueueSheetState extends State<_QueueSheet> {
                               // Snappy swipe feedback: slide-out and the
                               // post-delete collapse both well under defaults
                               // (200ms / 300ms).
-                              movementDuration:
-                                  const Duration(milliseconds: 120),
-                              resizeDuration:
-                                  const Duration(milliseconds: 150),
+                              movementDuration: const Duration(
+                                milliseconds: 120,
+                              ),
+                              resizeDuration: const Duration(milliseconds: 150),
                               dismissThresholds: const {
                                 DismissDirection.startToEnd: 0.22,
                                 DismissDirection.endToStart: 0.22,
@@ -2508,8 +2595,9 @@ class _QueueSheetState extends State<_QueueSheet> {
                                     children: [
                                       if (OfflineStore.isDownloaded(it.title))
                                         Padding(
-                                          padding:
-                                              const EdgeInsets.only(right: 6),
+                                          padding: const EdgeInsets.only(
+                                            right: 6,
+                                          ),
                                           child: Icon(
                                             Icons.download_outlined,
                                             size: 15,
@@ -2523,9 +2611,7 @@ class _QueueSheetState extends State<_QueueSheet> {
                                           overflow: TextOverflow.ellipsis,
                                           style: TextStyle(
                                             fontSize: 14,
-                                            color: active
-                                                ? Spots.green
-                                                : null,
+                                            color: active ? Spots.green : null,
                                             fontWeight: active
                                                 ? FontWeight.w700
                                                 : FontWeight.w500,

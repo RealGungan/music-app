@@ -195,6 +195,112 @@ void main() {
       await sub.cancel();
     });
 
+    test('regained-stay-paused forces paused without a state event', () async {
+      final e = RemoteEngine();
+      final seen = <PlayerState>[];
+      final sub = e.onPlayerStateChanged.listen(seen.add);
+      e.feedRemoteEvent({'ev': 'state', 's': 'playing'});
+      // User paused mid-interruption: handler stays paused on regain and the
+      // player-state event dies while the UI sleeps — the focus report alone
+      // must sync the icon.
+      e.feedRemoteEvent({
+        'ev': 'focus',
+        'phase': 'regained-stay-paused',
+        'type': 'AudioInterruptionType.unknown',
+      });
+      expect(e.isPlaying, isFalse);
+      await Future<void>.delayed(Duration.zero);
+      expect(seen.last, PlayerState.paused);
+      await sub.cancel();
+      e.dispose();
+    });
+
+    test('regained forces playing without a state event', () async {
+      final e = RemoteEngine();
+      final seen = <PlayerState>[];
+      final sub = e.onPlayerStateChanged.listen(seen.add);
+      e.feedRemoteEvent({'ev': 'state', 's': 'playing'});
+      e.feedRemoteEvent({
+        'ev': 'focus',
+        'phase': 'lost-honored',
+        'type': 'AudioInterruptionType.pause',
+      });
+      expect(e.isPlaying, isFalse);
+      // Call ended, handler resumes: force playing from the callback alone.
+      e.feedRemoteEvent({
+        'ev': 'focus',
+        'phase': 'regained',
+        'type': 'AudioInterruptionType.pause',
+      });
+      expect(e.isPlaying, isTrue);
+      await Future<void>.delayed(Duration.zero);
+      expect(seen.last, PlayerState.playing);
+      await sub.cancel();
+      e.dispose();
+    });
+
+    test('duck phases never touch play state', () {
+      final e = RemoteEngine();
+      e.feedRemoteEvent({'ev': 'state', 's': 'playing'});
+      e.feedRemoteEvent({'ev': 'focus', 'phase': 'ducked'});
+      expect(e.isPlaying, isTrue);
+      e.feedRemoteEvent({'ev': 'focus', 'phase': 'unducked'});
+      expect(e.isPlaying, isTrue);
+      e.dispose();
+    });
+  });
+
+  group('shouldAutoResumeOnRegain', () {
+    test('user pause wins over transient regain', () {
+      expect(
+          shouldAutoResumeOnRegain(
+              userPaused: true,
+              hasMedia: true,
+              playing: false,
+              currentUrl: 'http://x/song'),
+          isFalse);
+    });
+
+    test('focus-loss auto-pause still resumes', () {
+      expect(
+          shouldAutoResumeOnRegain(
+              userPaused: false,
+              hasMedia: true,
+              playing: false,
+              currentUrl: 'http://x/song'),
+          isTrue);
+    });
+
+    test('already playing / no media / no url never resume', () {
+      const no = false;
+      expect(
+          shouldAutoResumeOnRegain(
+              userPaused: no,
+              hasMedia: true,
+              playing: true,
+              currentUrl: 'http://x/song'),
+          isFalse);
+      expect(
+          shouldAutoResumeOnRegain(
+              userPaused: no,
+              hasMedia: false,
+              playing: false,
+              currentUrl: 'http://x/song'),
+          isFalse);
+      expect(
+          shouldAutoResumeOnRegain(
+              userPaused: no, hasMedia: true, playing: false, currentUrl: ''),
+          isFalse);
+      expect(
+          shouldAutoResumeOnRegain(
+              userPaused: no,
+              hasMedia: true,
+              playing: false,
+              currentUrl: null),
+          isFalse);
+    });
+  });
+
     test('single-tap-recover: stale playing + handler paused -> resume',
         () async {
       final inbox = ReceivePort();
@@ -237,5 +343,4 @@ void main() {
       expect(got[1]['cmd'], 'resume');
       expect(e.isPlaying, isFalse); // resume cmd sent; state event pending.
     });
-  });
 }

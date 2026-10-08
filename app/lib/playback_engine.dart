@@ -92,8 +92,7 @@ class LocalEngine implements PlaybackEngine {
   @override
   Future<void> seek(Duration d) => _player.seek(d);
   @override
-  Future<void> setSource(String url) =>
-      _player.setSource(sourceForUrl(url));
+  Future<void> setSource(String url) => _player.setSource(sourceForUrl(url));
   @override
   Future<void> queueNext({
     String? url,
@@ -154,9 +153,9 @@ class RemoteEngine implements PlaybackEngine {
     // Skipped bg+paused: the port lookup every 10s kept waking the app.
     _healthTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       if (!_remoteUp) return;
-      if (WidgetsBinding.instance.lifecycleState !=
-              AppLifecycleState.resumed &&
-          _lastState != PlayerState.playing) return;
+      if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed &&
+          _lastState != PlayerState.playing)
+        return;
       if (IsolateNameServer.lookupPortByName(kAudioStatePort) == null) {
         debugPrint('[RemoteEngine] handler port lost - falling back to local');
         _remoteUp = false;
@@ -213,12 +212,10 @@ class RemoteEngine implements PlaybackEngine {
     // we officially engaged. Process all events to keep streams alive.
     switch (m['ev']) {
       case 'pos':
-        _sbPos.add(
-            Duration(milliseconds: (m['ms'] as num?)?.toInt() ?? 0));
+        _sbPos.add(Duration(milliseconds: (m['ms'] as num?)?.toInt() ?? 0));
         break;
       case 'dur':
-        _sbDur.add(
-            Duration(milliseconds: (m['ms'] as num?)?.toInt() ?? 0));
+        _sbDur.add(Duration(milliseconds: (m['ms'] as num?)?.toInt() ?? 0));
         break;
       case 'state':
         final s = _parseState(m['s']);
@@ -242,12 +239,19 @@ class RemoteEngine implements PlaybackEngine {
         // External app took focus and the handler honored it (paused). The
         // follow-up player-state event can be lost while the UI isolate
         // sleeps — force paused from the focus report alone so the icon
-        // never freezes on "playing". Echo/ignored + regained phases need
-        // nothing (player-state events carry those).
-        if (m['phase'] == 'lost-honored') {
+        // never freezes on "playing". Same for the regain callbacks: force
+        // the handler's declared end-state instead of waiting for a
+        // player-state event that may never arrive. Echo/ignored + duck
+        // phases need nothing (player-state events carry those).
+        if (m['phase'] == 'lost-honored' ||
+            m['phase'] == 'regained-stay-paused') {
           _lastState = PlayerState.paused;
           _lastEventAt = DateTime.now();
           _sbState.add(PlayerState.paused);
+        } else if (m['phase'] == 'regained') {
+          _lastState = PlayerState.playing;
+          _lastEventAt = DateTime.now();
+          _sbState.add(PlayerState.playing);
         }
         break;
     }
@@ -324,8 +328,9 @@ class RemoteEngine implements PlaybackEngine {
   /// forced + listeners repainted BEFORE this returns — the UI gates taps
   /// on that (QueuePlayer.stateSyncing), so no tap lands on a stale icon.
   /// Falls back to the local correction when the handler is gone/timeout.
-  Future<void> resync(
-      {Duration timeout = const Duration(milliseconds: 1200)}) async {
+  Future<void> resync({
+    Duration timeout = const Duration(milliseconds: 1200),
+  }) async {
     _tryEngage();
     if (_remoteUp) {
       Future<PlayerState>? waiter;
@@ -361,8 +366,9 @@ class RemoteEngine implements PlaybackEngine {
   /// Single-tap recover: refresh truth first, then act on FRESH state.
   /// A stale cached playing (event died while suspended) becomes a resume,
   /// not a pause of a ghost — no double-tap.
-  Future<void> toggleRecover(
-      {Duration timeout = const Duration(milliseconds: 700)}) async {
+  Future<void> toggleRecover({
+    Duration timeout = const Duration(milliseconds: 700),
+  }) async {
     await resync(timeout: timeout);
     if (isPlaying) {
       await pause();

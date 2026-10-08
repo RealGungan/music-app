@@ -9,7 +9,8 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart' as audio_session;
 import 'package:flutter/foundation.dart';
-import 'package:path_provider/path_provider.dart' show getExternalStorageDirectory;
+import 'package:path_provider/path_provider.dart'
+    show getExternalStorageDirectory;
 
 /// Name of the [IsolateNameServer] port owned by the MAIN isolate. The
 /// handler uses it to send state/position/error events back to the app.
@@ -36,13 +37,29 @@ Source sourceForUrl(String url) {
 /// as LOSS_TRANSIENT -> pause.
 enum CarFocusAction { duck, restoreDuck, pause, resume }
 
-CarFocusAction carFocusAction(
-    {required bool begin,
-    required audio_session.AudioInterruptionType type}) {
+CarFocusAction carFocusAction({
+  required bool begin,
+  required audio_session.AudioInterruptionType type,
+}) {
   if (type == audio_session.AudioInterruptionType.duck) {
     return begin ? CarFocusAction.duck : CarFocusAction.restoreDuck;
   }
   return begin ? CarFocusAction.pause : CarFocusAction.resume;
+}
+
+/// Focus-regain decision. Pure (no player) so unit tests can pin it: a
+/// deliberate user pause always wins over a transient regain — without this
+/// the music restarts by itself when a nav prompt/call ends after the user
+/// pressed pause mid-interruption (insta-pause resume). Auto-pauses from
+/// focus loss (or a fresh session) still resume.
+bool shouldAutoResumeOnRegain({
+  required bool userPaused,
+  required bool hasMedia,
+  required bool playing,
+  required String? currentUrl,
+}) {
+  if (userPaused || playing || !hasMedia) return false;
+  return currentUrl != null && currentUrl.isNotEmpty;
 }
 
 /// Stable MediaSession id: strip the re-resolving ?token= query so head
@@ -76,6 +93,11 @@ class NASMusicAudioHandler extends BaseAudioHandler {
   bool _loading = false;
   bool _playing = false;
   bool _paused = false;
+  // True after a DELIBERATE user pause (pause command / transport), cleared
+  // by any play/resume/stop command. Focus-loss auto-pauses never set it, so
+  // a transient regain still resumes — but a user pause mid-interruption is
+  // honored instead of auto-resumed (insta-pause resume).
+  bool _userPaused = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   String? _currentUrl;
@@ -146,7 +168,9 @@ class NASMusicAudioHandler extends BaseAudioHandler {
   Future<void> _initAudioSession() async {
     try {
       final session = await audio_session.AudioSession.instance;
-      await session.configure(const audio_session.AudioSessionConfiguration.music());
+      await session.configure(
+        const audio_session.AudioSessionConfiguration.music(),
+      );
       // Handle audio focus changes from other apps (e.g., WAZE nav instructions).
       // NAV (CAN_DUCK) only lowers volume; calls/transient pauses; regain
       // resumes a paused track or restores ducked volume.
@@ -178,7 +202,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
             _sendEvent({
               'ev': 'focus',
               'phase': 'lost-ignored',
-              'type': event.type.toString()
+              'type': event.type.toString(),
             });
             return;
           }
@@ -187,7 +211,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
           _sendEvent({
             'ev': 'focus',
             'phase': 'lost-honored',
-            'type': event.type.toString()
+            'type': event.type.toString(),
           });
           if (_playing) pause();
         } else {
@@ -199,16 +223,23 @@ class NASMusicAudioHandler extends BaseAudioHandler {
             _sendEvent({
               'ev': 'focus',
               'phase': 'regained-stay-paused',
-              'type': event.type.toString()
+              'type': event.type.toString(),
             });
             return;
           }
           _sendEvent({
             'ev': 'focus',
             'phase': 'regained',
-            'type': event.type.toString()
+            'type': event.type.toString(),
           });
-          if (!_playing && _hasMedia && _currentUrl != null) play();
+          if (shouldAutoResumeOnRegain(
+            userPaused: _userPaused,
+            hasMedia: _hasMedia,
+            playing: _playing,
+            currentUrl: _currentUrl,
+          )) {
+            play();
+          }
         }
       });
     } catch (e) {
@@ -220,17 +251,20 @@ class NASMusicAudioHandler extends BaseAudioHandler {
   /// holder; without this the phone plays into the void.
   Future<void> _takeFocus() async {
     try {
-      await audio_session.AudioSession.instance
-          .then((s) => s.setActive(true));
+      await audio_session.AudioSession.instance.then((s) => s.setActive(true));
     } catch (e) {
       debugPrint('[handler] setActive failed: $e');
     }
   }
+
   NASMusicAudioHandler() {
     // Same stale-mapping hazard as the main-isolate bridge: a cached
     // process can hold the old state port name.
     IsolateNameServer.removePortNameMapping(kAudioStatePort);
-    IsolateNameServer.registerPortWithName(_statePort.sendPort, kAudioStatePort);
+    IsolateNameServer.registerPortWithName(
+      _statePort.sendPort,
+      kAudioStatePort,
+    );
     // Audio focus belongs to THIS isolate (it owns the player): without a
     // configured session the car never routes audio to us — silence until
     // some other app takes focus first. Same music() config as main.
@@ -345,8 +379,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
       // null/content publishes that choke head units.)
       final nt = m['title'];
       final na = m['artist'];
-      if ((nt is String && nt != _title) ||
-          (na is String && na != _artist)) {
+      if ((nt is String && nt != _title) || (na is String && na != _artist)) {
         _art = null;
         _artRemote = null;
         _artIsFile = false;
@@ -392,7 +425,9 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         // re-writing on every position tick).
         if (!file.existsSync() || file.lengthSync() != bytes.length) {
           file.writeAsBytesSync(bytes, flush: true);
-          debugPrint('[handler] wrote local art ${file.path} (${bytes.length}B)');
+          debugPrint(
+            '[handler] wrote local art ${file.path} (${bytes.length}B)',
+          );
           _artRemote = (art is String && art.isNotEmpty) ? art : _artRemote;
           _art = file.path;
           _artIsFile = true;
@@ -447,8 +482,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         paint,
       );
       final resized = await recorder.endRecording().toImage(nw, nh);
-      final data =
-          await resized.toByteData(format: ui.ImageByteFormat.png);
+      final data = await resized.toByteData(format: ui.ImageByteFormat.png);
       return data!.buffer.asUint8List();
     } catch (_) {
       return bytes;
@@ -479,6 +513,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
       case 'play':
         final url = m['url']?.toString();
         if (url == null || url.isEmpty) break;
+        _userPaused = false;
         _lastOwnPlayAt = DateTime.now();
         // A user/main-initiated play wins over any pre-pushed next track.
         _nextUrl = null;
@@ -513,12 +548,15 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         }
         break;
       case 'pause':
+        _userPaused = true;
         await _player.pause();
         break;
       case 'resume':
+        _userPaused = false;
         await _player.resume();
         break;
       case 'stop':
+        _userPaused = false;
         _currentUrl = null;
         await _player.stop();
         break;
@@ -533,8 +571,8 @@ class NASMusicAudioHandler extends BaseAudioHandler {
           's': _playing
               ? 'playing'
               : _paused
-                  ? 'paused'
-                  : 'stopped'
+              ? 'paused'
+              : 'stopped',
         });
         _sendEvent({'ev': 'pos', 'ms': _position.inMilliseconds});
         _sendEvent({'ev': 'dur', 'ms': _duration.inMilliseconds});
@@ -619,7 +657,8 @@ class NASMusicAudioHandler extends BaseAudioHandler {
     final artUri = _artIsFile && _art != null
         ? Uri.parse(
             'content://com.nasmusic.nasmusic.art/nasmusic_art.jpg'
-            '?v=${stableId.hashCode.toUnsigned(32)}')
+            '?v=${stableId.hashCode.toUnsigned(32)}',
+          )
         : null;
     final item = MediaItem(
       id: stableId.isNotEmpty ? stableId : '$_artist - $_title',
@@ -647,7 +686,9 @@ class NASMusicAudioHandler extends BaseAudioHandler {
     // a real active item id — this is the exact difference that was killing
     // the car display.
     queue.add([item]);
-    debugPrint('[handler] publish uri=${artUri} cache=${_artIsFile ? _art : null}');
+    debugPrint(
+      '[handler] publish uri=${artUri} cache=${_artIsFile ? _art : null}',
+    );
     _sendEvent({
       'ev': 'pub',
       'title': _title,
@@ -661,44 +702,50 @@ class NASMusicAudioHandler extends BaseAudioHandler {
 
   void _publishPlayback() {
     _lastPlaybackPublish = DateTime.now();
-    playbackState.add(PlaybackState(
-      controls: [
-        MediaControl.skipToPrevious,
-        if (_playing) MediaControl.pause else MediaControl.play,
-        MediaControl.skipToNext,
-      ],
-      systemActions: const {
-        MediaAction.seek,
-        MediaAction.seekForward,
-        MediaAction.seekBackward,
-      },
-      androidCompactActionIndices: const [0, 1, 2],
-      // MUST reference the session queue when playing (see _publishMedia's
-      // queue.add): AVRCP computes the active queue item id from this index and
-      // a missing one (UNKNOWN_ID) makes many head units show a blank
-      // now-playing screen. Left null while idle (no queue item exists yet).
-      queueIndex: _hasMedia ? 0 : null,
-      processingState:
-          _loading ? AudioProcessingState.loading : AudioProcessingState.ready,
-      playing: _playing,
-      // Head units / Android Auto gate play/pause icons + seek on this:
-      // 1.0 while sounding, 0.0 otherwise.
-      speed: _playing ? 1.0 : 0.0,
-      updatePosition: _position,
-    ));
+    playbackState.add(
+      PlaybackState(
+        controls: [
+          MediaControl.skipToPrevious,
+          if (_playing) MediaControl.pause else MediaControl.play,
+          MediaControl.skipToNext,
+        ],
+        systemActions: const {
+          MediaAction.seek,
+          MediaAction.seekForward,
+          MediaAction.seekBackward,
+        },
+        androidCompactActionIndices: const [0, 1, 2],
+        // MUST reference the session queue when playing (see _publishMedia's
+        // queue.add): AVRCP computes the active queue item id from this index and
+        // a missing one (UNKNOWN_ID) makes many head units show a blank
+        // now-playing screen. Left null while idle (no queue item exists yet).
+        queueIndex: _hasMedia ? 0 : null,
+        processingState: _loading
+            ? AudioProcessingState.loading
+            : AudioProcessingState.ready,
+        playing: _playing,
+        // Head units / Android Auto gate play/pause icons + seek on this:
+        // 1.0 while sounding, 0.0 otherwise.
+        speed: _playing ? 1.0 : 0.0,
+        updatePosition: _position,
+      ),
+    );
   }
 
   /// Lock-screen / notification transport. Play/pause/seek go straight to OUR
   /// player; next/prev are queue decisions, so they bounce to the app.
   @override
   Future<void> play() async {
+    _userPaused = false;
     if (!_hasMedia || _currentUrl == null) {
       // Resume race / service restart lost the metadata push but the URL
       // is ground truth: re-publish + play instead of dropping (drop =
       // frozen play icon, 0:00, taps no-op).
       final url = _currentUrl;
       if (url == null || url.isEmpty) {
-        debugPrint('[handler] play() dropped: hasMedia=$_hasMedia url set=false');
+        debugPrint(
+          '[handler] play() dropped: hasMedia=$_hasMedia url set=false',
+        );
         return;
       }
       debugPrint('[handler] play() recovering media for <$url>');
@@ -721,10 +768,14 @@ class NASMusicAudioHandler extends BaseAudioHandler {
   }
 
   @override
-  Future<void> pause() async => _player.pause();
+  Future<void> pause() async {
+    _userPaused = true;
+    return _player.pause();
+  }
 
   @override
   Future<void> stop() async {
+    _userPaused = false;
     await _player.stop();
     _currentUrl = null;
     // super.stop() sets processingState to idle, which makes audio_service
@@ -753,8 +804,10 @@ class NASMusicAudioHandler extends BaseAudioHandler {
   /// native onLoadChildren, which audio_service forwards here. Serve the
   /// live media item so the car shows the queue instead of an empty tree.
   @override
-  Future<List<MediaItem>> getChildren(String parentMediaId,
-      [Map<String, dynamic>? options]) async {
+  Future<List<MediaItem>> getChildren(
+    String parentMediaId, [
+    Map<String, dynamic>? options,
+  ]) async {
     final m = mediaItem.value;
     return m == null ? [] : [m];
   }

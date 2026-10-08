@@ -99,6 +99,19 @@ void _decodeAudioJson(String json) {
       }
       final e = qp.engine;
       if (e is RemoteEngine) e.feedRemoteEvent(m);
+      // External-audio callbacks must FORCE handler truth, not just fold the
+      // event in: a focus loss/regain that lands while the UI isolate sleeps
+      // leaves a stale icon (events alone already missed once). Re-query via
+      // the same resync the app-resume path uses — play buttons stay disabled
+      // (stateSyncing) until the repaint lands.
+      if (ev == 'focus') {
+        final phase = m?['phase']?.toString();
+        if (phase == 'lost-honored' ||
+            phase == 'regained' ||
+            phase == 'regained-stay-paused') {
+          unawaited(qp.onResumed());
+        }
+      }
       return;
     }
     final seekMs = m?['seek_ms'];
@@ -119,15 +132,16 @@ DateTime _lastPushAt = DateTime.fromMillisecondsSinceEpoch(0);
 String _lastPushedIdentity = '';
 Future<void> _pushAudioState() async {
   final now = DateTime.now();
-  final identity = '${QueuePlayer.instance.currentTitle.value}|${QueuePlayer
-      .instance.currentThumb.value}';
+  final identity =
+      '${QueuePlayer.instance.currentTitle.value}|${QueuePlayer.instance.currentThumb.value}';
   // The throttle is for the HIGH-FREQUENCY position ticks that re-push the
   // SAME track. When the track identity actually changed (user skipped/next in
   // the same second), ALWAYS push: the play command races down the port, and
   // if this metadata never lands the handler would publish the PREVIOUS song's
   // title for the new URL (car shows the wrong song).
   if (identity == _lastPushedIdentity &&
-      now.difference(_lastPushAt) < const Duration(seconds: 1)) return;
+      now.difference(_lastPushAt) < const Duration(seconds: 1))
+    return;
   _lastPushedIdentity = identity;
   _lastPushAt = now;
   final sp = IsolateNameServer.lookupPortByName(kAudioStatePort);
@@ -140,8 +154,7 @@ Future<void> _pushAudioState() async {
   // Song" in the title with no artist field renders as a blank track. Split it.
   final full = qp.currentTitle.value.replaceAll('.{ext}', '');
   final sep = full.indexOf(' - ');
-  final artist =
-      sep > 0 ? full.substring(0, sep).trim() : (hasMedia ? '' : '');
+  final artist = sep > 0 ? full.substring(0, sep).trim() : (hasMedia ? '' : '');
   final song = sep > 0 ? full.substring(sep + 3).trim() : full;
   final item = hasMedia ? qp.items[qp.index] : null;
   final msg = <String, dynamic>{
@@ -380,6 +393,7 @@ class NasMusicApp extends StatefulWidget {
 class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
   late String _baseUrl = widget.baseUrl;
   late ApiClient _api = ApiClient(baseUrl: _baseUrl);
+
   /// Session gate: null = validating saved token, true = home, false = login.
   bool? _sessionValid;
   final _messengerKey = GlobalKey<ScaffoldMessengerState>();
@@ -433,9 +447,10 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
           final ctx = _messengerKey.currentContext;
           if (ctx != null) {
             toast(
-                ctx,
-                tr('Offline — server unreachable, showing downloads'),
-                icon: Icons.wifi_off_outlined);
+              ctx,
+              tr('Offline — server unreachable, showing downloads'),
+              icon: Icons.wifi_off_outlined,
+            );
           }
         });
       }
@@ -576,7 +591,9 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
           context: ctx,
           builder: (dctx) => AlertDialog(
             title: Text(
-              rs.success ? tr('Replacement finished') : tr('Replacement failed'),
+              rs.success
+                  ? tr('Replacement finished')
+                  : tr('Replacement failed'),
             ),
             content: Text(
               '"${rs.baseName}"\n'
@@ -600,9 +617,11 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     // Tag every API + image request with the running build so the server
     // log shows which version each phone runs (version-confusion triage).
-    PackageInfo.fromPlatform().then((pi) {
-      _api.appVersion = pi.version;
-    }).catchError((_) {});
+    PackageInfo.fromPlatform()
+        .then((pi) {
+          _api.appVersion = pi.version;
+        })
+        .catchError((_) {});
     QueuePlayer.instance.lastError.addListener(_onPlayError);
     _wireAutoplay(_api);
     QueuePlayer.instance.loadAutoplay();
@@ -630,9 +649,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
       lastOpen = DateTime.now();
       final nav = _navigatorKey.currentState;
       if (nav != null) {
-        nav.push(
-          MaterialPageRoute(builder: (_) => WrappedScreen(api: _api)),
-        );
+        nav.push(MaterialPageRoute(builder: (_) => WrappedScreen(api: _api)));
       }
     }
 
@@ -717,7 +734,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
     if (ov != null) toastInOverlay(ov, msg);
   }
 
-Future<void> _openDeepLink(String rawUrl) async {
+  Future<void> _openDeepLink(String rawUrl) async {
     _traceDl('openDeepLink: $rawUrl');
     final url = Uri.tryParse(rawUrl);
     if (url == null) {
@@ -726,16 +743,17 @@ Future<void> _openDeepLink(String rawUrl) async {
       return;
     }
     final host = (url.host.isNotEmpty ? url.host : url.path).toLowerCase();
-    final isSpotify = host == 'open.spotify.com' ||
+    final isSpotify =
+        host == 'open.spotify.com' ||
         host == 'spotify.link' ||
         host.endsWith('.spotify.com') ||
         host.endsWith('.spotify.link');
     final isYt =
         host == 'youtu.be' ||
-            host == 'www.youtube.com' ||
-            host == 'm.youtube.com' ||
-            host == 'music.youtube.com' ||
-            host.endsWith('youtube.com');
+        host == 'www.youtube.com' ||
+        host == 'm.youtube.com' ||
+        host == 'music.youtube.com' ||
+        host.endsWith('youtube.com');
     _traceDl('host=$host isSpotify=$isSpotify isYt=$isYt');
     if (!isSpotify && !isYt) {
       _dlToast("Not a music share link ($host)");
@@ -755,8 +773,10 @@ Future<void> _openDeepLink(String rawUrl) async {
       final info = await _api
           .openUrl(rawUrl)
           .timeout(const Duration(seconds: 12));
-      _traceDl('openUrl AFTER: kind=${info.kind} videoId=${info.videoId} '
-          'artist=${info.artist} title=${info.title}');
+      _traceDl(
+        'openUrl AFTER: kind=${info.kind} videoId=${info.videoId} '
+        'artist=${info.artist} title=${info.title}',
+      );
       final qp = QueuePlayer.instance;
       QueueItem? item;
       if (info.kind == 'youtube' && info.videoId.isNotEmpty) {
@@ -777,7 +797,7 @@ Future<void> _openDeepLink(String rawUrl) async {
       } else // The server returns 'unknown' for Spotify search links (/search/...),
       // only 'spotify' for actual /track/ links. Handle both.
       if (info.kind == 'spotify' &&
-                 (info.artist.isNotEmpty && info.title.isNotEmpty)) {
+          (info.artist.isNotEmpty && info.title.isNotEmpty)) {
         // NAS-first, mirroring the tap-to-play flow for discovery rows.
         // Instant placeholder: the engine resolves NAS-first bounded,
         // then streams. No inNas/resolve await before first audio.
@@ -791,9 +811,11 @@ Future<void> _openDeepLink(String rawUrl) async {
           lyricsTitle: info.title,
         );
       } else if (isSpotify &&
-                 'search' ==
-                     (url.pathSegments.isNotEmpty ? url.pathSegments.first : 'search') &&
-                 url.pathSegments.contains('search')) {
+          'search' ==
+              (url.pathSegments.isNotEmpty
+                  ? url.pathSegments.first
+                  : 'search') &&
+          url.pathSegments.contains('search')) {
         // Spotify search link (/search/<q>): extract the query and resolve by
         // name — same NAS-first flow as a real track link.
         final segs = url.pathSegments;
@@ -834,11 +856,13 @@ Future<void> _openDeepLink(String rawUrl) async {
     } on TimeoutException {
       _traceDl('TIMEOUT: openUrl hang');
       final ov3 = _navigatorKey.currentState?.overlay;
-      if (ov3 != null) toastInOverlay(ov3, tr('Slow/broken server link — timeout'));
+      if (ov3 != null)
+        toastInOverlay(ov3, tr('Slow/broken server link — timeout'));
     } on ApiException catch (e) {
       _traceDl('APIERROR: ${e.statusCode} ${e.message}');
       final ov4 = _navigatorKey.currentState?.overlay;
-      if (ov4 != null) toastInOverlay(ov4, "${tr('Server rejected that link')}: ${e.message}");
+      if (ov4 != null)
+        toastInOverlay(ov4, "${tr('Server rejected that link')}: ${e.message}");
     } catch (e) {
       _traceDl('ERROR: $e');
       final ov5 = _navigatorKey.currentState?.overlay;
@@ -873,8 +897,7 @@ Future<void> _openDeepLink(String rawUrl) async {
       // fires on Android): bank it now. Skip while playing — the handler
       // is alive and the completion path seals the full track later.
       if (!qp0.playing) {
-        PlayLog.flush(qp0.currentTitle.value,
-            qp0.position.value.inSeconds);
+        PlayLog.flush(qp0.currentTitle.value, qp0.position.value.inSeconds);
       }
       if (qp0.items.isEmpty && !qp0.playing) {
         if (!kIsWeb) AudioService.stop();
@@ -892,8 +915,10 @@ Future<void> _openDeepLink(String rawUrl) async {
     }
     if (state == AppLifecycleState.detached) {
       // Seal the open Wrapped entry: the process may die with it.
-      PlayLog.flush(QueuePlayer.instance.currentTitle.value,
-          QueuePlayer.instance.position.value.inSeconds);
+      PlayLog.flush(
+        QueuePlayer.instance.currentTitle.value,
+        QueuePlayer.instance.position.value.inSeconds,
+      );
       QueuePlayer.instance.stop();
       if (!kIsWeb) AudioService.stop();
     } else if (state == AppLifecycleState.resumed) {
@@ -966,8 +991,9 @@ Future<void> _openDeepLink(String rawUrl) async {
     QueuePlayer.instance.resolver = api.resolve;
     QueuePlayer.instance.warm = api.warm;
     QueuePlayer.instance.wireTapResolvers(api);
-    QueuePlayer.instance.relatedSource =
-        (current, {int? limit, List<String>? excludeTitles}) async {
+    QueuePlayer
+        .instance
+        .relatedSource = (current, {int? limit, List<String>? excludeTitles}) async {
       // Prefer the resolved lyrics identity (set on internet rows), then the
       // 'Artist - Title' display string, then the bare title as a last
       // resort — never refuse to query just because the separator is missing
@@ -986,12 +1012,17 @@ Future<void> _openDeepLink(String rawUrl) async {
       }
       title0 = title0
           .replaceAll(
-              RegExp(r'\.(?:mp3|flac|m4a|ogg|opus|wav|aac|wma)$',
-                  caseSensitive: false),
-              '')
+            RegExp(
+              r'\.(?:mp3|flac|m4a|ogg|opus|wav|aac|wma)$',
+              caseSensitive: false,
+            ),
+            '',
+          )
           .trim();
       if (title0.isEmpty) {
-        debugPrint('[autoplay] relatedSource: empty title for "${current.title}"');
+        debugPrint(
+          '[autoplay] relatedSource: empty title for "${current.title}"',
+        );
         return <QueueItem>[];
       }
       // Try recommend first (Spotify-style cross-artist), fall back to radio (same-artist)
@@ -1022,63 +1053,65 @@ Future<void> _openDeepLink(String rawUrl) async {
       }
       if (rows.isEmpty) {
         final seedLabel = artist.isEmpty ? title0 : '$artist - $title0';
-        debugPrint('[autoplay] both recommend and radio returned empty for "$seedLabel"');
+        debugPrint(
+          '[autoplay] both recommend and radio returned empty for "$seedLabel"',
+        );
       }
       Future<QueueItem?> resolveOne(Suggestion s) async {
         try {
-            // If track is on NAS, play local file directly (no internet resolution needed).
-            // Server annotates recommend/radio rows with in_nas/nas_url.
-            final inNas = s.inNas;
-            final nasUrl = s.nasUrl;
-            if (inNas && (nasUrl?.isNotEmpty ?? false)) {
-              return QueueItem(
-                '${s.artist} - ${s.title}',
-                api.fileUrl(nasUrl!),
-                thumbUrl: (s.albumImage?.isNotEmpty ?? false)
-                    ? s.albumImage
-                    : null,
-                album: s.album,
-                fromInternet: false,
-              );
-            }
-            // Fallback: query /api/innas if annotation missing (older server).
-            final nas = await api.inNas(
-              artist: s.artist ?? '',
-              title: s.title ?? '',
-            );
-            if (nas.found && (nas.url?.isNotEmpty ?? false)) {
-              return QueueItem(
-                '${s.artist} - ${s.title}',
-                api.fileUrl(nas.url!),
-                thumbUrl: (nas.albumImage?.isNotEmpty ?? false)
-                    ? nas.albumImage
-                    : null,
-                album: nas.album,
-                fromInternet: false,
-              );
-            }
-            // Not on NAS: resolve via internet (YouTube Music).
-            final r = await api.resolveByName(
-              artist: s.artist ?? '',
-              title: s.title ?? '',
-            );
-            final thumb = r.thumb.isNotEmpty
-                ? api.thumbUrl(r.videoId)
-                : s.albumImage;
+          // If track is on NAS, play local file directly (no internet resolution needed).
+          // Server annotates recommend/radio rows with in_nas/nas_url.
+          final inNas = s.inNas;
+          final nasUrl = s.nasUrl;
+          if (inNas && (nasUrl?.isNotEmpty ?? false)) {
             return QueueItem(
               '${s.artist} - ${s.title}',
-              r.url,
-              thumbUrl: thumb,
-              videoId: r.videoId,
-              album: (s.album?.isNotEmpty ?? false) ? s.album : null,
-              albumImage: s.albumImage,
-              fromInternet: true,
-              lyricsArtist: r.resolvedArtist ?? s.artist,
-              lyricsTitle: r.resolvedTitle ?? s.title,
+              api.fileUrl(nasUrl!),
+              thumbUrl: (s.albumImage?.isNotEmpty ?? false)
+                  ? s.albumImage
+                  : null,
+              album: s.album,
+              fromInternet: false,
             );
-          } catch (_) {
-            return null;
           }
+          // Fallback: query /api/innas if annotation missing (older server).
+          final nas = await api.inNas(
+            artist: s.artist ?? '',
+            title: s.title ?? '',
+          );
+          if (nas.found && (nas.url?.isNotEmpty ?? false)) {
+            return QueueItem(
+              '${s.artist} - ${s.title}',
+              api.fileUrl(nas.url!),
+              thumbUrl: (nas.albumImage?.isNotEmpty ?? false)
+                  ? nas.albumImage
+                  : null,
+              album: nas.album,
+              fromInternet: false,
+            );
+          }
+          // Not on NAS: resolve via internet (YouTube Music).
+          final r = await api.resolveByName(
+            artist: s.artist ?? '',
+            title: s.title ?? '',
+          );
+          final thumb = r.thumb.isNotEmpty
+              ? api.thumbUrl(r.videoId)
+              : s.albumImage;
+          return QueueItem(
+            '${s.artist} - ${s.title}',
+            r.url,
+            thumbUrl: thumb,
+            videoId: r.videoId,
+            album: (s.album?.isNotEmpty ?? false) ? s.album : null,
+            albumImage: s.albumImage,
+            fromInternet: true,
+            lyricsArtist: r.resolvedArtist ?? s.artist,
+            lyricsTitle: r.resolvedTitle ?? s.title,
+          );
+        } catch (_) {
+          return null;
+        }
       }
 
       // Bounded parallelism: resolving ALL rows at once opens dozens of
@@ -1167,8 +1200,7 @@ Future<void> _openDeepLink(String rawUrl) async {
               ),
               if (status.isNotEmpty) ...[
                 const SizedBox(height: 8),
-                Text(status,
-                    style: const TextStyle(fontSize: 12)),
+                Text(status, style: const TextStyle(fontSize: 12)),
               ],
             ],
           ),
@@ -1186,7 +1218,8 @@ Future<void> _openDeepLink(String rawUrl) async {
                         status = tr('Testing…');
                       });
                       final ok = await _testServer(
-                          _normalizeServer(controller.text.trim()));
+                        _normalizeServer(controller.text.trim()),
+                      );
                       setDlg(() {
                         testing = false;
                         status = ok
@@ -1216,9 +1249,11 @@ Future<void> _openDeepLink(String rawUrl) async {
       _api = ApiClient(baseUrl: normalized);
     });
     _api.pinBase(normalized);
-    PackageInfo.fromPlatform().then((pi) {
-      _api.appVersion = pi.version;
-    }).catchError((_) {});
+    PackageInfo.fromPlatform()
+        .then((pi) {
+          _api.appVersion = pi.version;
+        })
+        .catchError((_) {});
     _wireApiAuth(_api);
     _wireAutoplay(_api);
     // A new server means the saved token may not exist there — re-gate.
@@ -1248,8 +1283,11 @@ Future<void> _openDeepLink(String rawUrl) async {
     return ServerContext(
       api: _api,
       child: ListenableBuilder(
-        listenable: Listenable.merge(
-            [ThemeStore.instance, LocaleStore.instance, AuthStore.instance]),
+        listenable: Listenable.merge([
+          ThemeStore.instance,
+          LocaleStore.instance,
+          AuthStore.instance,
+        ]),
         builder: (context, _) => MaterialApp(
           title: 'gungan.fm',
           debugShowCheckedModeBanner: false,
@@ -1268,21 +1306,20 @@ Future<void> _openDeepLink(String rawUrl) async {
                   },
                 )
               : _sessionValid == null
-                  ? const Scaffold(
-                      body: Center(child: CircularProgressIndicator()))
-                  : _sessionValid!
-                      ? _HomeShell(
-                          api: _api,
-                          baseUrl: _baseUrl,
-                          onServer: _changeServer,
-                        )
-                      : LoginScreen(
-                          api: _api,
-                          onDone: () {
-                            if (!mounted) return;
-                            setState(() => _sessionValid = true);
-                          },
-                        ),
+              ? const Scaffold(body: Center(child: CircularProgressIndicator()))
+              : _sessionValid!
+              ? _HomeShell(
+                  api: _api,
+                  baseUrl: _baseUrl,
+                  onServer: _changeServer,
+                )
+              : LoginScreen(
+                  api: _api,
+                  onDone: () {
+                    if (!mounted) return;
+                    setState(() => _sessionValid = true);
+                  },
+                ),
         ),
       ),
     );
@@ -1353,16 +1390,14 @@ class _HomeShellState extends State<_HomeShell> {
                       Icons.library_music,
                       tr('Library'),
                     ),
-                    _bottomTab(
-                        1, Icons.search, Icons.search, tr('Search')),
+                    _bottomTab(1, Icons.search, Icons.search, tr('Search')),
                     _bottomTab(
                       2,
                       Icons.download_outlined,
                       Icons.download,
                       tr('Downloads'),
                     ),
-                    _bottomTab(
-                        3, Icons.history, Icons.history, tr('History')),
+                    _bottomTab(3, Icons.history, Icons.history, tr('History')),
                   ],
                 );
                 switch (style) {

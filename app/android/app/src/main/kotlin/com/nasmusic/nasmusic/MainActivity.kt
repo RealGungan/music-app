@@ -136,13 +136,21 @@ class MainActivity : AudioServiceActivity() {
     // Instagram Stories share: the current track's art file (written by the
     // audio handler for the notification) as the sticker + the resolved
     // track link as the tappable attribution. Returns 'ok' or
-    // 'fail: <reason> artExists=.. artSize=.. resolve=.. authority=.. err=..'
+    // 'fail: <reason> artExists=.. artSize=.. authority=.. err=..'
     // so one User-errors row reveals the cause. False-equivalent = not
     // installed / no art on disk / launch failed → Dart falls back to the
     // generic sheet + clipboard. A user cancel inside Instagram returns
     // nothing (fire-and-forget composer) and needs no handling.
     // Authority MUST match the manifest provider
     // (com.nasmusic.nasmusic.art) — verified, custom ArtFileProvider.
+    //
+    // LAUNCH-FIRST (no resolveActivity gate): package queries are blocked on
+    // many ROMs (Morphe variants, work profiles), so resolveActivity()
+    // returns null even when Instagram IS installed — gating on it produced
+    // false "no-resolve" rows. Just startActivity each candidate package in
+    // order and catch ActivityNotFoundException; the caught exception text is
+    // the diagnostic. resolveActivity survives only in canShareToInstagram
+    // (chooser-row label).
     private fun shareStoryToInstagram(link: String): String {
         val authority = ArtFileProvider.AUTHORITY
         return try {
@@ -156,52 +164,69 @@ class MainActivity : AudioServiceActivity() {
             if (!exists || !readable || size <= 0L) {
                 return "fail: no-art artExists=$exists artSize=$size readable=$readable authority=$authority"
             }
-            // Resolve BEFORE granting: no grant when IG can't handle it.
-            val probe = Intent("com.instagram.share.ADD_TO_STORY").apply {
-                setPackage("com.instagram.android")
-            }
-            val resolved = packageManager.resolveActivity(probe, 0) != null
-            if (!resolved) {
-                return "fail: no-resolve artExists=$exists artSize=$size resolve=false authority=$authority"
-            }
             val uri = ArtFileProvider.ART_URI
-            val story = Intent("com.instagram.share.ADD_TO_STORY").apply {
-                setDataAndType(uri, "image/jpeg")
-                putExtra("source_application", packageName)
-                putExtra("interactive_asset_uri", uri)
-                if (link.isNotBlank()) putExtra("content_url", link)
-                putExtra("top_background_color", "#191919")
-                putExtra("bottom_background_color", "#191919")
-                clipData = ClipData.newUri(contentResolver, "story", uri).apply {
-                    addItem(ClipData.Item(uri))
+            val errs = mutableListOf<String>()
+            for (pkg in storyPackages()) {
+                val story = Intent("com.instagram.share.ADD_TO_STORY").apply {
+                    setDataAndType(uri, "image/jpeg")
+                    putExtra("source_application", packageName)
+                    putExtra("interactive_asset_uri", uri)
+                    if (link.isNotBlank()) putExtra("content_url", link)
+                    putExtra("top_background_color", "#191919")
+                    putExtra("bottom_background_color", "#191919")
+                    clipData = ClipData.newUri(contentResolver, "story", uri).apply {
+                        addItem(ClipData.Item(uri))
+                    }
+                    setPackage(pkg)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
-                setPackage("com.instagram.android")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                grantUriPermission(
+                    pkg, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+                try {
+                    startActivity(story)
+                    return "ok"
+                } catch (e: Exception) {
+                    errs.add("$pkg: $e")
+                }
             }
-            grantUriPermission(
-                "com.instagram.android", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION,
-            )
-            val launched = runCatching { startActivity(story) }.isSuccess
-            if (launched) {
-                "ok"
-            } else {
-                "fail: launch-failed artExists=$exists artSize=$size resolve=$resolved authority=$authority"
-            }
+            "fail: launch-failed artExists=$exists artSize=$size authority=$authority err=${errs.joinToString(" | ")}"
         } catch (e: Exception) {
             "fail: exception=${e} authority=$authority"
         }
     }
 
+    // Stories-capable packages: the two known ones first, then ANY other app
+    // claiming the Stories action (Morphe/modded clients use their own
+    // package names but the same action). Query needs the ADD_TO_STORY
+    // <queries> intent in the manifest; an empty result just means the two
+    // known packages are tried alone.
+    private fun knownIgPackages() =
+        listOf("com.instagram.android", "com.instagram.lite")
+
+    private fun queriedStoryPackages(): List<String> = runCatching {
+        packageManager.queryIntentActivities(
+            Intent("com.instagram.share.ADD_TO_STORY"), 0,
+        ).mapNotNull { it.activityInfo?.packageName }.distinct()
+    }.getOrDefault(emptyList())
+
+    private fun storyPackages(): List<String> =
+        (knownIgPackages() + queriedStoryPackages()).distinct()
+
     // Share-time gate for the IG chooser row: true when Instagram can
     // actually handle a share (Stories composer OR a direct SEND to the
-    // full/Lite package). Lets Dart disable the row with an explanation
-    // instead of falling through to the generic sheet silently.
+    // full/Lite package OR any queried Stories handler). Lets Dart label the
+    // row instead of falling through to the generic sheet silently.
+    // LABEL ONLY — the share paths above launch-first and never consult this,
+    // and Dart always attempts the tiers even when this says false (package
+    // queries can be blocked while startActivity still works).
     private fun canShareToInstagram(): Boolean {
         val story = Intent("com.instagram.share.ADD_TO_STORY").apply {
             setPackage("com.instagram.android")
         }
         if (packageManager.resolveActivity(story, 0) != null) return true
-        return listOf("com.instagram.android", "com.instagram.lite").any { pkg ->
+        if (queriedStoryPackages().isNotEmpty()) return true
+        return knownIgPackages().any { pkg ->
             packageManager.resolveActivity(
                 Intent(Intent.ACTION_SEND).apply { setPackage(pkg) }, 0,
             ) != null
@@ -210,9 +235,11 @@ class MainActivity : AudioServiceActivity() {
 
     // Middle tier: direct IG content share (artwork + caption) pinned to the
     // Instagram package so IG itself opens — never the generic sheet (where
-    // the user could pick WhatsApp). Tries full then Lite. Same art
-    // preflight as Stories: missing/unreadable/zero-byte art → fail string
-    // without launching anything.
+    // the user could pick WhatsApp). Tries full then Lite, then any other
+    // Stories-capable package. Same art preflight as Stories:
+    // missing/unreadable/zero-byte art → fail string without launching.
+    // LAUNCH-FIRST like Stories: no resolveActivity gate, catch the actual
+    // launch exception per package.
     private fun shareDirectToInstagram(text: String): String {
         val authority = ArtFileProvider.AUTHORITY
         return try {
@@ -224,18 +251,12 @@ class MainActivity : AudioServiceActivity() {
                 return "fail: no-art artExists=$exists artSize=$size readable=$readable authority=$authority"
             }
             val uri = ArtFileProvider.ART_URI
-            val pkgs = listOf("com.instagram.android", "com.instagram.lite")
-            val resolveMap = pkgs.associateWith { pkg ->
-                packageManager.resolveActivity(
-                    Intent(Intent.ACTION_SEND).apply { setPackage(pkg) }, 0,
-                ) != null
+            val pkgs = storyPackages()
+            if (pkgs.isEmpty()) {
+                return "fail: no-resolve artExists=$exists artSize=$size authority=$authority err=no IG package found"
             }
-            if (resolveMap.values.none { it }) {
-                return "fail: no-resolve artExists=$exists artSize=$size resolve=$resolveMap authority=$authority"
-            }
+            val errs = mutableListOf<String>()
             for (pkg in pkgs) {
-                val probe = Intent(Intent.ACTION_SEND).apply { setPackage(pkg) }
-                if (packageManager.resolveActivity(probe, 0) == null) continue
                 val send = Intent(Intent.ACTION_SEND).apply {
                     type = "image/jpeg"
                     putExtra(Intent.EXTRA_STREAM, uri)
@@ -245,9 +266,14 @@ class MainActivity : AudioServiceActivity() {
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
                 grantUriPermission(pkg, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                if (runCatching { startActivity(send) }.isSuccess) return "ok"
+                try {
+                    startActivity(send)
+                    return "ok"
+                } catch (e: Exception) {
+                    errs.add("$pkg: $e")
+                }
             }
-            "fail: launch-failed artExists=$exists artSize=$size resolve=$resolveMap authority=$authority"
+            "fail: launch-failed artExists=$exists artSize=$size authority=$authority err=${errs.joinToString(" | ")}"
         } catch (e: Exception) {
             "fail: exception=$e authority=$authority"
         }

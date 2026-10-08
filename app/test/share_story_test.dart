@@ -3,8 +3,10 @@ import 'package:nasmusic/share_story.dart';
 
 void main() {
   test('caption carries subject + link', () {
-    expect(storyCaption('Artist - Title', 'https://open.spotify.com/track/x'),
-        'Artist - Title\nhttps://open.spotify.com/track/x');
+    expect(
+      storyCaption('Artist - Title', 'https://open.spotify.com/track/x'),
+      'Artist - Title\nhttps://open.spotify.com/track/x',
+    );
   });
 
   test('caption tolerates either half missing', () {
@@ -20,8 +22,11 @@ void main() {
   });
 
   test('IG tier order: story -> direct IG -> generic sheet', () {
-    expect(instagramShareTierOrder,
-        ['shareStory', 'shareDirectInstagram', 'shareText']);
+    expect(instagramShareTierOrder, [
+      'shareStory',
+      'shareDirectInstagram',
+      'shareText',
+    ]);
   });
 
   test('generic sheet only when both IG tiers fail', () {
@@ -33,18 +38,43 @@ void main() {
 
   test('no-resolve detail gates the IG row (log-proven both pkgs)', () {
     expect(
-        instagramNoResolve(
-            'fail: no-resolve artExists=true artSize=148000 resolve=false authority=com.nasmusic.nasmusic.art'),
-        true);
+      instagramNoResolve(
+        'fail: no-resolve artExists=true artSize=148000 resolve=false authority=com.nasmusic.nasmusic.art',
+      ),
+      true,
+    );
     expect(
-        instagramNoResolve(
-            'fail: no-resolve artExists=true artSize=148000 resolve={com.instagram.android: false, com.instagram.lite: false} authority=com.nasmusic.nasmusic.art'),
-        true);
+      instagramNoResolve(
+        'fail: no-resolve artExists=true artSize=148000 resolve={com.instagram.android: false, com.instagram.lite: false} authority=com.nasmusic.nasmusic.art',
+      ),
+      true,
+    );
     expect(instagramNoResolve('ok'), false);
     expect(
-        instagramNoResolve(
-            'fail: no-art artExists=false artSize=-1 readable=false authority=com.nasmusic.nasmusic.art'),
-        false);
+      instagramNoResolve(
+        'fail: no-art artExists=false artSize=-1 readable=false authority=com.nasmusic.nasmusic.art',
+      ),
+      false,
+    );
+  });
+
+  test('launch-first: ActivityNotFound in both tiers means not installed', () {
+    const story =
+        'fail: launch-failed artExists=true artSize=148000 authority=com.nasmusic.nasmusic.art err=com.instagram.android: android.content.ActivityNotFoundException';
+    const direct =
+        'fail: launch-failed artExists=true artSize=148000 authority=com.nasmusic.nasmusic.art err=com.instagram.android: android.content.ActivityNotFoundException | com.instagram.lite: android.content.ActivityNotFoundException';
+    expect(instagramNoResolve(story), true);
+    expect(instagramNoResolve(direct), true);
+  });
+
+  test('launch-first: other launch errors are NOT not-installed', () {
+    expect(
+      instagramNoResolve(
+        'fail: launch-failed artExists=true artSize=42 authority=com.nasmusic.nasmusic.art err=com.instagram.android: java.lang.SecurityException: permission denial',
+      ),
+      false,
+    );
+    expect(instagramNoResolve('ok'), false);
   });
 
   test('tier reply: ok/true succeed, fail-strings/throws fall through', () {
@@ -54,10 +84,17 @@ void main() {
     expect(shareTierOk(false), false);
     expect(shareTierOk(null), false);
     expect(
-        shareTierOk(
-            'fail: no-art artExists=false artSize=-1 readable=false authority=com.nasmusic.nasmusic.art'),
-        false);
-    expect(shareTierOk('fail: no-resolve artExists=true artSize=42 '
-        'resolve=false authority=com.nasmusic.nasmusic.art'), false);
+      shareTierOk(
+        'fail: no-art artExists=false artSize=-1 readable=false authority=com.nasmusic.nasmusic.art',
+      ),
+      false,
+    );
+    expect(
+      shareTierOk(
+        'fail: no-resolve artExists=true artSize=42 '
+        'resolve=false authority=com.nasmusic.nasmusic.art',
+      ),
+      false,
+    );
   });
 }

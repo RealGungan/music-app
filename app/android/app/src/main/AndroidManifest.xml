@@ -120,6 +120,18 @@
     <queries>
         <package android:name="com.instagram.android" />
         <package android:name="com.instagram.lite" />
+        <!-- Launch-first discovery: any Morphe/modded client claiming the
+             Stories action under its own package name. The share paths try
+             startActivity per package (catching ActivityNotFoundException),
+             so a blocked query here never stops a launch — this only feeds
+             the chooser-row label. -->
+        <intent>
+            <action android:name="com.instagram.share.ADD_TO_STORY" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="image/jpeg" />
+        </intent>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>

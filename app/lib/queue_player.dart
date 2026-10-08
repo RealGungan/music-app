@@ -32,8 +32,7 @@ class QueueItem {
   final String? baseName;
 
   /// Cache identity: file baseName when known, else the display title.
-  String get identity =>
-      (baseName?.isNotEmpty ?? false) ? baseName! : title;
+  String get identity => (baseName?.isNotEmpty ?? false) ? baseName! : title;
 
   /// True when the user manually moved this item to "play next".
   bool manuallyPlaced = false;
@@ -118,10 +117,25 @@ bool dropStalePositionTick({
   return true;
 }
 
+/// Pause-token gate for EVERY deferred resume (nudge/heal/autoplay refill/
+/// completion advance/_boundLoading/RemoteEngine toggle): a delayed resume
+/// may only fire when its track generation still wins, no pause (or newer
+/// heal) landed since it was scheduled, and audio isn't already flowing.
+/// pause() bumps [_healGen] (see [QueuePlayer.pause]), so any play+
+/// instant-pause auto-resume dies here — no exceptions, no call-site
+/// shortcuts. Pure so unit tests pin the matrix.
+bool resumeFireAllowed({
+  required int gen,
+  required int playGen,
+  required int healToken,
+  required int currentHeal,
+  required bool isPlaying,
+}) => gen == playGen && healToken == currentHeal && !isPlaying;
+
 /// App-wide playback queue with shuffle — the "streaming engine".
 class QueuePlayer {
   QueuePlayer._() {
-_player.onPlayerComplete.listen((_) async {
+    _player.onPlayerComplete.listen((_) async {
       // Dropout guard: a completion with most of the track unplayed is a
       // dead network stream, not a finished song — heal it in place
       // instead of skipping to the next track. Completions landing within
@@ -149,14 +163,15 @@ _player.onPlayerComplete.listen((_) async {
       // playing), so seal the full duration — otherwise finished songs
       // bank ~0s and Wrapped only ever records skips.
       final fullSec = max(
-          currentPosition.inSeconds, trackDuration.value.inSeconds);
+        currentPosition.inSeconds,
+        trackDuration.value.inSeconds,
+      );
       if (repeatEnabled.value) {
         _playCurrent(completedSecs: fullSec);
       } else {
         if (items.length < 2) {
           // Single-item queue: next() no-ops, so nothing would seal this.
-          PlayLog.switched(
-              currentTitle.value, fullSec, currentTitle.value);
+          PlayLog.switched(currentTitle.value, fullSec, currentTitle.value);
         }
         await next(completedSecs: fullSec);
         await _maybeAutoplay(force: true);
@@ -204,7 +219,10 @@ _player.onPlayerComplete.listen((_) async {
     _player.onError.listen((e) {
       lastError.value = e;
       // Log playback error for debugging
-      _api?.logClientError('playback-error', 'title=${currentTitle.value} err=$e');
+      _api?.logClientError(
+        'playback-error',
+        'title=${currentTitle.value} err=$e',
+      );
       // Expired ?token= surfaces as a 401 here — heal would retry the same
       // dead URL forever, so bounce to login instead (no heal, no loop).
       if (e.contains('401')) {
@@ -231,8 +249,7 @@ _player.onPlayerComplete.listen((_) async {
       _connDebounce?.cancel();
       _connDebounce = Timer(const Duration(milliseconds: 1500), () async {
         debugPrint('[queue] connectivity changed: $results');
-        final off =
-            results.every((r) => r == ConnectivityResult.none);
+        final off = results.every((r) => r == ConnectivityResult.none);
         // Update on every debounced emission (not just transitions) so a
         // cold start into airplane mode still signals.
         isOffline.value = off;
@@ -254,8 +271,7 @@ _player.onPlayerComplete.listen((_) async {
       // playing fine. Judging that frozen clock a stall restarts the
       // song every ~12s with the screen off. Skip judging entirely —
       // on return the jump resets the baseline below.
-      if (WidgetsBinding.instance.lifecycleState !=
-          AppLifecycleState.resumed) {
+      if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
         _watchPos = position.value;
         _watchSince = DateTime.now();
         return;
@@ -403,9 +419,9 @@ _player.onPlayerComplete.listen((_) async {
   /// radio-only check false-negatives — ping decides. 3s cap, never blocks.
   static Future<bool> probeOffline({ApiClient? api}) async {
     try {
-      final res = await Connectivity()
-          .checkConnectivity()
-          .timeout(const Duration(milliseconds: 1500));
+      final res = await Connectivity().checkConnectivity().timeout(
+        const Duration(milliseconds: 1500),
+      );
       if (res.every((r) => r == ConnectivityResult.none)) return true;
     } catch (_) {
       return false;
@@ -484,8 +500,7 @@ _player.onPlayerComplete.listen((_) async {
             .inNas(artist: artist, title: title)
             .timeout(const Duration(seconds: 2));
         final base = nas.baseName ?? '';
-        if (!(nas.found && (nas.url?.isNotEmpty ?? false)) ||
-            base.isEmpty) {
+        if (!(nas.found && (nas.url?.isNotEmpty ?? false)) || base.isEmpty) {
           return null;
         }
         if (normCore(base) != normCore('$artist - $title')) return null;
@@ -511,7 +526,8 @@ _player.onPlayerComplete.listen((_) async {
     QueueItem current, {
     int limit,
     List<String> excludeTitles,
-  })? relatedSource;
+  })?
+  relatedSource;
 
   bool _autoplaying = false;
   int _autoplayForIndex = -1;
@@ -955,6 +971,7 @@ _player.onPlayerComplete.listen((_) async {
     _healGen++;
     return _player.pause();
   }
+
   Future<void> resume() => _player.resume();
   Future<void> stop() => _player.stop();
 
@@ -1068,8 +1085,13 @@ _player.onPlayerComplete.listen((_) async {
         // Hung online resolve (NAS dead, radio up): cached file now at 0,
         // regardless of the offline flag — same as heal failover.
         if (resolveTimedOut && gen == _playGen) {
-          if (await _failoverCached(item, Duration.zero, playing,
-              hid: playHeal, gen: gen)) {
+          if (await _failoverCached(
+            item,
+            Duration.zero,
+            playing,
+            hid: playHeal,
+            gen: gen,
+          )) {
             return;
           }
         }
@@ -1088,7 +1110,8 @@ _player.onPlayerComplete.listen((_) async {
               index = n;
               playPos = n;
               DiagLog.restart.log(
-                  'offline redirect -> idx=$n "${items[n].title}"');
+                'offline redirect -> idx=$n "${items[n].title}"',
+              );
               await _playCurrent(skipDepth: skipDepth);
               return;
             }
@@ -1105,10 +1128,13 @@ _player.onPlayerComplete.listen((_) async {
           final n = await _nextWarmIndex(index, kMaxResolveSkips);
           if (n >= 0 && n != index && gen == _playGen) {
             lastError.value = tr('Play failed');
-            _api?.logClientError('unplayable-skip',
-                '${item.title} -> ${items[n].title} (depth=$skipDepth)');
+            _api?.logClientError(
+              'unplayable-skip',
+              '${item.title} -> ${items[n].title} (depth=$skipDepth)',
+            );
             DiagLog.restart.log(
-                'resolve-skip depth=$skipDepth -> idx=$n "${items[n].title}"');
+              'resolve-skip depth=$skipDepth -> idx=$n "${items[n].title}"',
+            );
             index = n;
             playPos = n;
             await _playCurrent(skipDepth: skipDepth + 1);
@@ -1151,8 +1177,13 @@ _player.onPlayerComplete.listen((_) async {
           url.startsWith(_api!.serverBase)) {
         if (!isOffline.value && await _nasDown()) isOffline.value = true;
         if (isOffline.value && gen == _playGen) {
-          if (await _failoverCached(item, Duration.zero, playing,
-              hid: playHeal, gen: gen)) {
+          if (await _failoverCached(
+            item,
+            Duration.zero,
+            playing,
+            hid: playHeal,
+            gen: gen,
+          )) {
             return;
           }
           final n = await _nextCachedIndex(index);
@@ -1160,7 +1191,8 @@ _player.onPlayerComplete.listen((_) async {
             index = n;
             playPos = n;
             DiagLog.restart.log(
-                'offline redirect -> idx=$n "${items[n].title}"');
+              'offline redirect -> idx=$n "${items[n].title}"',
+            );
             await _playCurrent();
             return;
           }
@@ -1168,18 +1200,20 @@ _player.onPlayerComplete.listen((_) async {
       }
       // Stop runs WITHOUT await: awaiting the teardown before play() adds
       // up to seconds to every tap; the new source replaces it anyway.
-      unawaited(_player.stop().timeout(const Duration(seconds: 8)).catchError((
-        _,
-        __,
-      ) {}));
+      unawaited(
+        _player
+            .stop()
+            .timeout(const Duration(seconds: 8))
+            .catchError((_, __) {}),
+      );
       if (gen != _playGen) return;
       debugPrint('[queue] play url: $url');
       final src = url.startsWith('file://')
           ? 'file'
           : (url.contains('/staging/api/stream') ||
-                  url.contains('/staging/resolve/'))
-              ? 'relay'
-              : 'nas';
+                url.contains('/staging/resolve/'))
+          ? 'relay'
+          : 'nas';
       DiagLog.restart.log(
         'play idx=$index src=$src title="${items[index].title}" url=$url',
       );
@@ -1213,8 +1247,10 @@ _player.onPlayerComplete.listen((_) async {
           if (gen != _playGen) return;
           loading.value = false;
           lastError.value = e.toString();
-          _api?.logClientError('playback',
-              '${items[index].title}: $e (elapsed=${sw.elapsedMilliseconds}ms)');
+          _api?.logClientError(
+            'playback',
+            '${items[index].title}: $e (elapsed=${sw.elapsedMilliseconds}ms)',
+          );
           if (e.toString().contains('401')) _api?.onAuthFailure?.call();
         }),
       );
@@ -1225,7 +1261,15 @@ _player.onPlayerComplete.listen((_) async {
       final tapTitle = item.title;
       final tapHeal = _healGen;
       Future.delayed(const Duration(seconds: 2), () {
-        if (gen != _playGen || tapHeal != _healGen || _player.isPlaying) {
+        // Fire-time pause-token gate (no exceptions): play+instant-pause
+        // must never auto-resume via this nudge.
+        if (!resumeFireAllowed(
+          gen: gen,
+          playGen: _playGen,
+          healToken: tapHeal,
+          currentHeal: _healGen,
+          isPlaying: _player.isPlaying,
+        )) {
           return;
         }
         _player.resume();
@@ -1238,8 +1282,10 @@ _player.onPlayerComplete.listen((_) async {
         }
         loading.value = false;
         lastError.value = tr('Play failed');
-        _api?.logClientError('timeout',
-            '$tapTitle (slow-start, no audio after ${sw.elapsedMilliseconds}ms)');
+        _api?.logClientError(
+          'timeout',
+          '$tapTitle (slow-start, no audio after ${sw.elapsedMilliseconds}ms)',
+        );
       });
       _prefetchNext();
       // Look-ahead covers NEXT songs only — the playing URL streams live
@@ -1252,11 +1298,13 @@ _player.onPlayerComplete.listen((_) async {
       // Only surface errors for the winning operation.
       if (gen == _playGen) {
         loading.value = false;
-        lastError.value =
-            e is TimeoutException ? tr('Play failed') : e.toString();
+        lastError.value = e is TimeoutException
+            ? tr('Play failed')
+            : e.toString();
         _api?.logClientError(
-            e is TimeoutException ? 'timeout' : 'playback',
-            '${items[index].title}: $e (elapsed=${sw.elapsedMilliseconds}ms)');
+          e is TimeoutException ? 'timeout' : 'playback',
+          '${items[index].title}: $e (elapsed=${sw.elapsedMilliseconds}ms)',
+        );
       }
     }
   }
@@ -1279,7 +1327,7 @@ _player.onPlayerComplete.listen((_) async {
     if (i > 0) {
       return (
         artist: t.substring(0, i).trim(),
-        title: t.substring(i + 3).trim()
+        title: t.substring(i + 3).trim(),
       );
     }
     return (artist: '', title: t);
@@ -1308,19 +1356,24 @@ _player.onPlayerComplete.listen((_) async {
     // direct NAS file URL or a resolved googlevideo URL — those play with
     // zero network waits.
     var url = item.url;
-    final isDirect = url.startsWith('file://') ||
+    final isDirect =
+        url.startsWith('file://') ||
         url.contains('/staging/file/') ||
         url.contains('/staging/pl/') ||
         url.contains('/staging/u/') ||
         (url.startsWith('http') && !url.contains('/staging/'));
     final needsResolve =
-        url.isEmpty || url.contains('/staging/resolve/') || item.resolveName != null;
+        url.isEmpty ||
+        url.contains('/staging/resolve/') ||
+        item.resolveName != null;
     if (!isDirect && nasLookup != null) {
       final id = _nasIdentity(item);
       if (id != null && (id.artist.isNotEmpty || id.title.isNotEmpty)) {
         try {
-          final nasUrl = await nasLookup!(id.artist, id.title)
-              .timeout(const Duration(seconds: 2));
+          final nasUrl = await nasLookup!(
+            id.artist,
+            id.title,
+          ).timeout(const Duration(seconds: 2));
           if (nasUrl != null && nasUrl.isNotEmpty && gen == _playGen) {
             DiagLog.restart.log('nas-first hit "${item.title}"');
             return nasUrl;
@@ -1371,8 +1424,10 @@ _player.onPlayerComplete.listen((_) async {
         var rn = item.resolveName!;
         // The tapped song is resolved by the caller, so it already has a real
         // URL; only rows further down the album need the lazy lookup.
-        url = await nameResolver!(rn.artist, rn.title)
-            .timeout(const Duration(seconds: 10));
+        url = await nameResolver!(
+          rn.artist,
+          rn.title,
+        ).timeout(const Duration(seconds: 10));
         if (gen != _playGen) return null;
         final idx = items.indexOf(item);
         if (idx < 0 || !identical(items[idx], item)) return null;
@@ -1421,23 +1476,33 @@ _player.onPlayerComplete.listen((_) async {
   /// lands during the seek await must NOT auto-resume — check [hid]/[gen]
   /// AFTER the await, not just at schedule time.
   Future<void> _healSeekResume(
-      Duration target, bool wasPlaying, String why,
-      {required int hid, required int gen}) async {
+    Duration target,
+    bool wasPlaying,
+    String why, {
+    required int hid,
+    required int gen,
+  }) async {
     final before = position.value;
     await _player.seek(target);
     // Fire-time check: pause bumps _healGen, track change bumps _playGen.
     if (hid != _healGen || gen != _playGen) return;
     if (wasPlaying) await _player.resume();
-    DiagLog.restart.log('heal($why) seek-resume at=${target.inSeconds}s '
-        'pos-before=${before.inSeconds}s pos-after=${target.inSeconds}s');
+    DiagLog.restart.log(
+      'heal($why) seek-resume at=${target.inSeconds}s '
+      'pos-before=${before.inSeconds}s pos-after=${target.inSeconds}s',
+    );
   }
 
   /// Play the cached file:// copy at [target] (dead relay/network-URL
   /// failover — tried regardless of [isOffline], not only when the flag
   /// says so). True = recovered, caller returns.
   Future<bool> _failoverCached(
-      QueueItem item, Duration target, bool wasPlaying,
-      {required int hid, required int gen}) async {
+    QueueItem item,
+    Duration target,
+    bool wasPlaying, {
+    required int hid,
+    required int gen,
+  }) async {
     final cur = await _cachedUriFor(item);
     if (cur == null) return false;
     if (hid != _healGen || gen != _playGen) return false;
@@ -1455,11 +1520,14 @@ _player.onPlayerComplete.listen((_) async {
       _lastHealEnd = DateTime.now();
       _lastPlayStartAt = DateTime.now();
       DiagLog.restart.log(
-          'heal failover cached at=${target.inSeconds}s (net url dead)');
+        'heal failover cached at=${target.inSeconds}s (net url dead)',
+      );
       // Queued when offline, sent when back online — the release-visible
       // record (debugPrint is stripped in release builds).
       _api?.logClientError(
-          'heal-cache-hit', '${item.title} at=${target.inSeconds}s');
+        'heal-cache-hit',
+        '${item.title} at=${target.inSeconds}s',
+      );
       _refreshEngineNext();
       return true;
     } catch (_) {
@@ -1494,7 +1562,8 @@ _player.onPlayerComplete.listen((_) async {
     if (reason == 'network-change' && playing) {
       if (!isOffline.value && await _nasDown()) isOffline.value = true;
       DiagLog.restart.log(
-          'heal($reason) lazy keep-buffer idx=$index offline=${isOffline.value}');
+        'heal($reason) lazy keep-buffer idx=$index offline=${isOffline.value}',
+      );
       _refreshEngineNext();
       return;
     }
@@ -1545,9 +1614,7 @@ _player.onPlayerComplete.listen((_) async {
     const waits = [0, 1, 2, 4, 8, 15];
     for (var attempt = 0; attempt < waits.length; attempt++) {
       if (hid != _healGen || gen != _playGen) return;
-      if (idx != index ||
-          idx >= items.length ||
-          !identical(items[idx], item)) {
+      if (idx != index || idx >= items.length || !identical(items[idx], item)) {
         return; // queue moved on
       }
       if (attempt > 0) {
@@ -1584,8 +1651,13 @@ _player.onPlayerComplete.listen((_) async {
                 await _player.setSource(cur);
                 _loadedUrl = cur;
               }
-              await _healSeekResume(target, wasPlaying, reason,
-                  hid: hid, gen: gen);
+              await _healSeekResume(
+                target,
+                wasPlaying,
+                reason,
+                hid: hid,
+                gen: gen,
+              );
               if (hid != _healGen) {
                 try {
                   await _player.pause();
@@ -1595,7 +1667,9 @@ _player.onPlayerComplete.listen((_) async {
               loading.value = false;
               _lastHealEnd = DateTime.now();
               _lastPlayStartAt = DateTime.now();
-              DiagLog.restart.log('heal($reason) cached-current at=${target.inSeconds}s');
+              DiagLog.restart.log(
+                'heal($reason) cached-current at=${target.inSeconds}s',
+              );
               _refreshEngineNext();
               return;
             } catch (_) {}
@@ -1608,13 +1682,15 @@ _player.onPlayerComplete.listen((_) async {
             playPos = n;
             loading.value = false;
             DiagLog.restart.log(
-                'heal($reason) offline skip (no cached-current) -> idx=$n');
+              'heal($reason) offline skip (no cached-current) -> idx=$n',
+            );
             unawaited(_playCurrent());
             return;
           }
           if (n >= 0 && !wasPlaying) {
             DiagLog.restart.log(
-                'heal($reason) offline next-cached idx=$n ignored (paused)');
+              'heal($reason) offline next-cached idx=$n ignored (paused)',
+            );
           }
           loading.value = false;
           lastError.value = 'No connection — tap play to retry.';
@@ -1631,8 +1707,7 @@ _player.onPlayerComplete.listen((_) async {
           await _player.setSource(url);
           _loadedUrl = url;
         }
-        await _healSeekResume(target, wasPlaying, reason,
-            hid: hid, gen: gen);
+        await _healSeekResume(target, wasPlaying, reason, hid: hid, gen: gen);
         // User paused mid-heal: never leave it playing — re-pause.
         if (hid != _healGen) {
           try {
@@ -1646,8 +1721,13 @@ _player.onPlayerComplete.listen((_) async {
         // same position — don't just back off on a corpse.
         if (hid == _healGen &&
             gen == _playGen &&
-            await _failoverCached(item, target, wasPlaying,
-                hid: hid, gen: gen)) {
+            await _failoverCached(
+              item,
+              target,
+              wasPlaying,
+              hid: hid,
+              gen: gen,
+            )) {
           return;
         }
         continue; // engine rejected it — back off and retry
@@ -1689,8 +1769,7 @@ _player.onPlayerComplete.listen((_) async {
       // now instead of another backoff on the same corpse.
       if (hid == _healGen &&
           gen == _playGen &&
-          await _failoverCached(item, target, wasPlaying,
-              hid: hid, gen: gen)) {
+          await _failoverCached(item, target, wasPlaying, hid: hid, gen: gen)) {
         return;
       }
       // else: fall through to the next backoff attempt
@@ -1714,7 +1793,8 @@ _player.onPlayerComplete.listen((_) async {
   /// file:// URI for a cached copy, trying title, identity alt key, then
   /// explicit downloads. Null = nothing playable offline.
   Future<String?> _cachedUriFor(QueueItem it) async {
-    final pre = await PrefetchStore.fileFor(it.title, it.baseName) ??
+    final pre =
+        await PrefetchStore.fileFor(it.title, it.baseName) ??
         await PrefetchStore.fileFor(it.identity, it.title);
     if (pre != null) return Uri.file(pre).toString();
     return OfflineStore.localUriFor(it.title, it.baseName) ??
@@ -1770,7 +1850,8 @@ _player.onPlayerComplete.listen((_) async {
   }
 
   /// Manual retry after a give-up (or any stall): fresh budget, fresh play.
-  Future<void> retryCurrent() async {    _healStrikes = 0;
+  Future<void> retryCurrent() async {
+    _healStrikes = 0;
     _gaveUp = false;
     lastError.value = null;
     await _playCurrent();
@@ -1818,12 +1899,15 @@ _player.onPlayerComplete.listen((_) async {
     if (_autoplaying) {
       if (planner.shouldRefill(remaining)) {
         DiagLog.restart.log(
-            'fill skip: concurrent flight idx=$index remaining=$remaining');
+          'fill skip: concurrent flight idx=$index remaining=$remaining',
+        );
       }
       return;
     }
     if (!force && !planner.shouldRefill(remaining)) {
-      debugPrint('[autoplay] shouldRefill=false remaining=$remaining refillWhen=${planner.refillWhen}');
+      debugPrint(
+        '[autoplay] shouldRefill=false remaining=$remaining refillWhen=${planner.refillWhen}',
+      );
       return;
     }
     // Single-item start: the optimistic head hasn't produced audio yet and
@@ -1831,16 +1915,23 @@ _player.onPlayerComplete.listen((_) async {
     // now appends internet rows the tail then fights (len=1 rem=0 race).
     // Defer until playing is confirmed (the state listener re-arms); the
     // completion path (force:true) still tops up a truly single queue.
-    if (!force && items.length <= 1 && _lastPlayerState != PlayerState.playing) {
-      DiagLog.restart.log('fill skip: single-item starting (audio unconfirmed)');
+    if (!force &&
+        items.length <= 1 &&
+        _lastPlayerState != PlayerState.playing) {
+      DiagLog.restart.log(
+        'fill skip: single-item starting (audio unconfirmed)',
+      );
       return;
     }
     if (_autoplayForIndex == index) {
       DiagLog.restart.log(
-          'fill skip: already filled for idx=$index remaining=$remaining');
+        'fill skip: already filled for idx=$index remaining=$remaining',
+      );
       return;
     }
-    debugPrint('[autoplay] triggering fill idx=$index remaining=$remaining force=$force');
+    debugPrint(
+      '[autoplay] triggering fill idx=$index remaining=$remaining force=$force',
+    );
     _autoplayForIndex = index;
     await _fillRelated();
   }
@@ -1889,11 +1980,14 @@ _player.onPlayerComplete.listen((_) async {
     _autoplaying = true;
     // Identity (not raw index): a head-trim mid-flight shifts indices but
     // keeps the same song at the adjusted index — a jump changes the song.
-    final requestKey =
-        (index >= 0 && index < items.length) ? _itemKey(items[index]) : '';
+    final requestKey = (index >= 0 && index < items.length)
+        ? _itemKey(items[index])
+        : '';
     try {
       final remaining = items.length - index - 1;
-      debugPrint('[autoplay] _fillRelated start idx=$index remaining=$remaining maxRows=$maxRows');
+      debugPrint(
+        '[autoplay] _fillRelated start idx=$index remaining=$remaining maxRows=$maxRows',
+      );
       // Continuous refill: when called as the per-song top-up (maxRows null),
       // bail out if the queue is ALREADY at the keep-ahead horizon — nothing
       // to add. The explicit maxRows path (Add more / scroll) always fetches.
@@ -1904,8 +1998,10 @@ _player.onPlayerComplete.listen((_) async {
       final headroom = _hardCap - items.length;
       if (headroom <= 0) return;
       if (maxRows == null && deficit <= 0) return;
-final int need =
-          (maxRows ?? deficit).clamp(1, min(planner.keepAhead * 2, headroom));
+      final int need = (maxRows ?? deficit).clamp(
+        1,
+        min(planner.keepAhead * 2, headroom),
+      );
       // Everything this session already queued/played, so a refill for the
       // SAME seed returns FRESH rows from the server (endless scroll — not
       // the same 15 recycled and then deduped to nothing). Sent as
@@ -1922,7 +2018,9 @@ final int need =
       // Ask for a bigger pool than we'll append so pick() can randomize
       // instead of always taking the same closest tracks.
       final int batch = max(need, _requestBatch);
-      debugPrint('[autoplay] calling relatedSource batch=$batch seed="${items[index].title}"');
+      debugPrint(
+        '[autoplay] calling relatedSource batch=$batch seed="${items[index].title}"',
+      );
       final rel = await relatedSource!(
         items[index],
         limit: batch,
@@ -1931,7 +2029,8 @@ final int need =
       debugPrint('[autoplay] relatedSource returned ${rel.length} rows');
       if (rel.isEmpty) {
         DiagLog.restart.log(
-            'fill empty: server returned 0 rows (seed="${items[index].title}")');
+          'fill empty: server returned 0 rows (seed="${items[index].title}")',
+        );
         // A starving refill (deficit>0, zero rows back) used to vanish
         // silently. At most one row per seed index (guarded above), capped
         // server-side — and it answers "autoplay just stops" for good.
@@ -1947,9 +2046,7 @@ final int need =
       // land at the tail anyway instead of being dropped (dropping them is
       // what starved the queue while tapping). Re-arm so the next trigger
       // still tops up for the new position.
-      if (!autoplayEnabled.value ||
-          index < 0 ||
-          index >= items.length) {
+      if (!autoplayEnabled.value || index < 0 || index >= items.length) {
         return;
       }
       if (_itemKey(items[index]) != requestKey) {
@@ -1961,8 +2058,7 @@ final int need =
           _autoplayForIndex = -1;
           return;
         }
-        DiagLog.restart.log(
-            'fill landed late (idx=$index) — appending anyway');
+        DiagLog.restart.log('fill landed late (idx=$index) — appending anyway');
         _autoplayForIndex = -1;
       }
 
@@ -1997,7 +2093,8 @@ final int need =
       );
       if (picked.isEmpty) {
         DiagLog.restart.log(
-            'fill picked=0 rel=${rel.length} (all seen/recent — pool exhausted)');
+          'fill picked=0 rel=${rel.length} (all seen/recent — pool exhausted)',
+        );
         return;
       }
 
@@ -2012,7 +2109,7 @@ final int need =
         _seenKeys.add(c.key);
         if (_seenKeys.length > 300) _seenKeys.remove(_seenKeys.first);
       }
-if (fresh.isEmpty) return;
+      if (fresh.isEmpty) return;
       // "from internet" autoplay is strictly an END-OF-QUEUE top-up.
       // Safety cap at the append point (see [_hardCap]).
       final roomLeft = _hardCap - items.length;
@@ -2021,7 +2118,8 @@ if (fresh.isEmpty) return;
       items.addAll(added);
       queueLength.value = items.length;
       DiagLog.restart.log(
-          'fill +${added.length} rows (seed="${seed.artist} - ${seed.title}")');
+        'fill +${added.length} rows (seed="${seed.artist} - ${seed.title}")',
+      );
       _refreshEngineNext();
     } catch (e, st) {
       debugPrint('[autoplay] ERROR in _fillRelated: $e');
@@ -2201,16 +2299,21 @@ if (fresh.isEmpty) return;
     // stale position would bank ~0s for a fully-played song.
     final prevTitle = currentTitle.value;
     final prevSec = max(
-        position.value.inSeconds, trackDuration.value.inSeconds);
+      position.value.inSeconds,
+      trackDuration.value.inSeconds,
+    );
     index = n;
     playPos = n;
     final it = items[index];
-    currentTitle.value = it.title;
-    PlayLog.switched(prevTitle, prevSec, it.title);
-    currentThumb.value = it.thumbUrl ?? '';
+    // Track-switch stamp: zero the clock BEFORE publishing the new title
+    // (same order as _playCurrent) — listeners rebuild off the title, so a
+    // title-first order flashes the previous song's timestamp for a frame.
     position.value = Duration.zero;
     _posMax = Duration.zero;
     trackDuration.value = Duration.zero;
+    currentTitle.value = it.title;
+    PlayLog.switched(prevTitle, prevSec, it.title);
+    currentThumb.value = it.thumbUrl ?? '';
     AppHistory.recordListen(it.title);
     final recentKey = it.title.toLowerCase();
     _recentlyPlayed.remove(recentKey);
@@ -2310,8 +2413,11 @@ if (fresh.isEmpty) return;
 
   void _prefetchAheadFiles(int gen) async {
     if (items.isEmpty || index < 0) return;
-    final upcoming =
-        PrefetchStore.window(items, index + 1, PrefetchStore.aheadCount);
+    final upcoming = PrefetchStore.window(
+      items,
+      index + 1,
+      PrefetchStore.aheadCount,
+    );
     if (upcoming.isEmpty) return;
     // Supersede the previous pass first: its in-flight downloads die
     // with its client instead of fighting the new track's stream.
@@ -2338,8 +2444,10 @@ if (fresh.isEmpty) return;
       } else if (it.resolveName != null && nameResolver != null) {
         final rn = it.resolveName!;
         try {
-          url = await nameResolver!(rn.artist, rn.title)
-              .timeout(const Duration(seconds: 10));
+          url = await nameResolver!(
+            rn.artist,
+            rn.title,
+          ).timeout(const Duration(seconds: 10));
         } catch (_) {
           return;
         }
@@ -2358,13 +2466,16 @@ if (fresh.isEmpty) return;
       // it through; otherwise ONE batch call covers the whole wave — never
       // a likedStatus roundtrip per row (funnel: N calls fighting audio).
       final liked = it.liked ?? _waveLiked[it.identity];
-      await PrefetchStore.fetch(it.title, url,
-          client: passClient,
-          baseName: it.baseName,
-          thumbUrl: (it.thumbUrl?.isNotEmpty ?? false)
-              ? it.thumbUrl
-              : it.albumImage,
-          liked: liked);
+      await PrefetchStore.fetch(
+        it.title,
+        url,
+        client: passClient,
+        baseName: it.baseName,
+        thumbUrl: (it.thumbUrl?.isNotEmpty ?? false)
+            ? it.thumbUrl
+            : it.albumImage,
+        liked: liked,
+      );
     }
 
     // One batch liked-status lookup for the whole wave (rows without a
@@ -2376,15 +2487,16 @@ if (fresh.isEmpty) return;
       if (_api != null) {
         final missing = [
           for (final it in upcoming)
-            if (it.liked == null) it.identity
+            if (it.liked == null) it.identity,
         ];
         if (missing.isNotEmpty) {
-          waveLiked.addAll(await _api!
-              .likedBatch(missing)
-              .timeout(const Duration(seconds: 8)));
+          waveLiked.addAll(
+            await _api!.likedBatch(missing).timeout(const Duration(seconds: 8)),
+          );
         }
       }
-    } catch (_) {}    Future<void> worker(ListQueue<QueueItem> pending) async {
+    } catch (_) {}
+    Future<void> worker(ListQueue<QueueItem> pending) async {
       while (true) {
         if (gen != _playGen) return;
         if (pending.isEmpty) return;
