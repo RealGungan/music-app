@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.net.Uri
 import android.provider.Settings
+import android.util.Log
 import android.media.AudioManager
 import android.os.Build
 import androidx.core.content.ContextCompat
@@ -26,6 +27,7 @@ class MainActivity : AudioServiceActivity() {
         // never reach Dart. A process-lifetime receiver survives that.
         @Volatile private var audioEventChannel: MethodChannel? = null
         @Volatile private var noisyReceiver: BroadcastReceiver? = null
+        private const val SHARE_TAG = "NASMusicShare"
     }
 
     // Deep links (open.spotify.com / music.youtube.com / youtu.be) arrive
@@ -49,25 +51,41 @@ class MainActivity : AudioServiceActivity() {
         )
         MethodChannel(messenger!!, "com.nasmusic.nasmusic/share")
             .setMethodCallHandler { call, result ->
+                // Every tier logs its entry + outcome: the 1.0.268 IG tap
+                // left ZERO logcat output, so a dead tap was indistinguishable
+                // from a working one. Logcat now shows the full chain.
+                Log.i(SHARE_TAG, "call ${call.method}")
                 if (call.method == "shareText") {
                     val text = call.argument<String>("text").orEmpty()
                     val subject = call.argument<String>("subject").orEmpty()
-                    result.success(shareText(text, subject))
+                    val ok = shareText(text, subject)
+                    Log.i(SHARE_TAG, "result shareText ok=$ok")
+                    result.success(ok)
                 } else if (call.method == "shareStory") {
                     val link = call.argument<String>("link").orEmpty()
-                    result.success(shareStoryToInstagram(link))
+                    val r = shareStoryToInstagram(link)
+                    Log.i(SHARE_TAG, "result shareStory $r")
+                    result.success(r)
                 } else if (call.method == "shareDirectInstagram") {
                     val text = call.argument<String>("text").orEmpty()
-                    result.success(shareDirectToInstagram(text))
+                    val r = shareDirectToInstagram(text)
+                    Log.i(SHARE_TAG, "result shareDirectInstagram $r")
+                    result.success(r)
                 } else if (call.method == "shareInstagramFallback") {
                     val text = call.argument<String>("text").orEmpty()
-                    result.success(shareInstagramFallback(text))
+                    val r = shareInstagramFallback(text)
+                    Log.i(SHARE_TAG, "result shareInstagramFallback $r")
+                    result.success(r)
                 } else if (call.method == "copyLinkOpenInstagram") {
                     val link = call.argument<String>("link").orEmpty()
                     val text = call.argument<String>("text").orEmpty()
-                    result.success(copyLinkOpenInstagram(link, text))
+                    val r = copyLinkOpenInstagram(link, text)
+                    Log.i(SHARE_TAG, "result copyLinkOpenInstagram $r")
+                    result.success(r)
                 } else if (call.method == "canShareToInstagram") {
-                    result.success(canShareToInstagram())
+                    val ok = canShareToInstagram()
+                    Log.i(SHARE_TAG, "result canShareToInstagram ok=$ok")
+                    result.success(ok)
                 } else {
                     result.notImplemented()
                 }

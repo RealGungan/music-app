@@ -124,6 +124,13 @@ class LocalEngine implements PlaybackEngine {
 String? pauseDropDiagnostic({required bool acked}) =>
     acked ? null : 'pause-dropped';
 
+/// Mirror for backgrounded resume (notification-widget toggle while the UI
+/// isolate sleeps): null when playing acked, 'resume-dropped' when even the
+/// retry got nothing — the toggle must never die silently into a live icon
+/// with dead audio. Pure so tests pin the log string.
+String? resumeDropDiagnostic({required bool acked}) =>
+    acked ? null : 'resume-dropped';
+
 /// Mobile playback backend. Prefers the audioplayers player that lives inside
 /// the audio_service handler isolate (so audio survives the UI isolate being
 /// suspended in the background), and transparently falls back to a local
@@ -327,6 +334,18 @@ class RemoteEngine implements PlaybackEngine {
     }
   }
 
+  /// Waits for the handler's playing state ack (via feedRemoteEvent).
+  Future<bool> _waitPlaying(Duration t) async {
+    try {
+      await _sbState.stream
+          .firstWhere((s) => s == PlayerState.playing)
+          .timeout(t);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   @override
   Future<void> pause() async {
     // Awaited + acknowledged: the old fire-and-forget _send silently
@@ -348,9 +367,22 @@ class RemoteEngine implements PlaybackEngine {
 
   @override
   Future<void> resume() async {
+    // Awaited + acknowledged like pause(): a backgrounded notification
+    // toggle whose resume is dropped (handler killed mid-toggle) used to
+    // leave a live icon over dead audio with zero output. One retry, then
+    // log resume-dropped.
     _tryEngage();
     if (_remoteUp) {
       _send({'cmd': 'resume'});
+      // Stopped/completed: resume is a no-op with no ack coming — don't
+      // stall the tap waiting for one (old fire-and-forget behavior).
+      if (_lastState != PlayerState.paused) return;
+      if (await _waitPlaying(const Duration(milliseconds: 700))) return;
+      _tryEngage();
+      _send({'cmd': 'resume'});
+      if (await _waitPlaying(const Duration(milliseconds: 700))) return;
+      final d = resumeDropDiagnostic(acked: false);
+      debugPrint('[RemoteEngine] $d url=$_lastUrl remoteUp=$_remoteUp');
       return;
     }
     return _local.resume();
@@ -366,19 +398,16 @@ class RemoteEngine implements PlaybackEngine {
   }) async {
     _tryEngage();
     if (_remoteUp) {
-      Future<PlayerState>? waiter;
-      try {
-        waiter = _sbState.stream.first.timeout(timeout);
-      } catch (_) {
-        waiter = null;
-      }
       _send({'cmd': 'getState'});
       // The port can die between engage and send (_send demotes on miss):
       // fall through to the local correction below instead of leaving
       // _lastState stale.
-      if (_remoteUp && waiter != null) {
+      // Subscribe AFTER the send: a state event queued before it (stale
+      // truth from a destroyed surface) must not satisfy the wait — only
+      // the handler's fresh reply completes it.
+      if (_remoteUp) {
         try {
-          await waiter;
+          await _sbState.stream.first.timeout(timeout);
           return;
         } catch (_) {
           // Timeout: handler didn't answer — fall through to correction.
@@ -405,9 +434,20 @@ class RemoteEngine implements PlaybackEngine {
     await resync(timeout: timeout);
     if (isPlaying) {
       await pause();
-    } else {
-      await resume();
+      return;
     }
+    // Stopped/completed (surface destroyed, service restarted, natural
+    // end): resume() is a no-op on a released player with no ack coming,
+    // so the toggle dies silently on a dead icon. Replay the last URL.
+    if (_lastState == PlayerState.stopped ||
+        _lastState == PlayerState.completed) {
+      final url = _lastUrl;
+      if (url != null && url.isNotEmpty) {
+        await play(url);
+        return;
+      }
+    }
+    await resume();
   }
 
   @override

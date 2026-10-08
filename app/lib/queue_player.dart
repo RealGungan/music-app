@@ -118,6 +118,13 @@ bool dropStalePositionTick({
   return true;
 }
 
+/// Stamp gate for the position/duration readout (pure, unit-tested): hide
+/// both labels until the FIRST accepted position tick of the NEW track's
+/// play generation arrives. Deterministic (identity-based, never a timer),
+/// so no stale or zero stamp can flash on a track switch.
+bool stampHidden({required int posGen, required int playGen}) =>
+    posGen != playGen;
+
 /// Pause-token gate for EVERY deferred resume (nudge/heal/autoplay refill/
 /// completion advance/_boundLoading/RemoteEngine toggle): a delayed resume
 /// may only fire when its track generation still wins, no pause (or newer
@@ -199,9 +206,11 @@ class QueuePlayer {
       )) {
         return;
       }
-      position.value = d;
+      // Bookkeeping BEFORE notify: listeners (stamp gate) must see the new
+      // generation in the same tick, not one event late.
       if (d > _posMax) _posMax = d;
       _posGen = _playGen;
+      position.value = d;
       _onTick();
     });
     _player.onDurationChanged.listen((d) {
@@ -618,6 +627,15 @@ class QueuePlayer {
   bool get hasNext => items.isNotEmpty && index < items.length - 1;
   bool get hasPrev => items.isNotEmpty && index > 0;
   Duration get currentPosition => position.value;
+
+  /// Track generation of the latest _playCurrent (bumped per track switch).
+  /// The stamp gate compares it against [positionGeneration]: hidden until
+  /// the first accepted tick of THIS generation arrives.
+  int get playGeneration => _playGen;
+
+  /// Generation the last accepted position tick belongs to (-1 until the
+  /// first tick of the current load). Stale/dropped ticks never touch it.
+  int get positionGeneration => _posGen;
 
   /// Set the API client for error logging. Called from main.dart after login.
   void setApiClient(ApiClient api) => _api = api;
@@ -1101,9 +1119,12 @@ class QueuePlayer {
     // New track = fresh clock: the old position/duration belong to the
     // previous song. Without this reset a failed internet load (which
     // emits no ticks) freezes the bar at the old song's timestamp, and
-    // the NEXT song visibly "starts at X".
+    // the NEXT song visibly "starts at X". The stale user-seek target is
+    // cleared too: otherwise it whitelists the previous track's tail tick
+    // into the new load (seek-match in the stale gate) and flashes it.
     position.value = Duration.zero;
     _posMax = Duration.zero;
+    _userSeekTarget = null;
     trackDuration.value = Duration.zero;
     currentTitle.value = items[index].title;
     PlayLog.switched(prevTitle, prevSec, items[index].title);
@@ -2359,8 +2380,16 @@ class QueuePlayer {
     // Track-switch stamp: zero the clock BEFORE publishing the new title
     // (same order as _playCurrent) — listeners rebuild off the title, so a
     // title-first order flashes the previous song's timestamp for a frame.
+    // Full per-load parity with _playCurrent: stamp hidden until the new
+    // id's first tick (_posGen invalidated), stale seek cleared (must not
+    // whitelist the old tail), fresh heal budget + play-start baseline.
     position.value = Duration.zero;
     _posMax = Duration.zero;
+    _posGen = -1;
+    _userSeekTarget = null;
+    _healStrikes = 0;
+    _healTrackId = it;
+    _lastPlayStartAt = DateTime.now();
     trackDuration.value = Duration.zero;
     currentTitle.value = it.title;
     PlayLog.switched(prevTitle, prevSec, it.title);

@@ -671,6 +671,13 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
                               ValueListenableBuilder<Duration>(
                                 valueListenable: qp.trackDuration,
                                 builder: (_, dur, ___) {
+                                  // Same stamp gate as the labels below: pin
+                                  // the bar to 0 until the new track's first
+                                  // position tick lands.
+                                  final hidden = stampHidden(
+                                    posGen: qp.positionGeneration,
+                                    playGen: qp.playGeneration,
+                                  );
                                   final liveMs = _shownMs(pos.inMilliseconds);
                                   final progress =
                                       _scrubMs != null && dur > Duration.zero
@@ -696,12 +703,16 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
                                         ? _WaveSeekBar(
                                             qp: qp,
                                             edit: _edit,
-                                            fraction: progress.clamp(0.0, 1.0),
+                                            fraction: (hidden
+                                                    ? 0.0
+                                                    : progress)
+                                                .clamp(0.0, 1.0),
                                             onSeek: (ms) => _commitSeek(ms),
                                           )
                                         : Slider(
-                                            value:
-                                                (_shownMs(
+                                            value: hidden
+                                                ? 0.0
+                                                : (_shownMs(
                                                   pos.inMilliseconds,
                                                 ).toDouble()).clamp(
                                                   0.0,
@@ -737,14 +748,24 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
                               ValueListenableBuilder<Duration>(
                                 valueListenable: qp.position,
                                 builder: (_, p, __) => Text(
-                                  // While scrubbing or waiting for a committed
-                                  // seek to land, show the target so the readout
-                                  // never flashes back to the old timestamp.
-                                  _fmt(
-                                    Duration(
-                                      milliseconds: _shownMs(p.inMilliseconds),
-                                    ),
-                                  ),
+                                  // Stamp gate: until the FIRST position tick
+                                  // of the NEW track id arrives, hide the
+                                  // stamp (deterministic, never a timer).
+                                  stampHidden(
+                                        posGen: qp.positionGeneration,
+                                        playGen: qp.playGeneration,
+                                      )
+                                      ? '–:––'
+                                      // While scrubbing or waiting for a committed
+                                      // seek to land, show the target so the readout
+                                      // never flashes back to the old timestamp.
+                                      : _fmt(
+                                          Duration(
+                                            milliseconds: _shownMs(
+                                              p.inMilliseconds,
+                                            ),
+                                          ),
+                                        ),
                                   style: const TextStyle(
                                     fontSize: 12,
                                     color: Colors.white54,
@@ -755,7 +776,12 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
                               ValueListenableBuilder<Duration>(
                                 valueListenable: qp.trackDuration,
                                 builder: (_, d, __) => Text(
-                                  durationLabel(d, _fmt),
+                                  stampHidden(
+                                        posGen: qp.positionGeneration,
+                                        playGen: qp.playGeneration,
+                                      )
+                                      ? '–:––'
+                                      : durationLabel(d, _fmt),
                                   style: const TextStyle(
                                     fontSize: 12,
                                     color: Colors.white54,
@@ -1220,11 +1246,15 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
   Widget _shareButton() {
     return ValueListenableBuilder<String>(
       valueListenable: qp.currentTitle,
+      // Enabled whenever a current item exists: gating on the title string
+      // alone left the button disabled (null onPressed = dead tap, zero logs)
+      // while a track was loaded but its title hadn't propagated yet.
       builder: (_, t, __) => IconButton(
         visualDensity: VisualDensity.compact,
         icon: const Icon(Icons.share_outlined),
         tooltip: tr('Share to YouTube Music'),
-        onPressed: t.isEmpty ? null : _shareCurrent,
+        onPressed:
+            (t.isEmpty && qp.current == null) ? null : _shareCurrent,
       ),
     );
   }
@@ -1309,7 +1339,38 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
 
   Future<void> _shareCurrent() async {
     final cur = qp.current;
-    if (cur == null) return;
+    if (cur == null) {
+      // Was a silent `return` — a tap with no current item died with zero
+      // log output (the 1.0.268 signature). Trace it so logcat shows the tap.
+      shareTrace('tap ignored: no current item');
+      return;
+    }
+    shareTrace('tap title="${cur.title}"');
+    try {
+      await _shareCurrentInner(cur);
+    } catch (e) {
+      // No silent dead taps: anything unexpected surfaces in logcat, User
+      // errors, and on screen (the 1.0.268 IG tap died here with zero output).
+      shareTrace('FATAL exception: $e');
+      DebugInfo.share('fatal', '$e');
+      unawaited(
+        ServerContext.of(context).logClientError(
+          'share-fatal',
+          '${cur.title} exception: $e',
+        ),
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(tr('Share failed — link copied instead')),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+      await Clipboard.setData(ClipboardData(text: cur.title));
+    }
+  }
+
+  Future<void> _shareCurrentInner(QueueItem cur) async {
     // Label-only IG probe: when no IG package resolves, the row is greyed
     // with "not installed" — but the tap STILL attempts the tiers
     // (launch-first: blocked queries must not block a working startActivity).
@@ -1321,6 +1382,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
     } catch (_) {
       igAvailable = true; // fail-open: never hide the row on a slow probe
     }
+    shareTrace('probe igAvailable=$igAvailable');
     // Open the target chooser FIRST — instant, no network work on the tap.
     final target = await showModalBottomSheet<_ShareTarget>(
       context: context,
@@ -1364,7 +1426,11 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
         ),
       ),
     );
-    if (target == null || !mounted) return;
+    if (target == null || !mounted) {
+      shareTrace('chooser dismissed');
+      return;
+    }
+    shareTrace('chooser target=$target');
 
     // Launch-first: the IG gate is LABEL ONLY (package queries can be
     // blocked while startActivity still works), so the tiers below are always
@@ -1372,10 +1438,29 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
     // ActivityNotFoundException in both tier details → explain then.
     // Both targets come from ONE resolve: a song prewarms as soon as it starts
     // playing, so the tap is instant; only very-fast taps fall through.
+    // Tap-path resolve is BOUNDED (8s): an unbounded network resolve hangs
+    // the tap with zero output before any tier runs. On timeout, ship pure
+    // search links (no resolve needed) instead of dying silently.
     var p = _shareCache[cur.title];
     if (p == null) {
-      p = await _resolveShare(cur);
+      final sw = Stopwatch()..start();
+      try {
+        p = await _resolveShare(cur).timeout(const Duration(seconds: 8));
+      } catch (_) {
+        final fb = shareFallbackLinks(
+          artist: cur.lyricsArtist ?? '',
+          title: cur.lyricsTitle ?? cur.title,
+        );
+        p = (
+          ytLink: fb.ytLink,
+          spLink: fb.spLink,
+          subject: cur.title.trim(),
+        );
+      }
+      shareTrace('resolve ${sw.elapsedMilliseconds}ms cached=false');
       _shareCache[cur.title] = p;
+    } else {
+      shareTrace('resolve cached=true');
     }
     if (!mounted) return;
     if (target == _ShareTarget.instagram) {
@@ -1481,12 +1566,14 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
     required String link,
     required String subject,
   }) async {
+    shareTrace('attempt shareText link=$link');
     try {
       const channel = MethodChannel('com.nasmusic.nasmusic/share');
       final sent = await channel.invokeMethod<Object>('shareText', {
         'text': link,
         'subject': subject,
       });
+      shareTrace('result shareText ok=${shareTierOk(sent)} detail=${sent ?? 'null'}');
       if (shareTierOk(sent)) {
         DebugInfo.share('sheet', '');
         return;
@@ -1498,6 +1585,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
       );
     } catch (e) {
       // Desktop has no share sheet — fall through to the clipboard.
+      shareTrace('result shareText ok=false exception: $e');
       DebugInfo.share('clipboard', '$e');
       unawaited(
         ServerContext.of(context)

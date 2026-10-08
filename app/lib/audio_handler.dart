@@ -242,7 +242,15 @@ class NASMusicAudioHandler extends BaseAudioHandler {
             'phase': 'lost-honored',
             'type': event.type.toString(),
           });
-          unawaited(_player.pause());
+          // Backgrounded focus loss pauses here: the player call is async, so
+          // a throw (bad player state) would leave audio sounding under a
+          // published paused state. Report it — the UI/heal path must see a
+          // failed focus-pause instead of a silent skin lie with sound.
+          unawaited(
+            _player.pause().catchError((e) {
+              _sendEvent({'ev': 'err', 'm': 'focus-pause failed: $e'});
+            }),
+          );
         } else {
           debugPrint('[handler] audio focus regained: ${event.type}');
           final resume = !_focusLostPermanent;

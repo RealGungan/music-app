@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nasmusic/share_story.dart';
 
@@ -141,6 +142,17 @@ void main() {
     expect(instagramNoResolve('ok'), false);
   });
 
+  test('tap-timeout fallback links are pure search URLs (no resolve)', () {    final fb = shareFallbackLinks(artist: 'Artist', title: 'Title');
+    expect(
+      fb.ytLink,
+      'https://music.youtube.com/search?q=${Uri.encodeQueryComponent('Artist Title')}',
+    );
+    expect(
+      fb.spLink,
+      'https://open.spotify.com/search/${Uri.encodeQueryComponent('Artist Title')}',
+    );
+  });
+
   test('tier reply: ok/true succeed, fail-strings/throws fall through', () {
     expect(shareTierOk(true), true);
     expect(shareTierOk('ok'), true);
@@ -160,5 +172,40 @@ void main() {
       ),
       false,
     );
+  });
+
+  test('shareTrace never throws (dead-tap logging is total)', () {
+    shareTrace('tap test');
+    shareTrace('attempt shareStory');
+    shareTrace('result shareStory ok=false detail=fail: test');
+  });
+
+  test('tiers fail with exception detail when channel throws', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    const ch = MethodChannel('com.nasmusic.nasmusic/share');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(ch, (_) async {
+      throw PlatformException(code: 'dead-channel');
+    });
+    try {
+      // Fail-open probe: row stays, tap still attempts the tiers.
+      expect(await instagramAvailable(), true);
+      final story = await shareStoryDetailed(link: 'https://x');
+      expect(story.ok, false);
+      expect(story.detail, contains('exception'));
+      final direct = await shareDirectDetailed(text: 'cap');
+      expect(direct.ok, false);
+      expect(direct.detail, contains('exception'));
+      final fb = await shareInstagramFallbackDetailed(caption: 'cap');
+      expect(fb.ok, false);
+      expect(fb.detail, contains('exception'));
+      final cp = await shareCopyLinkOpenInstagramDetailed(
+          link: 'https://x', caption: 'cap');
+      expect(cp.ok, false);
+      expect(cp.detail, contains('exception'));
+    } finally {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(ch, null);
+    }
   });
 }

@@ -95,6 +95,17 @@ void main() {
     expect(displayMs(45000, null, at, at + 1000), 45000);
   });
 
+  test('stampHidden: labels hide until the new track ticks', () {
+    // Fresh switch (posGen still the previous load): hidden.
+    expect(stampHidden(posGen: 5, playGen: 6), isTrue);
+    // Never ticked at all: hidden.
+    expect(stampHidden(posGen: -1, playGen: 1), isTrue);
+    // First accepted tick of the new load arrived: visible.
+    expect(stampHidden(posGen: 6, playGen: 6), isFalse);
+    // Same-track advance: visible.
+    expect(stampHidden(posGen: 3, playGen: 3), isFalse);
+  });
+
   test('resumeFireAllowed: pause token kills every deferred resume', () {
     // Fresh schedule, audio stalled: may fire.
     expect(

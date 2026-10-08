@@ -375,4 +375,116 @@ void main() {
       expect(got[1]['cmd'], 'resume');
       expect(e.isPlaying, isFalse); // resume cmd sent; state event pending.
     });
+
+  group('resume ack (backgrounded-toggle guard)', () {
+    test('resume-dropped only when no ack after retry', () {
+      expect(resumeDropDiagnostic(acked: true), isNull);
+      expect(resumeDropDiagnostic(acked: false), 'resume-dropped');
+    });
+
+    test('acked resume sends cmd and needs no retry', () async {
+      final inbox = ReceivePort();
+      IsolateNameServer.removePortNameMapping(kAudioStatePort);
+      IsolateNameServer.registerPortWithName(inbox.sendPort, kAudioStatePort);
+      addTearDown(() {
+        IsolateNameServer.removePortNameMapping(kAudioStatePort);
+        inbox.close();
+      });
+      final e = RemoteEngine();
+      addTearDown(e.dispose);
+      // Backgrounded paused engine (notification toggle resumes it).
+      e.feedRemoteEvent({'ev': 'state', 's': 'paused'});
+      expect(e.isPlaying, isFalse);
+      final got = <Map<String, dynamic>>[];
+      final sub = inbox.listen((m) {
+        got.add(jsonDecode(m as String) as Map<String, dynamic>);
+      });
+      final resuming = e.resume();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(got.isNotEmpty, isTrue);
+      expect(got[0]['cmd'], 'resume');
+      e.feedRemoteEvent({'ev': 'state', 's': 'playing'});
+      await resuming.timeout(const Duration(seconds: 2));
+      expect(got.where((c) => c['cmd'] == 'resume').length, 1);
+      await sub.cancel();
+    });
+
+    test('dropped resume retries once, then logs resume-dropped', () async {
+      final inbox = ReceivePort();
+      IsolateNameServer.removePortNameMapping(kAudioStatePort);
+      IsolateNameServer.registerPortWithName(inbox.sendPort, kAudioStatePort);
+      addTearDown(() {
+        IsolateNameServer.removePortNameMapping(kAudioStatePort);
+        inbox.close();
+      });
+      final e = RemoteEngine();
+      addTearDown(e.dispose);
+      e.feedRemoteEvent({'ev': 'state', 's': 'paused'});
+      final got = <Map<String, dynamic>>[];
+      final sub = inbox.listen((m) {
+        got.add(jsonDecode(m as String) as Map<String, dynamic>);
+      });
+      // No playing ack ever arrives (handler died mid-toggle): exactly two
+      // resume cmds (initial + one retry), then the drop is logged.
+      await e.resume();
+      expect(got.where((c) => c['cmd'] == 'resume').length, 2);
+      await sub.cancel();
+    });
+
+    test('resume from stopped needs no ack wait (no-op, like before)', () async {
+      final inbox = ReceivePort();
+      IsolateNameServer.removePortNameMapping(kAudioStatePort);
+      IsolateNameServer.registerPortWithName(inbox.sendPort, kAudioStatePort);
+      addTearDown(() {
+        IsolateNameServer.removePortNameMapping(kAudioStatePort);
+        inbox.close();
+      });
+      final e = RemoteEngine();
+      addTearDown(e.dispose);
+      e.feedRemoteEvent({'ev': 'state', 's': 'stopped'});
+      final got = <Map<String, dynamic>>[];
+      final sub = inbox.listen((m) {
+        got.add(jsonDecode(m as String) as Map<String, dynamic>);
+      });
+      await e.resume().timeout(const Duration(seconds: 2));
+      // Port delivery is async: pump before reading, else the buffered
+      // resume cmd hasn't landed and the count reads 0.
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(got.where((c) => c['cmd'] == 'resume').length, 1);
+      await sub.cancel();
+    });
+
+    test('toggleRecover replays last url from stopped (surface destroyed)',
+        () async {
+      final inbox = ReceivePort();
+      IsolateNameServer.removePortNameMapping(kAudioStatePort);
+      IsolateNameServer.registerPortWithName(inbox.sendPort, kAudioStatePort);
+      addTearDown(() {
+        IsolateNameServer.removePortNameMapping(kAudioStatePort);
+        inbox.close();
+      });
+      final e = RemoteEngine();
+      addTearDown(e.dispose);
+      final got = <Map<String, dynamic>>[];
+      final sub = inbox.listen((m) {
+        got.add(jsonDecode(m as String) as Map<String, dynamic>);
+      });
+      await e.play('http://x/song');
+      // Surface destroyed / service restarted: player reset to stopped.
+      e.feedRemoteEvent({'ev': 'state', 's': 'stopped'});
+      // Nobody answers getState: resync times out, truth stays stopped.
+      await e.toggleRecover(timeout: const Duration(milliseconds: 100));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await sub.cancel();
+      // Initial play + the replay; resume() would no-op on a released
+      // player, so no resume cmd may be sent.
+      expect(
+          got
+              .where((c) =>
+                  c['cmd'] == 'play' && c['url'] == 'http://x/song')
+              .length,
+          2);
+      expect(got.any((c) => c['cmd'] == 'resume'), isFalse);
+    });
+  });
 }

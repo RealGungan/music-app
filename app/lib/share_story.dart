@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 /// Instagram Stories share: minimal background-image ADD_TO_STORY (single
@@ -25,6 +26,29 @@ const instagramShareTierOrder = [
   'shareText',
 ];
 
+/// One logcat line per share-tier attempt/result. print (not just
+/// debugPrint: debugPrint is throttled/invisible in release logcats, which
+/// is exactly how the 1.0.268 IG tap died with zero output) so a dead tap
+/// (no channel call, no intent, no error) leaves a visible trail of exactly
+/// which tier died instead of silence.
+void shareTrace(String msg) {
+  debugPrint('[share] $msg');
+  // ignore: avoid_print — release-visible by design (logcat INFO).
+  print('[share] $msg');
+}
+
+/// Tap-path fallback links when the network resolve hangs: pure search URLs
+/// (no resolve needed) so the tap still ships instead of dying silently.
+({String ytLink, String spLink}) shareFallbackLinks({
+  required String artist,
+  required String title,
+}) {
+  final q = Uri.encodeQueryComponent('$artist $title'.trim());
+  return (
+    ytLink: 'https://music.youtube.com/search?q=$q',
+    spLink: 'https://open.spotify.com/search/$q',
+  );
+}
 /// True when BOTH IG-native tiers failed and the gallery fallback is still
 /// needed (last resort before the generic sheet).
 bool instagramFallbackNeeded({required bool storyOk, required bool directOk}) =>
@@ -93,14 +117,18 @@ bool shareTierOk(Object? sent) => sent == true || sent == 'ok' || sent == 'OK';
 
 /// Platform call with detail: returns ok + native diagnostic string.
 Future<ShareTierResult> shareStoryDetailed({required String link}) async {
+  shareTrace('attempt shareStory');
   try {
     const channel = MethodChannel('com.nasmusic.nasmusic/share');
     final sent = await channel.invokeMethod<Object>('shareStory', {
       'link': link,
     });
     final ok = shareTierOk(sent);
-    return ShareTierResult(ok, ok ? 'ok' : 'story ${sent ?? 'null'}');
+    final r = ShareTierResult(ok, ok ? 'ok' : 'story ${sent ?? 'null'}');
+    shareTrace('result shareStory ok=${r.ok} detail=${r.detail}');
+    return r;
   } catch (e) {
+    shareTrace('result shareStory ok=false exception: $e');
     return ShareTierResult(false, 'story exception: $e');
   }
 }
@@ -114,14 +142,18 @@ Future<bool> shareDirectToInstagram({required String text}) async =>
 
 /// Platform call (middle tier) with detail.
 Future<ShareTierResult> shareDirectDetailed({required String text}) async {
+  shareTrace('attempt shareDirectInstagram');
   try {
     const channel = MethodChannel('com.nasmusic.nasmusic/share');
     final sent = await channel.invokeMethod<Object>('shareDirectInstagram', {
       'text': text,
     });
     final ok = shareTierOk(sent);
-    return ShareTierResult(ok, ok ? 'ok' : 'direct ${sent ?? 'null'}');
+    final r = ShareTierResult(ok, ok ? 'ok' : 'direct ${sent ?? 'null'}');
+    shareTrace('result shareDirectInstagram ok=${r.ok} detail=${r.detail}');
+    return r;
   } catch (e) {
+    shareTrace('result shareDirectInstagram ok=false exception: $e');
     return ShareTierResult(false, 'direct exception: $e');
   }
 }
@@ -132,14 +164,18 @@ Future<ShareTierResult> shareDirectDetailed({required String text}) async {
 Future<ShareTierResult> shareInstagramFallbackDetailed({
   required String caption,
 }) async {
+  shareTrace('attempt shareInstagramFallback');
   try {
     const channel = MethodChannel('com.nasmusic.nasmusic/share');
     final sent = await channel.invokeMethod<Object>('shareInstagramFallback', {
       'text': caption,
     });
     final ok = shareTierOk(sent);
-    return ShareTierResult(ok, ok ? 'ok' : 'fallback ${sent ?? 'null'}');
+    final r = ShareTierResult(ok, ok ? 'ok' : 'fallback ${sent ?? 'null'}');
+    shareTrace('result shareInstagramFallback ok=${r.ok} detail=${r.detail}');
+    return r;
   } catch (e) {
+    shareTrace('result shareInstagramFallback ok=false exception: $e');
     return ShareTierResult(false, 'fallback exception: $e');
   }
 }
@@ -152,6 +188,7 @@ Future<ShareTierResult> shareCopyLinkOpenInstagramDetailed({
   required String link,
   required String caption,
 }) async {
+  shareTrace('attempt copyLinkOpenInstagram');
   try {
     const channel = MethodChannel('com.nasmusic.nasmusic/share');
     final sent =
@@ -160,8 +197,11 @@ Future<ShareTierResult> shareCopyLinkOpenInstagramDetailed({
       'text': caption,
     });
     final ok = shareTierOk(sent);
-    return ShareTierResult(ok, ok ? 'ok' : 'copylink ${sent ?? 'null'}');
+    final r = ShareTierResult(ok, ok ? 'ok' : 'copylink ${sent ?? 'null'}');
+    shareTrace('result copyLinkOpenInstagram ok=${r.ok} detail=${r.detail}');
+    return r;
   } catch (e) {
+    shareTrace('result copyLinkOpenInstagram ok=false exception: $e');
     return ShareTierResult(false, 'copylink exception: $e');
   }
 }
@@ -181,11 +221,14 @@ bool instagramNoResolve(String detail) =>
 /// Share-time gate: true when Instagram can handle a share on this device.
 /// Fail-open (true) on desktop / errors so the row never vanishes spuriously.
 Future<bool> instagramAvailable() async {
+  shareTrace('attempt canShareToInstagram');
   try {
     const channel = MethodChannel('com.nasmusic.nasmusic/share');
     final ok = await channel.invokeMethod<bool>('canShareToInstagram');
+    shareTrace('result canShareToInstagram ok=${ok ?? true}');
     return ok ?? true;
-  } catch (_) {
+  } catch (e) {
+    shareTrace('result canShareToInstagram ok=true(fail-open) exception: $e');
     return true;
   }
 }
