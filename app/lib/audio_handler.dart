@@ -236,6 +236,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
           _playing = false;
           _paused = true;
           _publishPlayback();
+          _sendEvent({'ev': 'state', 's': 'paused'});
           _sendEvent({
             'ev': 'focus',
             'phase': 'lost-honored',
@@ -317,10 +318,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         _position = Duration.zero;
         _publishMedia();
         try {
-          await _player.stop();
-          // Stale-http guard: a dead pre-push must hand back to main (its
-          // completion path pings + wraps to cache) instead of hanging here
-          // unattended with the UI isolate asleep.
+          // Same single-instance reuse as 'play' (no stop/reset/release).
           await _player
               .play(sourceForUrl(nu))
               .timeout(const Duration(seconds: 10));
@@ -566,7 +564,9 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         // Focus BEFORE sound: the car routes A2DP to the focus holder.
         await _takeFocus();
         try {
-          await _player.stop();
+          // Reuse the single player instance (setDataSource only): an
+          // explicit stop() here tears down + rebuilds the native player
+          // (stop/reset/release + prepareAsync ≈300ms) per track.
           debugPrint('[handler] playing <$url>');
           await _player.play(sourceForUrl(url));
           debugPrint('[handler] play() returned OK');

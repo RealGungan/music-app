@@ -1261,7 +1261,7 @@ if (check != null && check.running)
               trailing: const Icon(Icons.chevron_right),
               onTap: () => _broadcast(),
             ),
-          if (_showDev)
+          if (_showDev && AuthStore.instance.isOwner)
             ListTile(
               leading: const Icon(Icons.celebration_outlined),
               title: Text(tr('Test Wrapped')),
@@ -1278,8 +1278,9 @@ if (check != null && check.running)
               },
             ),
           ]),
-          // NOT owner-gated: any tester (emutest2 included) must be able to
-          // enable the ground-truth HUD without the owner's account.
+          // Owner-only: debug overlay + export bundle + test wrapped stay
+          // developer tools (user order, no unilateral exposure).
+          if (AuthStore.instance.isOwner)
           _sectionCard(tr('Debug'), [
           ValueListenableBuilder<bool>(
             valueListenable: DebugInfo.enabled,

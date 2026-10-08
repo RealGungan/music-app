@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api_client.dart';
+import 'auth_store.dart';
 import 'queue_player.dart';
 
 /// Tiny always-on-top ground-truth HUD (Developer settings toggle).
@@ -44,6 +45,8 @@ class DebugInfo {
   }
 
   static Future<void> setEnabled(bool v) async {
+    // Owner-only (user order): non-owners can never enable the HUD.
+    if (!AuthStore.instance.isOwner && v) return;
     enabled.value = v;
     try {
       final p = await SharedPreferences.getInstance();
@@ -82,6 +85,9 @@ class _DebugOverlayState extends State<DebugOverlay> {
 
   @override
   Widget build(BuildContext context) {
+    // Owner-only: the HUD never renders for other users even if the
+    // flag was left on from an owner session on a shared device.
+    if (!AuthStore.instance.isOwner) return widget.child ?? const SizedBox.shrink();
     return Stack(
       children: [
         if (widget.child != null) widget.child!,

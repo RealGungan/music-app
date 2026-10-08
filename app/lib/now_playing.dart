@@ -173,6 +173,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
   /// network resolve of the YouTube video id.
   final Map<String, ({String ytLink, String spLink, String subject})>
   _shareCache = {};
+  Timer? _truthPoll;
 
   @override
   void initState() {
@@ -202,6 +203,17 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
     qp.currentTitle.addListener(_prewarmShare);
     qp.currentTitle.addListener(_clearSeekStateOnTrackChange);
     _prewarmShare();
+    // Visible-screen truth poll (500ms): a native MediaPlayer-JNI pause on
+    // focus loss fires outside Dart while the engine still shows playing
+    // (skin lie + double-tap). pollVisibleTruth re-asks handler truth;
+    // the state-stream reply repaints the icon. Bg-gated (resumed only).
+    _truthPoll = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (!mounted) return;
+      if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+        return;
+      }
+      qp.pollVisibleTruth();
+    });
   }
 
   /// Track switch invalidates any in-flight scrub/seek-target display state:
@@ -214,6 +226,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
 
   @override
   void dispose() {
+    _truthPoll?.cancel();
     qp.currentTitle.removeListener(_prewarmShare);
     qp.currentTitle.removeListener(_clearSeekStateOnTrackChange);
     _artController.dispose();

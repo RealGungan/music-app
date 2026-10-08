@@ -48,6 +48,10 @@ abstract class PlaybackEngine {
   /// after a network switch while paused — no audio blip).
   Future<void> setSource(String url);
 
+  /// Lightweight truth poll for a visible screen (fire-and-forget getState;
+  /// the reply re-feeds onPlayerStateChanged which repaints the icon).
+  Future<void> pollTruth();
+
   /// Pre-push the upcoming track for gapless handoff (no-op locally —
   /// the UI isolate never sleeps on desktop, so nothing needs it).
   Future<void> queueNext({
@@ -103,6 +107,9 @@ class LocalEngine implements PlaybackEngine {
     // Local playback runs in the UI isolate, which never sleeps — the
     // normal completion path handles advancement. Nothing to pre-push.
   }
+
+  @override
+  Future<void> pollTruth() async {}
   @override
   Future<void> setVolume(double v) => _player.setVolume(v);
 
@@ -462,6 +469,17 @@ class RemoteEngine implements PlaybackEngine {
       return;
     }
     return _local.setVolume(v);
+  }
+
+  /// Visible-screen truth poll: fire-and-forget getState (no stateSyncing
+  /// gate, no await). A native MediaPlayer-JNI pause on focus loss fires
+  /// OUTSIDE Dart; the reply event re-feeds onPlayerStateChanged which is
+  /// the icon's source of truth, so a 500ms visible poll self-heals the
+  /// skin lie with no double-tap.
+  @override
+  Future<void> pollTruth() async {
+    if (!_remoteUp) return;
+    _send({'cmd': 'getState'});
   }
 
   @override

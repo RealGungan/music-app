@@ -1035,6 +1035,15 @@ class QueuePlayer {
     return Future.value();
   }
 
+  /// Visible-screen truth poll (500ms, fire-and-forget): re-asks the
+  /// handler for native truth without the stateSyncing gate, so a native
+  /// MediaPlayer-JNI pause that fired outside Dart repaints the icon via
+  /// the state stream. No-op when backgrounded (lifecycle guard by caller).
+  void pollVisibleTruth() {
+    final p = _player;
+    if (p is RemoteEngine) unawaited(p.pollTruth());
+  }
+
   /// Clear a stuck loading spinner: if this op is still the winner and
   /// playback never reached `playing` within 12s (dropped remote command
   /// on cold start, dead URL), heal once (re-resolve + replay) instead
@@ -1237,14 +1246,9 @@ class QueuePlayer {
           }
         }
       }
-      // Stop runs WITHOUT await: awaiting the teardown before play() adds
-      // up to seconds to every tap; the new source replaces it anyway.
-      unawaited(
-        _player
-            .stop()
-            .timeout(const Duration(seconds: 8))
-            .catchError((_, __) {}),
-      );
+      // Single player instance reuse: play() swaps the source on the same
+      // native player (setDataSource only). An explicit stop() here tears
+      // down + rebuilds it (stop/reset/release + prepareAsync ≈300ms).
       if (gen != _playGen) return;
       debugPrint('[queue] play url: $url');
       final src = url.startsWith('file://')
