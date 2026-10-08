@@ -1277,11 +1277,6 @@ if (check != null && check.running)
                 }
               },
             ),
-          ]),
-          // Owner-only: debug overlay + export bundle + test wrapped stay
-          // developer tools (user order, no unilateral exposure).
-          if (AuthStore.instance.isOwner)
-          _sectionCard(tr('Debug'), [
           ValueListenableBuilder<bool>(
             valueListenable: DebugInfo.enabled,
             builder: (_, on, __) => SwitchListTile(
