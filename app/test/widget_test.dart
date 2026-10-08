@@ -1,112 +1,59 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:music_app/main.dart';
-import 'package:music_app/bottom_player.dart';
-import 'package:music_app/screens/now_playing.dart';
-import 'package:music_app/queue_player.dart';
+import 'package:nasmusic/api_client.dart';
 
 void main() {
-  testWidgets('desktop shell renders sidebar + player bar', (tester) async {
-    tester.view.physicalSize = const Size(1400, 800);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.reset);
-    await tester.pumpWidget(MusicApp(
-      initialServer: 'http://127.0.0.1:6680',
-      onServerChanged: (_) {},
-    ));
-    await tester.pump();
-    expect(find.text('Your Library'), findsOneWidget); // sidebar
-    expect(find.byType(BottomPlayerBar), findsOneWidget);
+  final api = ApiClient(baseUrl: 'http://localhost:6680');
+
+  test('fileUrl percent-encodes path segments but keeps the base intact', () {
+    expect(
+      api.fileUrl('/staging/file/Liked/Daft Punk - Get Lucky.mp3'),
+      'http://localhost:6680/staging/file/Liked/Daft%20Punk%20-%20Get%20Lucky.mp3',
+    );
+    expect(
+      api.fileUrl("/staging/pl/Heavy/2Pac, Big Syke - All Eyez On Me (ft. Big Syke).mp3"),
+      'http://localhost:6680/staging/pl/Heavy/2Pac%2C%20Big%20Syke%20-%20All%20Eyez%20On%20Me%20(ft.%20Big%20Syke).mp3',
+    );
   });
 
-  testWidgets('mobile shell renders nav bar + mini player', (tester) async {
-    await tester.pumpWidget(MusicApp(
-      initialServer: 'http://127.0.0.1:6680',
-      onServerChanged: (_) {},
-    ));
-    await tester.pump();
-    expect(find.byType(NavigationBar), findsOneWidget);
-    expect(find.byType(BottomPlayerBar), findsNothing); // no desktop bar
+  test('coverUrl normalises file and playlist paths', () {
+    expect(
+      api.coverUrl('/staging/file/Liked/song.mp3'),
+      'http://localhost:6680/staging/api/cover?f=Liked%2Fsong.mp3',
+    );
+    expect(
+      api.coverUrl('/staging/pl/Liked/song.mp3'),
+      'http://localhost:6680/staging/api/cover?f=pl%3ALiked%2Fsong.mp3',
+    );
   });
 
-  testWidgets('mini player controls are visible when a track plays',
-      (tester) async {
-    final qp = QueuePlayer.instance;
-    addTearDown(() {
-      qp.currentTitle.value = '';
-      qp.currentThumb.value = '';
+  test('LyricsData parses synced vs plain payloads', () {
+    final synced = LyricsData.fromJson({
+      'found': true,
+      'source': 'lrclib',
+      'synced': [
+        {'t': 12.34, 'text': 'Hello'},
+        {'t': 15.0, 'text': 'World'},
+      ],
+      'plain': [],
     });
+    expect(synced.isSynced, isTrue);
+    expect(synced.synced, hasLength(2));
+    expect(synced.synced[0].text, 'Hello');
+    expect(synced.synced[1].t, 15.0);
 
-    await tester.pumpWidget(MusicApp(
-      initialServer: 'http://127.0.0.1:6680',
-      onServerChanged: (_) {},
-    ));
-    // simulate a playing track
-    qp.items = [QueueItem('x', 'http://x/a.mp3')];
-    qp.index = 0;
-    qp.currentTitle.value = 'Some Song';
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 200));
+    final plain = LyricsData.fromJson({
+      'found': true,
+      'source': 'lyricsovh',
+      'synced': <Map<String, dynamic>>[],
+      'plain': ['line one', 'line two'],
+    });
+    expect(plain.isSynced, isFalse);
+    expect(plain.plain, ['line one', 'line two']);
 
-    // every control must exist AND be hittable (visible, not clipped)
-    for (final icon in [Icons.skip_next]) {
-      final f = find.byIcon(icon);
-      expect(f, findsOneWidget, reason: '$icon missing');
-      expect(
-          tester.getRect(f),
-          paintsWithin(screenBoundsOf(tester)),
-          reason: '$icon outside window bounds');
-    }
+    final empty = LyricsData.fromJson(
+        {'found': false, 'synced': <Map<String, dynamic>>[], 'plain': []});
+    expect(empty.isSynced, isFalse);
+    expect(empty.found, isFalse);
   });
-
-  testWidgets('now playing page shows all controls fully on-screen',
-      (tester) async {
-    tester.view.physicalSize = const Size(1200, 700); // desktop-ish
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.reset);
-
-    final qp = QueuePlayer.instance;
-    qp.currentTitle.value = 'Some Song';
-    qp.currentThumb.value = '';
-
-    await tester.pumpWidget(const MaterialApp(home: NowPlayingPageHost()));
-    await tester.pumpAndSettle();
-
-    bool anyOf(Widget w, List<IconData> cs) =>
-        w is Icon && cs.contains(w.icon);
-    final shuffleish = find.byWidgetPredicate(
-        (w) => anyOf(w, [Icons.shuffle, Icons.shuffle_outlined]));
-    expect(shuffleish, findsAtLeastNWidgets(1),
-        reason: 'shuffle missing');
-    for (final icon in [
-      Icons.skip_previous,
-      Icons.skip_next,
-      Icons.play_arrow,
-      Icons.keyboard_arrow_down,
-    ]) {
-      final f = find.byIcon(icon);
-      expect(f, findsOneWidget, reason: '$icon missing');
-      expect(tester.getRect(f), paintsWithin(screenBoundsOf(tester)),
-          reason: '$icon outside window bounds');
-    }
-  });
-}
-
-Rect screenBoundsOf(WidgetTester t) =>
-    Offset.zero &
-    (t.view.physicalSize / t.view.devicePixelRatio);
-
-Matcher paintsWithin(Rect bounds) => predicate(
-    (Rect r) =>
-        r.left >= bounds.left &&
-        r.top >= bounds.top &&
-        r.right <= bounds.right &&
-        r.bottom <= bounds.bottom,
-    'inside $bounds');
-
-class NowPlayingPageHost extends StatelessWidget {
-  const NowPlayingPageHost({super.key});
-  @override
-  Widget build(BuildContext context) => const NowPlayingPage();
 }
