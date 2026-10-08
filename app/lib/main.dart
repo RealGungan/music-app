@@ -21,6 +21,7 @@ import 'audio_handler.dart';
 import 'audio_session_state.dart';
 import 'auth_store.dart';
 import 'bg_announce.dart';
+import 'debug_overlay.dart';
 import 'diag_log.dart';
 import 'lang.dart';
 import 'play_log.dart';
@@ -261,6 +262,7 @@ Future<void> main() async {
   // device remembers its login until an explicit logout.
   await AuthStore.instance.init();
   await DiagLog.initAll();
+  await DebugInfo.load();
   await OfflineStore.init();
   await OfflineStore.loadMode();
   // Look-ahead cache BEFORE first frame: rebuilds the per-user disk index
@@ -631,6 +633,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
     PackageInfo.fromPlatform()
         .then((pi) {
           _api.appVersion = pi.version;
+          DebugInfo.appVersion = pi.version;
         })
         .catchError((_) {});
     QueuePlayer.instance.lastError.addListener(_onPlayError);
@@ -1263,6 +1266,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
     PackageInfo.fromPlatform()
         .then((pi) {
           _api.appVersion = pi.version;
+          DebugInfo.appVersion = pi.version;
         })
         .catchError((_) {});
     _wireApiAuth(_api);
@@ -1308,6 +1312,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
           // (plus the whole tree) rebuilds when the preset changes.
           key: ValueKey(ThemeStore.instance.current.id),
           theme: Spots.dark(),
+          builder: (context, child) => DebugOverlay(child: child, api: _api),
           home: !AuthStore.instance.loggedIn
               ? LoginScreen(
                   api: _api,

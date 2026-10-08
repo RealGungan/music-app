@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
@@ -70,12 +71,34 @@ String stableMediaId(String? url, String fallback) {
   return cut.isNotEmpty ? cut : fallback;
 }
 
+/// Duration published with a NEW track before its real duration is measured.
+/// Always zero: the handler used to pub the new title with the PREVIOUS
+/// track's dur_ms until measured (timestamp flash on the car). Pure for tests.
+Duration durationForNewTrackPub() => Duration.zero;
+
 /// Media-session handler that OWNS the real audioplayers player on Android.
 ///
 /// audio_service runs this class in a SEPARATE isolate. Keeping the
 /// [AudioPlayer] in this isolate means playback never dies when Android
 /// suspends the UI isolate in the background: the lock-screen / notification
 /// controls and the media session all talk to the player directly.
+
+/// Self-echo window for our OWN play/focus-take. Our play path takes focus
+/// AND the player requests it again internally, so the OS reports a focus
+/// loss back to our own session after EVERY tap-to-play — network plays
+/// echo as late as ~1.7s (measured on emulator 1.0.264). Honoring the echo
+/// pauses nothing real yet paints paused (engine/player diverge = skin
+/// lie). Ignore our own echo; honor genuine external interruptions
+/// (YouTube, calls) that arrive later in playback.
+/// Pure so unit tests pin the window.
+const selfFocusEchoWindow = Duration(seconds: 3);
+
+bool isSelfFocusEcho({
+  required DateTime lastOwnPlayAt,
+  required DateTime now,
+  Duration window = selfFocusEchoWindow,
+}) =>
+    now.difference(lastOwnPlayAt) < window;
 class NASMusicAudioHandler extends BaseAudioHandler {
   final _statePort = ReceivePort();
   final AudioPlayer _player = AudioPlayer();
@@ -139,14 +162,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
     return true;
   }
 
-  /// Moment of our OWN last play/focus-take. Our play path takes focus AND
-  /// the player requests it again internally, so the OS reports a focus loss
-  /// back to our own session ~10ms after every tap-to-play — pausing it
-  /// instantly (tap plays nothing until manual resume, which doesn't
-  /// re-request focus). Ignore our own echo; honor genuine external
-  /// interruptions (YouTube, calls) that arrive later in playback. Window is
-  /// 1s: the echo lands in ~10ms, so a real takeover in the first second
-  /// after tapping play is honored, not swallowed.
+  /// Moment of our OWN last play/focus-take (echo window above).
   DateTime _lastOwnPlayAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   /// True while the last focus loss was PERMANENT (another music/video app
@@ -196,8 +212,8 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         }
         if (event.begin) {
           debugPrint('[handler] audio focus lost: ${event.type}');
-          if (DateTime.now().difference(_lastOwnPlayAt) <
-              const Duration(seconds: 1)) {
+          if (isSelfFocusEcho(
+              lastOwnPlayAt: _lastOwnPlayAt, now: DateTime.now())) {
             debugPrint('[handler] ignoring self-induced focus loss');
             _sendEvent({
               'ev': 'focus',
@@ -208,12 +224,24 @@ class NASMusicAudioHandler extends BaseAudioHandler {
           }
           _focusLostPermanent =
               event.type == audio_session.AudioInterruptionType.unknown;
+          // Permanent loss pauses BOTH the player and the published state,
+          // synchronously: the old `pause()` only queued an async player
+          // pause (and wrongly set _userPaused, blocking transient resume)
+          // while the engine already painted paused = skin lie with audio
+          // still sounding. Direct _player.pause keeps _userPaused clear so
+          // transient regain still resumes; the optimistic flags + publish
+          // repaint the notification NOW, and the engine's forced-paused on
+          // 'lost-honored' repaints the UI in the same tick. Ducks never
+          // reach here (handled above: volume only, no pause).
+          _playing = false;
+          _paused = true;
+          _publishPlayback();
           _sendEvent({
             'ev': 'focus',
             'phase': 'lost-honored',
             'type': event.type.toString(),
           });
-          if (_playing) pause();
+          unawaited(_player.pause());
         } else {
           debugPrint('[handler] audio focus regained: ${event.type}');
           final resume = !_focusLostPermanent;
@@ -285,6 +313,8 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         // The item id is the stream URL: adopt it BEFORE publishing so the
         // car never sees the new title under the previous track's id.
         _currentUrl = nu;
+        _duration = durationForNewTrackPub();
+        _position = Duration.zero;
         _publishMedia();
         try {
           await _player.stop();
@@ -521,6 +551,10 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         _currentUrl = url;
         _loading = true;
         _playing = false;
+        // New-track pub carries ZERO duration until measured: _duration still
+        // holds the previous track's value here (timestamp flash on the car).
+        _duration = durationForNewTrackPub();
+        _position = Duration.zero;
         // Publish the NEW track's metadata BEFORE the loading/playback state:
         // cars (AVRCP) latch onto the first MediaItem they see for a URL.
         // The metadata message for this track normally precedes the play cmd

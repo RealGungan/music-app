@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../api_client.dart';
 import '../announcer.dart';
 import '../auth_store.dart';
+import '../debug_overlay.dart';
 import '../diag_log.dart';
 import '../import_sheet.dart';
 import '../lang.dart';
@@ -1274,6 +1275,26 @@ if (check != null && check.running)
                 }
               },
             ),
+          ]),
+          // NOT owner-gated: any tester (emutest2 included) must be able to
+          // enable the ground-truth HUD without the owner's account.
+          _sectionCard(tr('Debug'), [
+          ValueListenableBuilder<bool>(
+            valueListenable: DebugInfo.enabled,
+            builder: (_, on, __) => SwitchListTile(
+              secondary: const Icon(Icons.bug_report),
+              title: Text(tr('Debug overlay')),
+              subtitle: Text(
+                tr('Tiny ground-truth HUD: engine, queue, last actions.'),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              value: on,
+              onChanged: (v) async {
+                await DebugInfo.setEnabled(v);
+              },
+            ),
+          ),
           ]),
           _sectionCard(tr('Phone storage'), [
           ValueListenableBuilder<int>(

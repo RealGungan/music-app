@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'api_client.dart';
+import 'debug_overlay.dart';
 import 'keep_dialog.dart';
 import 'lang.dart';
 import 'lyrics_sheet.dart';
@@ -22,6 +23,12 @@ import 'widgets.dart';
 
 /// Which service a shared song link should point at.
 enum _ShareTarget { ytmusic, spotify, instagram }
+
+/// Duration label for the player screen. Pure so unit tests pin it: stream
+/// metadata arrives late, so an unknown (zero/negative) duration shows –:––
+/// instead of 00:00 while the position clock already advances.
+String durationLabel(Duration d, String Function(Duration) fmt) =>
+    d <= Duration.zero ? '–:––' : fmt(d);
 
 /// Position to DISPLAY given a committed seek target. Pure so unit tests pin
 /// it: hold the seek target while the engine is still >2s away on either
@@ -735,7 +742,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
                               ValueListenableBuilder<Duration>(
                                 valueListenable: qp.trackDuration,
                                 builder: (_, d, __) => Text(
-                                  _fmt(d),
+                                  durationLabel(d, _fmt),
                                   style: const TextStyle(
                                     fontSize: 12,
                                     color: Colors.white54,
@@ -784,6 +791,8 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
                     ),
                     IconButton(
                       visualDensity: VisualDensity.compact,
+                      constraints: const BoxConstraints(
+                          minWidth: 48, minHeight: 48),
                       icon: const Icon(Icons.skip_previous, size: 36),
                       onPressed: _edit ? _noop : qp.previous,
                     ),
@@ -810,6 +819,8 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
                                 listenable: qp.stateSyncing,
                                 builder: (_, __) => IconButton(
                                   visualDensity: VisualDensity.compact,
+                                  constraints: const BoxConstraints(
+                                      minWidth: 48, minHeight: 48),
                                   iconSize: 60,
                                   color: Colors.white,
                                   onPressed: (_edit || qp.stateSyncing.value)
@@ -828,6 +839,8 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
                     const SizedBox(width: 8),
                     IconButton(
                       visualDensity: VisualDensity.compact,
+                      constraints: const BoxConstraints(
+                          minWidth: 48, minHeight: 48),
                       icon: const Icon(Icons.skip_next, size: 36),
                       onPressed: _edit ? _noop : qp.next,
                     ),
@@ -1366,7 +1379,10 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
           api.logClientError('share-ig-story', '${cur.title} ${story.detail}'),
         );
       }
-      if (story.ok) return;
+      if (story.ok) {
+        DebugInfo.share('ig-story', '');
+        return;
+      }
       final caption = storyCaption(p.subject, p.spLink);
       final direct = await shareDirectDetailed(text: caption);
       if (!direct.ok) {
@@ -1378,6 +1394,42 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
         );
       }
       if (instagramGenericNeeded(storyOk: story.ok, directOk: direct.ok)) {
+        // Final tier: save cover to gallery + copy caption + launch IG
+        // (always works, no fragile API) before the generic sheet.
+        final fb = await shareInstagramFallbackDetailed(caption: caption);
+        if (!fb.ok) {
+          unawaited(
+            api.logClientError(
+              'share-ig-fallback',
+              '${cur.title} ${fb.detail}',
+            ),
+          );
+        }
+        if (fb.ok) return;
+        // Always-works tier: copy link + open Instagram (no artwork needed —
+        // survives Morphe builds that reject the art intents, or no cover).
+        final cp = await shareCopyLinkOpenInstagramDetailed(
+            link: p.spLink, caption: caption);
+        if (!cp.ok) {
+          unawaited(
+            api.logClientError(
+              'share-ig-copylink',
+              '${cur.title} ${cp.detail}',
+            ),
+          );
+        }
+        if (cp.ok) {
+          DebugInfo.share('ig-copylink', '');
+          return;
+        }
+        if (!instagramGenericAfterCopyNeeded(
+          storyOk: story.ok,
+          directOk: direct.ok,
+          fallbackOk: fb.ok,
+          copyOk: cp.ok,
+        )) {
+          return;
+        }
         unawaited(
           api.logClientError(
             'share-ig-fallback',
@@ -1387,7 +1439,9 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
         // Gated case raced past the chooser (uninstalled between gate and
         // tap): explain, don't silently drop to the system sheet.
         if (instagramNoResolve(story.detail) &&
-            instagramNoResolve(direct.detail)) {
+            instagramNoResolve(direct.detail) &&
+            instagramNoResolve(fb.detail) &&
+            instagramNoResolve(cp.detail)) {
           if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -1420,13 +1474,18 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
         'text': link,
         'subject': subject,
       });
-      if (shareTierOk(sent)) return;
+      if (shareTierOk(sent)) {
+        DebugInfo.share('sheet', '');
+        return;
+      }
+      DebugInfo.share('sheet-fallback', '${sent ?? 'null'}');
       unawaited(
         ServerContext.of(context)
             .logClientError('share-sheet', '$subject sheet=${sent ?? 'null'}'),
       );
     } catch (e) {
       // Desktop has no share sheet — fall through to the clipboard.
+      DebugInfo.share('clipboard', '$e');
       unawaited(
         ServerContext.of(context)
             .logClientError('share-sheet', '$subject exception: $e'),

@@ -250,6 +250,38 @@ void main() {
     });
   });
 
+  group('pause ack (never-paused guard)', () {
+    test('pause-dropped only when no ack after retry', () {
+      expect(pauseDropDiagnostic(acked: true), isNull);
+      expect(pauseDropDiagnostic(acked: false), 'pause-dropped');
+    });
+
+    test('acked pause sends cmd and needs no retry', () async {
+      final inbox = ReceivePort();
+      IsolateNameServer.removePortNameMapping(kAudioStatePort);
+      IsolateNameServer.registerPortWithName(inbox.sendPort, kAudioStatePort);
+      addTearDown(() {
+        IsolateNameServer.removePortNameMapping(kAudioStatePort);
+        inbox.close();
+      });
+      final e = RemoteEngine();
+      addTearDown(e.dispose);
+      e.feedRemoteEvent({'ev': 'state', 's': 'playing'});
+      final got = <Map<String, dynamic>>[];
+      final sub = inbox.listen((m) {
+        got.add(jsonDecode(m as String) as Map<String, dynamic>);
+      });
+      final pausing = e.pause();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(got.isNotEmpty, isTrue);
+      expect(got[0]['cmd'], 'pause');
+      e.feedRemoteEvent({'ev': 'state', 's': 'paused'});
+      await pausing.timeout(const Duration(seconds: 2));
+      expect(got.where((c) => c['cmd'] == 'pause').length, 1);
+      await sub.cancel();
+    });
+  });
+
   group('shouldAutoResumeOnRegain', () {
     test('user pause wins over transient regain', () {
       expect(

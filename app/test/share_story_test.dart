@@ -21,12 +21,76 @@ void main() {
     expect(storyFallbackNeeded(null), true); // cancel / no-result == fallback
   });
 
-  test('IG tier order: story -> direct IG -> generic sheet', () {
+  test('IG tier order: story -> direct IG -> fallback -> copylink -> sheet', () {
     expect(instagramShareTierOrder, [
       'shareStory',
       'shareDirectInstagram',
+      'shareInstagramFallback',
+      'copyLinkOpenInstagram',
       'shareText',
     ]);
+  });
+
+  test('fallback runs when both IG tiers fail; sheet only after all three', () {
+    expect(instagramFallbackNeeded(storyOk: true, directOk: false), false);
+    expect(instagramFallbackNeeded(storyOk: false, directOk: true), false);
+    expect(instagramFallbackNeeded(storyOk: false, directOk: false), true);
+    expect(
+      instagramGenericAfterFallbackNeeded(
+          storyOk: false, directOk: false, fallbackOk: false),
+      true,
+    );
+    expect(
+      instagramGenericAfterFallbackNeeded(
+          storyOk: false, directOk: false, fallbackOk: true),
+      false,
+    );
+    expect(
+      instagramGenericAfterFallbackNeeded(
+          storyOk: true, directOk: false, fallbackOk: false),
+      false,
+    );
+  });
+
+  test('copylink tier runs when all art tiers fail; sheet only after all four',
+      () {
+    expect(
+      instagramCopyLinkNeeded(storyOk: true, directOk: false, fallbackOk: false),
+      false,
+    );
+    expect(
+      instagramCopyLinkNeeded(storyOk: false, directOk: false, fallbackOk: true),
+      false,
+    );
+    expect(
+      instagramCopyLinkNeeded(
+          storyOk: false, directOk: false, fallbackOk: false),
+      true,
+    );
+    expect(
+      instagramGenericAfterCopyNeeded(
+          storyOk: false, directOk: false, fallbackOk: false, copyOk: false),
+      true,
+    );
+    expect(
+      instagramGenericAfterCopyNeeded(
+          storyOk: false, directOk: false, fallbackOk: false, copyOk: true),
+      false,
+    );
+    expect(
+      instagramGenericAfterCopyNeeded(
+          storyOk: false, directOk: false, fallbackOk: true, copyOk: false),
+      false,
+    );
+  });
+
+  test('fallback no-package detail means not installed', () {
+    expect(
+      instagramNoResolve(
+        'fail: launch-failed artExists=true artSize=42 authority=com.nasmusic.nasmusic.art err=no IG package found',
+      ),
+      true,
+    );
   });
 
   test('generic sheet only when both IG tiers fail', () {

@@ -12,13 +12,51 @@ import 'package:flutter/services.dart';
 
 /// Share-tier order for the Instagram target: Stories composer first, then
 /// a direct IG feed/message share (ACTION_SEND pinned to the IG package so
-/// Instagram itself opens), then the generic system sheet, then clipboard.
+/// Instagram itself opens), then save-cover-to-gallery + copy-caption +
+/// launch-IG, then copy-link + open-Instagram (no artwork needed, always
+/// works — even a Morphe build that rejects the art intents still opens),
+/// then the generic system sheet, then clipboard.
 /// Clipboard lives in the caller (`_shipShare`/Clipboard fallback).
 const instagramShareTierOrder = [
   'shareStory',
   'shareDirectInstagram',
+  'shareInstagramFallback',
+  'copyLinkOpenInstagram',
   'shareText',
 ];
+
+/// True when BOTH IG-native tiers failed and the gallery fallback is still
+/// needed (last resort before the generic sheet).
+bool instagramFallbackNeeded({required bool storyOk, required bool directOk}) =>
+    !storyOk && !directOk;
+
+/// True when all IG art tiers failed and the copy-link tier is still
+/// needed (last resort before the generic sheet — needs no artwork).
+bool instagramCopyLinkNeeded({
+  required bool storyOk,
+  required bool directOk,
+  required bool fallbackOk,
+}) =>
+    !storyOk && !directOk && !fallbackOk;
+
+/// True when all four IG tiers failed and the generic sheet is still
+/// needed (last resort before clipboard).
+bool instagramGenericAfterCopyNeeded({
+  required bool storyOk,
+  required bool directOk,
+  required bool fallbackOk,
+  required bool copyOk,
+}) =>
+    !storyOk && !directOk && !fallbackOk && !copyOk;
+
+/// True when all three IG tiers failed and the generic sheet is still
+/// needed (last resort before clipboard).
+bool instagramGenericAfterFallbackNeeded({
+  required bool storyOk,
+  required bool directOk,
+  required bool fallbackOk,
+}) =>
+    !storyOk && !directOk && !fallbackOk;
 
 /// True when BOTH IG-native tiers failed and the generic sheet is still
 /// needed (last resort before clipboard).
@@ -88,6 +126,46 @@ Future<ShareTierResult> shareDirectDetailed({required String text}) async {
   }
 }
 
+/// Platform call (final tier): saves the cover to the gallery, copies the
+/// caption to the clipboard, and launches the Instagram app itself.
+/// Always works (no fragile Stories/direct API) — the user pastes inside IG.
+Future<ShareTierResult> shareInstagramFallbackDetailed({
+  required String caption,
+}) async {
+  try {
+    const channel = MethodChannel('com.nasmusic.nasmusic/share');
+    final sent = await channel.invokeMethod<Object>('shareInstagramFallback', {
+      'text': caption,
+    });
+    final ok = shareTierOk(sent);
+    return ShareTierResult(ok, ok ? 'ok' : 'fallback ${sent ?? 'null'}');
+  } catch (e) {
+    return ShareTierResult(false, 'fallback exception: $e');
+  }
+}
+
+/// Platform call (always-works tier): copies the link to the clipboard and
+/// opens Instagram itself (launch intent, VIEW fallback). Needs no artwork,
+/// so it succeeds even when the Stories/direct/gallery tiers reject the
+/// cover (Morphe builds) or there is no cover on disk.
+Future<ShareTierResult> shareCopyLinkOpenInstagramDetailed({
+  required String link,
+  required String caption,
+}) async {
+  try {
+    const channel = MethodChannel('com.nasmusic.nasmusic/share');
+    final sent =
+        await channel.invokeMethod<Object>('copyLinkOpenInstagram', {
+      'link': link,
+      'text': caption,
+    });
+    final ok = shareTierOk(sent);
+    return ShareTierResult(ok, ok ? 'ok' : 'copylink ${sent ?? 'null'}');
+  } catch (e) {
+    return ShareTierResult(false, 'copylink exception: $e');
+  }
+}
+
 /// True when a native IG detail means "Instagram can't handle a share"
 /// (neither full nor Lite launched). Launch-first: the native side tries
 /// startActivity per package and reports the caught exception, so a missing
@@ -96,6 +174,7 @@ Future<ShareTierResult> shareDirectDetailed({required String text}) async {
 /// ever labeled by this, never hard-blocked — the tiers are always attempted.
 bool instagramNoResolve(String detail) =>
     detail.contains('no-resolve') ||
+    detail.contains('no IG package found') ||
     (detail.contains('launch-failed') &&
         detail.contains('ActivityNotFoundException'));
 

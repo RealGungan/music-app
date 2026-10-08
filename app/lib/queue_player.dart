@@ -11,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api_client.dart';
 import 'audio_session_state.dart';
+import 'debug_overlay.dart';
 import 'diag_log.dart';
 import 'history.dart';
 import 'lang.dart';
@@ -976,11 +977,28 @@ class QueuePlayer {
     // A deliberate pause cancels any in-flight auto-resume: the user's
     // intent wins over the heal loop.
     _healGen++;
-    return _player.pause();
+    DebugInfo.pause('tap');
+    return _player.pause().then((_) => DebugInfo.pause('ok')).catchError((e) {
+      DebugInfo.pause('err $e');
+      throw e;
+    });
   }
 
-  Future<void> resume() => _player.resume();
+  Future<void> resume() {
+    DebugInfo.resume('tap');
+    return _player.resume().then((_) => DebugInfo.resume('ok')).catchError((e) {
+      DebugInfo.resume('err $e');
+      throw e;
+    });
+  }
   Future<void> stop() => _player.stop();
+
+  /// Ground-truth HUD: engine + handler (getState) state names.
+  String get engineStateName => _lastPlayerState.name;
+  String get handlerStateName {
+    final p = _player;
+    return p is RemoteEngine ? p.lastStateName : _lastPlayerState.name;
+  }
 
   Future<void> resumeOrPause() {
     if (!playing && _gaveUp) return retryCurrent();
@@ -1291,8 +1309,10 @@ class QueuePlayer {
           currentHeal: _healGen,
           isPlaying: _player.isPlaying,
         )) {
+          DebugInfo.nudge('gated');
           return;
         }
+        DebugInfo.nudge('fired');
         _player.resume();
       });
       // Slow-start auto-log: tap-to-audio >3s with no audio is a silent
@@ -1595,7 +1615,10 @@ class QueuePlayer {
         'heal-gave-up',
         '${items[index].title} (reason=$reason, strikes=$_healStrikes)',
       );
+      DebugInfo.heal('$reason gave-up');
       return; // gave up; wait for retry
+      // ponytail: heal result recorded at give-up/ignore/resume only.
+
     }
     _healStrikes++;
     final hid = ++_healGen;
@@ -1607,9 +1630,11 @@ class QueuePlayer {
     // on heal. Stay stopped.
     if (!wasPlaying && _lastPlayerState == PlayerState.stopped) {
       DiagLog.restart.log('heal($reason) ignored (stopped, idx=$idx)');
+      DebugInfo.heal('$reason ignored-stopped');
       return;
     }
     _lastHealAt = DateTime.now();
+    DebugInfo.heal('$reason start');
     // Stale-position guard: if no position event has arrived for THIS
     // track load yet, currentPosition still holds the previous track's
     // timestamp — healing to it would start the new song mid-way (the
@@ -1779,6 +1804,7 @@ class QueuePlayer {
       if (flowed) {
         debugPrint('[queue] heal($reason) resumed at $target');
         DiagLog.restart.log('heal($reason) resumed at=${target.inSeconds}s');
+        DebugInfo.heal('$reason ok @${target.inSeconds}s');
         _lastHealEnd = DateTime.now();
         // Re-arm the slow-start grace: a just-resumed stream needs time to
         // buffer before the watchdog may judge it again.

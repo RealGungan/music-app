@@ -291,6 +291,9 @@ const Map<String, String> _es = {
   'Record what the app publishes for the car display, then ':
       'Graba lo que publica la app para el coche y luego ',
   'Share diagnostic logs': 'Compartir registros',
+  'Debug overlay': 'Superposición de depuración',
+  'Tiny ground-truth HUD: engine, queue, last actions.':
+      'Mini HUD de verdad: motor, cola, últimas acciones.',
   'Send the restart and car logs (plus a copy saved to the ':
       'Envía los registros (más copia guardada en ',
   'Broadcast': 'Difusión',

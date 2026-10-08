@@ -112,6 +112,11 @@ class LocalEngine implements PlaybackEngine {
   }
 }
 
+/// Null when the pause landed, 'pause-dropped' when even the retry got no
+/// paused ack (handler busy/port gone). Pure so tests pin the log string.
+String? pauseDropDiagnostic({required bool acked}) =>
+    acked ? null : 'pause-dropped';
+
 /// Mobile playback backend. Prefers the audioplayers player that lives inside
 /// the audio_service handler isolate (so audio survives the UI isolate being
 /// suspended in the background), and transparently falls back to a local
@@ -287,6 +292,10 @@ class RemoteEngine implements PlaybackEngine {
   @override
   bool get isPlaying => _lastState == PlayerState.playing;
 
+  /// Ground-truth HUD: handler reply to getState (via feedRemoteEvent).
+  String get lastStateName => _lastState.name;
+  bool get remoteUp => _remoteUp;
+
   @override
   Future<void> play(String url) async {
     _lastUrl = url;
@@ -299,15 +308,32 @@ class RemoteEngine implements PlaybackEngine {
     return _local.play(url);
   }
 
+  /// Waits for the handler's paused state ack (via feedRemoteEvent).
+  Future<bool> _waitPaused(Duration t) async {
+    try {
+      await _sbState.stream
+          .firstWhere((s) => s == PlayerState.paused)
+          .timeout(t);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   @override
   Future<void> pause() async {
-    // Re-engage first: a transient port flap demotes to local (see _send),
-    // and only play/setSource/queueNext re-engaged — pause/resume/seek
-    // would then act locally forever while the tray goes stale. Cheap
-    // lookup, no-op when already engaged.
+    // Awaited + acknowledged: the old fire-and-forget _send silently
+    // dropped when the handler port was busy/gone ("never paused" reads as
+    // "auto-resume"). One retry, then log pause-dropped.
     _tryEngage();
     if (_remoteUp) {
       _send({'cmd': 'pause'});
+      if (await _waitPaused(const Duration(milliseconds: 700))) return;
+      _tryEngage();
+      _send({'cmd': 'pause'});
+      if (await _waitPaused(const Duration(milliseconds: 700))) return;
+      final d = pauseDropDiagnostic(acked: false);
+      debugPrint('[RemoteEngine] $d url=$_lastUrl remoteUp=$_remoteUp');
       return;
     }
     return _local.pause();

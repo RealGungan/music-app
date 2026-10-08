@@ -132,6 +132,13 @@
             <action android:name="android.intent.action.SEND" />
             <data android:mimeType="image/jpeg" />
         </intent>
+        <!-- instagram.* enumeration for the share tiers (Morphe/modded
+             clients under their own package names): lets the app query
+             generic text shares and keep the instagram ones. -->
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="text/plain" />
+        </intent>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>

@@ -59,6 +59,13 @@ class MainActivity : AudioServiceActivity() {
                 } else if (call.method == "shareDirectInstagram") {
                     val text = call.argument<String>("text").orEmpty()
                     result.success(shareDirectToInstagram(text))
+                } else if (call.method == "shareInstagramFallback") {
+                    val text = call.argument<String>("text").orEmpty()
+                    result.success(shareInstagramFallback(text))
+                } else if (call.method == "copyLinkOpenInstagram") {
+                    val link = call.argument<String>("link").orEmpty()
+                    val text = call.argument<String>("text").orEmpty()
+                    result.success(copyLinkOpenInstagram(link, text))
                 } else if (call.method == "canShareToInstagram") {
                     result.success(canShareToInstagram())
                 } else {
@@ -207,8 +214,26 @@ class MainActivity : AudioServiceActivity() {
         ).mapNotNull { it.activityInfo?.packageName }.distinct()
     }.getOrDefault(emptyList())
 
+    // ANY share handler whose package looks like instagram.* (Morphe/modded
+    // clients use their own package names): query generic SEND handlers and
+    // keep the instagram ones. Needs the SEND/text/plain <queries> intent;
+    // an empty result just means the known packages are tried alone.
+    private fun queriedSendPackages(): List<String> = runCatching {
+        packageManager.queryIntentActivities(
+            Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, "https://www.instagram.com/")
+            }, 0,
+        ).mapNotNull { it.activityInfo?.packageName }
+            .filter { it.contains("instagram", ignoreCase = true) }
+            .distinct()
+    }.getOrDefault(emptyList())
+
     private fun storyPackages(): List<String> =
-        (knownIgPackages() + queriedStoryPackages()).distinct()
+        (knownIgPackages() + queriedStoryPackages() + queriedSendPackages()).distinct()
+
+    // Launch-candidate packages for direct/fallback tiers: same universe.
+    private fun igPackages(): List<String> = storyPackages()
 
     // Share-time gate for the IG chooser row: true when Instagram can
     // actually handle a share (Stories composer OR a direct SEND to the
@@ -223,6 +248,7 @@ class MainActivity : AudioServiceActivity() {
         }
         if (packageManager.resolveActivity(story, 0) != null) return true
         if (queriedStoryPackages().isNotEmpty()) return true
+        if (queriedSendPackages().isNotEmpty()) return true
         return knownIgPackages().any { pkg ->
             packageManager.resolveActivity(
                 Intent(Intent.ACTION_SEND).apply { setPackage(pkg) }, 0,
@@ -248,7 +274,7 @@ class MainActivity : AudioServiceActivity() {
                 return "fail: no-art artExists=$exists artSize=$size readable=$readable authority=$authority"
             }
             val uri = ArtFileProvider.ART_URI
-            val pkgs = storyPackages()
+            val pkgs = igPackages()
             if (pkgs.isEmpty()) {
                 return "fail: no-resolve artExists=$exists artSize=$size authority=$authority err=no IG package found"
             }
@@ -273,6 +299,98 @@ class MainActivity : AudioServiceActivity() {
             "fail: launch-failed artExists=$exists artSize=$size authority=$authority err=${errs.joinToString(" | ")}"
         } catch (e: Exception) {
             "fail: exception=$e authority=$authority"
+        }
+    }
+
+    // Final tier: save cover to gallery + copy caption + launch Instagram
+    // itself. No fragile Stories/direct API — the user pastes inside IG.
+    // Returns 'ok' or 'fail: <reason>'.
+    private fun shareInstagramFallback(caption: String): String {
+        val authority = ArtFileProvider.AUTHORITY
+        return try {
+            val file = java.io.File(getExternalFilesDir(null), ArtFileProvider.ART_FILE_NAME)
+            val exists = file.exists()
+            val size = if (exists) file.length() else -1L
+            if (!exists || size <= 0L) {
+                return "fail: no-art artExists=$exists artSize=$size authority=$authority"
+            }
+            // 1. Gallery: MediaStore insert (Q+) so the cover is pickable in IG.
+            runCatching {
+                if (Build.VERSION.SDK_INT >= 29) {
+                    val values = android.content.ContentValues().apply {
+                        put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "nasmusic_cover_${System.currentTimeMillis()}.jpg")
+                        put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                        put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/NASMusic")
+                    }
+                    val uri = contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                    if (uri != null) contentResolver.openOutputStream(uri)?.use { out ->
+                        file.inputStream().use { it.copyTo(out) }
+                    }
+                } else {
+                    val pics = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_PICTURES)
+                    val out = java.io.File(pics, "nasmusic_cover_${System.currentTimeMillis()}.jpg")
+                    file.copyTo(out, overwrite = true)
+                    sendBroadcast(Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, Uri.fromFile(out)))
+                }
+            }
+            // 2. Caption to clipboard.
+            runCatching {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("caption", caption))
+            }
+            // 3. Launch Instagram itself.
+            val pkgs = igPackages()
+            val ordered = (listOf("com.instagram.android", "com.instagram.lite") + pkgs).distinct()
+            val errs = mutableListOf<String>()
+            for (pkg in ordered) {
+                val launch = packageManager.getLaunchIntentForPackage(pkg) ?: continue
+                try {
+                    startActivity(launch)
+                    return "ok"
+                } catch (e: Exception) {
+                    errs.add("$pkg: $e")
+                }
+            }
+            "fail: launch-failed artExists=$exists artSize=$size authority=$authority err=${errs.joinToString(" | ").ifEmpty { "no IG package found" }}"
+        } catch (e: Exception) {
+            "fail: exception=$e authority=$authority"
+        }
+    }
+
+    // Always-works tier: copy the link + open Instagram itself. Needs NO
+    // artwork (survives Morphe builds that reject the art intents, and no
+    // cover on disk). Tries a launch intent per instagram.* package, then a
+    // plain VIEW of instagram.com (any browser handles it). Returns 'ok' or
+    // 'fail: <reason>' — the Dart side falls back to the generic sheet.
+    private fun copyLinkOpenInstagram(link: String, caption: String): String {
+        return try {
+            val text = if (link.isNotBlank()) link else caption
+            if (text.isBlank()) return "fail: empty-link"
+            runCatching {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("link", text))
+            }
+            val errs = mutableListOf<String>()
+            for (pkg in (listOf("com.instagram.android", "com.instagram.lite") + igPackages()).distinct()) {
+                val launch = packageManager.getLaunchIntentForPackage(pkg) ?: continue
+                try {
+                    startActivity(launch)
+                    return "ok"
+                } catch (e: Exception) {
+                    errs.add("$pkg: $e")
+                }
+            }
+            // No launchable IG package: VIEW instagram.com (browser always
+            // resolves this — the link is already on the clipboard).
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.instagram.com/")))
+                return "ok"
+            } catch (e: Exception) {
+                errs.add("view: $e")
+            }
+            "fail: launch-failed err=${errs.joinToString(" | ").ifEmpty { "no IG package found" }}"
+        } catch (e: Exception) {
+            "fail: exception=$e"
         }
     }
 
