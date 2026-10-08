@@ -27,3 +27,8 @@ Playlists/**/*.png
 # --- OS junk ---
 .DS_Store
 Thumbs.db
+
+# --- Secrets / local deploy (never commit keys) ---
+omv-compose.yml
+*.env
+*secret*
