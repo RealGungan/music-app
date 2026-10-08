@@ -151,8 +151,11 @@ class RemoteEngine implements PlaybackEngine {
       _sbDur.add(d);
     });
     _local.onPlayerStateChanged.listen((s) {
-      _lastState = s;
+      // Remote truth wins while engaged: the idle local player's stale
+      // events (stop/completed on teardown) must not clobber _lastState
+      // without a stream event — that split is the lying-button class.
       if (_remoteUp) return;
+      _lastState = s;
       _sbState.add(s);
     });
     // The audio_service handler (which owns the real audioplayers player and

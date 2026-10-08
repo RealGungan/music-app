@@ -1,7 +1,6 @@
 import 'dart:math' as math;
 import 'dart:async';
 
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -174,10 +173,6 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
   final Map<String, ({String ytLink, String spLink, String subject})>
   _shareCache = {};
   Timer? _truthPoll;
-  // Last rendered play/pause skin (set during build): the 1s watchdog
-  // compares it against direct native truth (qp.playing via getState reply,
-  // NOT the stream object) and forces a rebuild + logs on mismatch.
-  bool? _lastSkinPlaying;
 
   @override
   void initState() {
@@ -207,31 +202,16 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
     qp.currentTitle.addListener(_prewarmShare);
     qp.currentTitle.addListener(_clearSeekStateOnTrackChange);
     _prewarmShare();
-    // Watchdog (1s, visible screen only): re-ask handler truth via getState,
-    // then compare the RENDERED skin vs DIRECT native state (qp.playing — not
-    // the stream object). On mismatch force a rebuild + log skin-mismatch
-    // (kind/state/expected). Catches stream-subscription death, dual-engine
-    // divergence, stale selector — whatever the cause. Bg-gated (resumed only).
+    // Visible-screen truth poll (1s): re-asks the handler for native truth
+    // via getState; the reply feeds playingN, which rebuilds every button
+    // directly. No watchdog compare/setState needed — one notifier means
+    // the skin cannot disagree with itself. Bg-gated (resumed only).
     _truthPoll = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
         return;
       }
       qp.pollVisibleTruth();
-      final skin = _lastSkinPlaying;
-      if (skin == null) return;
-      final native = qp.playing;
-      if (!skinMismatch(skinShows: skin, nativePlaying: native)) return;
-      qp.report(
-        'skin-mismatch',
-        skinMismatchMessage(
-          skinShows: skin,
-          nativePlaying: native,
-          engine: qp.engineStateName,
-          handler: qp.handlerStateName,
-        ),
-      );
-      if (mounted) setState(() {});
     });
   }
 
@@ -868,40 +848,28 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
                                 ),
                               ),
                             )
-                          : StreamBuilder<PlayerState>(
-                              stream: qp.stateStream,
-                              initialData: qp.playing
-                                  ? PlayerState.playing
-                                  : PlayerState.paused,
-                              builder: (_, snap) => ListenableBuilder(
+                          : ValueListenableBuilder<bool>(
+                              // Sole skin truth: the ONE playingN every
+                              // button listens to — no stream snapshot here.
+                              valueListenable: qp.playingN,
+                              builder: (_, playing, __) => ListenableBuilder(
                                 listenable: qp.stateSyncing,
-                                builder: (_, __) {
-                                  // Record the RENDERED skin for the 1s watchdog
-                                  // (field write during build only — no setState).
-                                  final shows = skinShowsPlaying(
-                                    snap.data,
-                                    lastPlaying: qp.playing,
-                                  );
-                                  _lastSkinPlaying = shows;
-                                  return IconButton(
-                                    visualDensity: VisualDensity.compact,
-                                    constraints: const BoxConstraints(
-                                        minWidth: 48, minHeight: 48),
-                                    iconSize: 60,
+                                builder: (_, ___) => IconButton(
+                                  visualDensity: VisualDensity.compact,
+                                  constraints: const BoxConstraints(
+                                      minWidth: 48, minHeight: 48),
+                                  iconSize: 60,
+                                  color: Colors.white,
+                                  onPressed: (_edit || qp.stateSyncing.value)
+                                      ? null
+                                      : () => qp.resumeOrPause(),
+                                  icon: Icon(
+                                    playing
+                                        ? Icons.pause_circle_filled
+                                        : Icons.play_circle_fill,
                                     color: Colors.white,
-                                    onPressed: (_edit || qp.stateSyncing.value)
-                                        ? null
-                                        : () => qp.resumeOrPause(),
-                                    // Sole truth = native state-stream; cached
-                                    // qp.playing only seeds the first frame.
-                                    icon: Icon(
-                                      shows
-                                          ? Icons.pause_circle_filled
-                                          : Icons.play_circle_fill,
-                                      color: Colors.white,
-                                    ),
-                                  );
-                                },
+                                  ),
+                                ),
                               ),
                             ),
                     ),

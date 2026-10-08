@@ -267,6 +267,8 @@ class QueuePlayer {
     });
     _player.onPlayerStateChanged.listen((s) {
       _lastPlayerState = s;
+      // Sole writer of the skin truth: bool and stream can never split.
+      playingN.value = s == PlayerState.playing;
       // Any settled native state clears the buffering spinner; playing also
       // confirms audio so the deferred autoplay top-up re-arms now.
       _setLoading(false);
@@ -677,6 +679,12 @@ class QueuePlayer {
   final ValueNotifier<Duration> trackDuration = ValueNotifier(Duration.zero);
   final ValueNotifier<double> progressFractionNotifier = ValueNotifier(0);
   final ValueNotifier<int> queueLength = ValueNotifier(0);
+  /// THE play/pause skin truth. One object, owned here: every play button
+  /// (full, mini) listens to this and nothing else. Written only by the
+  /// native state-stream listener below (+ the handler-advanced adoption,
+  /// which is an implicit playing event) — never seeded from a cached bool,
+  /// never snapshotted per-button, so two buttons can never disagree.
+  final ValueNotifier<bool> playingN = ValueNotifier(false);
   // True while onResumed/toggle re-queries handler truth. Play buttons
   // gate on this (spinner/disabled) so no tap lands on a stale icon.
   final ValueNotifier<bool> stateSyncing = ValueNotifier(false);
@@ -2494,7 +2502,10 @@ class QueuePlayer {
     // The handler advanced on its own = audio IS flowing (it can't advance
     // a paused track). Mark it so the single-item refill gate below doesn't
     // mistake a stale UI-isolate state for "audio unconfirmed".
+    // handler-advanced adoption: an implicit playing event, so it writes
+    // the skin truth too (co-writer with the state listener only).
     _lastPlayerState = PlayerState.playing;
+    playingN.value = true;
     _prefetchNext();
     _maybeAutoplay();
     _refreshEngineNext();
