@@ -155,7 +155,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.273"
+APP_VERSION = "1.0.275"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -164,7 +164,7 @@ LANDING_HTML = """<!DOCTYPE html>
 <style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101010;color:#eee;font-family:system-ui,-apple-system,sans-serif;min-height:100vh;display:flex;justify-content:center;padding:24px 16px}h1{color:#1db954;margin:8px 0 4px;font-size:28px}.wrap{width:100%;max-width:480px}.sub{color:#bbb;margin:0 0 16px}.card{background:#1c1c1c;border:1px solid #2a2a2a;border-radius:14px;padding:16px;margin:0 0 12px;line-height:1.5}.step{color:#1db954;margin:8px 0 4px;font-size:28px}.btn{display:inline-block;background:#1db954;color:#06130c;font-weight:700;border-radius:10px;padding:12px 22px;text-decoration:none;margin-top:10px}</style>
 </head><body><div class="wrap">
 <h1>gungan.fm</h1><p class="sub">Private family music server. To join:</p>
-<div class="card"><span class="step">1.</span> <b>Install the app</b><br><a class="btn" href="/staging/app.apk">Download gungan.fm 1.0.16 (Android)</a></div>
+<div class="card"><span class="step">1.</span> <b>Install the app</b><br><a class="btn" href="/staging/app.apk?v=1.0.16">Download gungan.fm 1.0.16 (Android)</a></div>
 <div class="card"><span class="step">2.</span> <b>Create an account</b><br>Open the app, tap <b>Create account</b> and enter the invite code.</div>
 <div class="card"><span class="step">3.</span> <b>Log in</b><br>Sign in with your new account. Your playlists stay private to you.</div>
 </div></body></html>""".replace("1.0.16", APP_VERSION)
@@ -437,12 +437,14 @@ class Handler(BaseHTTPRequestHandler):
         # (Accept: text/html); API clients keep getting the gated JSON.
         if path == "/":
             return self._send(200, LANDING_HTML.encode("utf-8"),
-                              "text/html; charset=utf-8")
+                              "text/html; charset=utf-8",
+                              extra_headers={"Cache-Control": "no-cache"})
         wants_html = "text/html" in (
             self.headers.get("Accept") or "").lower()
         if wants_html and path in ("/staging", "/staging/"):
             return self._send(200, LANDING_HTML.encode("utf-8"),
-                              "text/html; charset=utf-8")
+                              "text/html; charset=utf-8",
+                              extra_headers={"Cache-Control": "no-cache"})
 
         # APK download for the landing page (public by design — the app
         # is useless without an account, and accounts are open anyway).
@@ -502,8 +504,10 @@ class Handler(BaseHTTPRequestHandler):
             # (log_message already redacts ?token=). Best-effort.
             try:
                 import time as _t
+                _av = (query.get("av") or [""])[0].strip()[:32]
                 self.state.db.misc_put(
-                    "lastav:" + str(authed), {"seen": int(_t.time())})
+                    "lastav:" + str(authed),
+                    {"seen": int(_t.time()), "av": _av})
             except Exception:                            # noqa: BLE001
                 pass
 
@@ -7827,6 +7831,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(size))
         self.send_header("Content-Disposition",
                          'attachment; filename="gungan.fm.apk"')
+        self.send_header("Cache-Control", "no-cache")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         if self.command == "HEAD":

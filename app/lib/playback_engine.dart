@@ -9,6 +9,33 @@ import 'package:audioplayers/audioplayers.dart';
 
 import 'audio_handler.dart';
 
+/// Process-wide SINGLE engine guard: audio may only ever come from one
+/// instance — kills the leaked-old-engine-plays-while-UI-reads-new-engine
+/// class entirely. All engines are born via [buildSingleEngine]; a second
+/// birth disposes the prior engine (stopping its audio) and fails loudly
+/// in debug (assert) + logs the birth count in all modes.
+int engineBirthCount = 0;
+PlaybackEngine? soleEngine;
+
+PlaybackEngine buildSingleEngine({required bool remote}) {
+  engineBirthCount++;
+  final prior = soleEngine;
+  if (prior != null) {
+    debugPrint(
+        '[engine] birth #$engineBirthCount remote=$remote SECOND-BIRTH — disposing prior ${prior.runtimeType}');
+    try {
+      (prior as dynamic).dispose();
+    } catch (_) {}
+  } else {
+    debugPrint('[engine] birth #$engineBirthCount remote=$remote');
+  }
+  final e = remote ? RemoteEngine() : LocalEngine();
+  soleEngine = e;
+  assert(prior == null,
+      'SECOND playback-engine birth — prior disposed; use QueuePlayer.instance.engine');
+  return e;
+}
+
 /// Backend that actually produces audio. [QueuePlayer] talks only to this
 /// interface, never to a raw audioplayers player, so the app can use either:
 ///
@@ -529,6 +556,11 @@ class RemoteEngine implements PlaybackEngine {
 
   @override
   void dispose() {
+    // Kill handler-side audio too: _local.dispose() alone leaves the
+    // handler isolate's player running = the leaked-old-engine class.
+    try {
+      _send({'cmd': 'stop'});
+    } catch (_) {}
     _engageTimer?.cancel();
     _healthTimer?.cancel();
     _local.dispose();

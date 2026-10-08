@@ -439,9 +439,9 @@ class QueuePlayer {
   static PlaybackEngine _createEngine() {
     if (defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS) {
-      return RemoteEngine();
+      return buildSingleEngine(remote: true);
     }
-    return LocalEngine();
+    return buildSingleEngine(remote: false);
   }
 
   final PlaybackEngine _player = _createEngine();
