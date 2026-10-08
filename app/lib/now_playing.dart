@@ -1225,6 +1225,16 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
   Future<void> _shareCurrent() async {
     final cur = qp.current;
     if (cur == null) return;
+    // Gate the IG row at share time: when neither IG package resolves, the
+    // row shows "not installed" and taps explain instead of silently
+    // dropping to the generic sheet (log-proven: resolve=false both pkgs).
+    var igAvailable = true;
+    try {
+      igAvailable = await instagramAvailable()
+          .timeout(const Duration(milliseconds: 1500));
+    } catch (_) {
+      igAvailable = true; // fail-open: never hide the row on a slow probe
+    }
     // Open the target chooser FIRST — instant, no network work on the tap.
     final target = await showModalBottomSheet<_ShareTarget>(
       context: context,
@@ -1250,9 +1260,12 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
               onTap: () => Navigator.pop(ctx, _ShareTarget.spotify),
             ),
             ListTile(
-              leading: const Icon(Icons.photo_camera_outlined),
+              leading: Icon(Icons.photo_camera_outlined,
+                  color: igAvailable ? null : Colors.grey),
               title: Text(tr('Instagram')),
-              subtitle: Text(tr('Story with artwork')),
+              subtitle: Text(tr(igAvailable
+                  ? 'Story with artwork'
+                  : 'Instagram app not installed')),
               onTap: () => Navigator.pop(ctx, _ShareTarget.instagram),
             ),
           ],
@@ -1260,6 +1273,16 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
       ),
     );
     if (target == null || !mounted) return;
+    if (target == _ShareTarget.instagram && !igAvailable) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(tr(
+              'Instagram isn\'t installed — share to YouTube Music or Spotify instead')),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+      return;
+    }
 
     // Both targets come from ONE resolve: a song prewarms as soon as it starts
     // playing, so the tap is instant; only very-fast taps fall through.
@@ -1292,6 +1315,20 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
       if (instagramGenericNeeded(storyOk: story.ok, directOk: direct.ok)) {
         unawaited(api.logClientError('share-ig-fallback',
             '${cur.title} story=${story.detail} direct=${direct.detail}'));
+        // Gated case raced past the chooser (uninstalled between gate and
+        // tap): explain, don't silently drop to the system sheet.
+        if (instagramNoResolve(story.detail) &&
+            instagramNoResolve(direct.detail)) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(tr(
+                  'Instagram isn\'t installed — share to YouTube Music or Spotify instead')),
+              duration: const Duration(seconds: 3),
+            ),
+          );
+          return;
+        }
         await _shipShare(context, link: caption, subject: p.subject);
       }
       return;

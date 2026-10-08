@@ -31,6 +31,22 @@ void main() {
     expect(instagramGenericNeeded(storyOk: false, directOk: false), true);
   });
 
+  test('no-resolve detail gates the IG row (log-proven both pkgs)', () {
+    expect(
+        instagramNoResolve(
+            'fail: no-resolve artExists=true artSize=148000 resolve=false authority=com.nasmusic.nasmusic.art'),
+        true);
+    expect(
+        instagramNoResolve(
+            'fail: no-resolve artExists=true artSize=148000 resolve={com.instagram.android: false, com.instagram.lite: false} authority=com.nasmusic.nasmusic.art'),
+        true);
+    expect(instagramNoResolve('ok'), false);
+    expect(
+        instagramNoResolve(
+            'fail: no-art artExists=false artSize=-1 readable=false authority=com.nasmusic.nasmusic.art'),
+        false);
+  });
+
   test('tier reply: ok/true succeed, fail-strings/throws fall through', () {
     expect(shareTierOk(true), true);
     expect(shareTierOk('ok'), true);

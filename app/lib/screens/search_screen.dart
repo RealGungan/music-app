@@ -86,7 +86,7 @@ class _SearchScreenState extends State<SearchScreen> {
     });
     _debounce?.cancel();
     if (v.trim().isEmpty) return;
-    _debounce = Timer(const Duration(milliseconds: 280), () async {
+    _debounce = Timer(const Duration(milliseconds: 450), () async {
       final seq = ++_suggestSeq;
       try {
         final r = await widget.api.suggest(v.trim());

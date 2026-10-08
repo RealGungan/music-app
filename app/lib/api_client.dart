@@ -993,6 +993,36 @@ class AuthSession {
       );
 }
 
+/// True for net errors that must never become User-error rows: user-cancel
+/// aborts (superseded suggest, disposed download) + best-effort typeahead
+/// (the suggest UI already ignores these — logging them made most of the
+/// timeout noise).
+bool isNetNoise(String path, Object e) {
+  final m = e.toString().toLowerCase();
+  if (m.contains('cancel') ||
+      m.contains('abort') ||
+      m.contains('connection closed') ||
+      m.contains('connection reset')) {
+    return true;
+  }
+  if (path.contains('/api/suggest') &&
+      (e is TimeoutException || e is SocketException)) {
+    return true;
+  }
+  return false;
+}
+
+/// True for DNS-level failures (unresolvable funnel/tailnet host): these
+/// must flip to the other reachable base, not just log a timeout row.
+bool isDnsFailure(Object e) {
+  if (e is! SocketException) return false;
+  final m = e.toString().toLowerCase();
+  return m.contains('failed host lookup') ||
+      m.contains('no address associated') ||
+      m.contains('network is unreachable') ||
+      m.contains('no route to host');
+}
+
 /// http.Client wrapper that caps every request: the stock client has NO
 /// timeout, so a dead route (Tailscale not up yet at cold start, DNS
 /// blackhole) hangs the awaiting future FOREVER — stuck gate spinner,
@@ -1006,19 +1036,25 @@ class _TimeoutClient extends http.BaseClient {
   /// as `timeout`). Never logs the client-log call itself (recursion).
   void Function(String kind, String message)? onNetError;
 
+  /// Fired on DNS-level failures so the client flips to the other
+  /// reachable base (tailnet ↔ funnel) instead of only logging.
+  void Function()? onConnectionFailure;
+
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final path = request.url.path;
     try {
       return await _inner.send(request).timeout(_limit);
     } on TimeoutException catch (e) {
-      if (!request.url.path.contains('client-log')) {
-        onNetError?.call('timeout', '${request.method} ${request.url.path}: $e');
+      if (!path.contains('client-log') && !isNetNoise(path, e)) {
+        onNetError?.call('timeout', '${request.method} $path: $e');
       }
       rethrow;
     } on SocketException catch (e) {
-      if (!request.url.path.contains('client-log')) {
-        onNetError?.call('timeout', '${request.method} ${request.url.path}: $e');
+      if (!path.contains('client-log') && !isNetNoise(path, e)) {
+        onNetError?.call('timeout', '${request.method} $path: $e');
       }
+      if (isDnsFailure(e)) onConnectionFailure?.call();
       rethrow;
     }
   }
@@ -1032,6 +1068,11 @@ class ApiClient {
   ApiClient({required this.baseUrl, http.Client? client})
       : _client = _TimeoutClient(client ?? http.Client()) {
     _client.onNetError = (k, m) => logClientError(k, m);
+    // DNS death = wrong base, not a slow server: flip tailnet ↔ funnel
+    // once, best-effort (never blocks the failing call itself).
+    _client.onConnectionFailure = () {
+      unawaited(handleBaseFailure().catchError((_) => serverBase));
+    };
   }
 
   /// Reachable-base endpoints: fast tailnet first, public funnel fallback.
@@ -1839,8 +1880,11 @@ class ApiClient {
 
   /// Live suggestions while typing (online Deezer-style suggestions; the
   /// server returns provider-tagged rows that the app streams to play).
+  /// 8s interactive cap: typeahead is best-effort, never a 30s stall.
   Future<List<Suggestion>> suggest(String q) async {
-    final j = _decode(await _client.get(_uri('/api/suggest', {'q': q})));
+    final j = _decode(await _client
+        .get(_uri('/api/suggest', {'q': q}))
+        .timeout(const Duration(seconds: 8)));
     return (j['results'] as List? ?? [])
         .whereType<Map<String, dynamic>>()
         .map(Suggestion.fromJson)
@@ -1908,7 +1952,7 @@ class ApiClient {
     final j = _decode(
       await _client
           .get(_uri('/api/innas', {'artist': artist, 'title': title}))
-          .timeout(const Duration(seconds: 10)),
+          .timeout(const Duration(seconds: 8)),
     );
     return InNasHit.fromJson(j);
   }

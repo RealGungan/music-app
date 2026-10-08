@@ -89,6 +89,23 @@ Future<ShareTierResult> shareDirectDetailed({required String text}) async {
   }
 }
 
+/// True when a native IG detail means "Instagram can't handle a share"
+/// (neither full nor Lite resolved) — the chooser row must be gated, not
+/// fallen through to the generic sheet silently.
+bool instagramNoResolve(String detail) => detail.contains('no-resolve');
+
+/// Share-time gate: true when Instagram can handle a share on this device.
+/// Fail-open (true) on desktop / errors so the row never vanishes spuriously.
+Future<bool> instagramAvailable() async {
+  try {
+    const channel = MethodChannel('com.nasmusic.nasmusic/share');
+    final ok = await channel.invokeMethod<bool>('canShareToInstagram');
+    return ok ?? true;
+  } catch (_) {
+    return true;
+  }
+}
+
 /// Platform call: returns true when the Stories composer was launched.
 Future<bool> shareStoryToInstagram({required String link}) async =>
     (await shareStoryDetailed(link: link)).ok;

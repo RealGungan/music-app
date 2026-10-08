@@ -260,8 +260,10 @@ class OfflineStore {
     final client = http.Client();
     try {
       final req = http.Request('GET', Uri.parse(url));
+      // Interactive cap (was 30s): a DNS-dead route must fail fast enough
+      // to flip bases, not park the download spinner for half a minute.
       final resp = await client.send(req).timeout(
-          const Duration(seconds: 30));
+          const Duration(seconds: 10));
       final total = resp.contentLength;
       if (total != null &&
           total > 0 &&

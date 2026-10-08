@@ -59,6 +59,8 @@ class MainActivity : AudioServiceActivity() {
                 } else if (call.method == "shareDirectInstagram") {
                     val text = call.argument<String>("text").orEmpty()
                     result.success(shareDirectToInstagram(text))
+                } else if (call.method == "canShareToInstagram") {
+                    result.success(canShareToInstagram())
                 } else {
                     result.notImplemented()
                 }
@@ -187,6 +189,22 @@ class MainActivity : AudioServiceActivity() {
             }
         } catch (e: Exception) {
             "fail: exception=${e} authority=$authority"
+        }
+    }
+
+    // Share-time gate for the IG chooser row: true when Instagram can
+    // actually handle a share (Stories composer OR a direct SEND to the
+    // full/Lite package). Lets Dart disable the row with an explanation
+    // instead of falling through to the generic sheet silently.
+    private fun canShareToInstagram(): Boolean {
+        val story = Intent("com.instagram.share.ADD_TO_STORY").apply {
+            setPackage("com.instagram.android")
+        }
+        if (packageManager.resolveActivity(story, 0) != null) return true
+        return listOf("com.instagram.android", "com.instagram.lite").any { pkg ->
+            packageManager.resolveActivity(
+                Intent(Intent.ACTION_SEND).apply { setPackage(pkg) }, 0,
+            ) != null
         }
     }
 

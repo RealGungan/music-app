@@ -172,6 +172,9 @@ const Map<String, String> _es = {
   'Direct video link': 'Enlace de vídeo',
   'Instagram': 'Instagram',
   'Story with artwork': 'Historia con portada',
+  'Instagram app not installed': 'App de Instagram no instalada',
+  'Instagram isn\'t installed — share to YouTube Music or Spotify instead':
+      'Instagram no está instalado — comparte a YouTube Music o Spotify',
   'Link copied to clipboard': 'Enlace copiado',
   'from internet': 'de internet',
   'Play next in queue': 'Siguiente en la cola',
