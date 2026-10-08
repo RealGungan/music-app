@@ -27,7 +27,9 @@ class ArtFileProvider : ContentProvider() {
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
         val file = File(context?.getExternalFilesDir(null), ART_FILE_NAME)
-        if (!file.exists() || !file.canRead()) {
+        // Zero-byte art reads as a broken sticker (IG open-close flash) —
+        // fail here so the preflight + fallback path handles it instead.
+        if (!file.exists() || !file.canRead() || file.length() <= 0L) {
             throw FileNotFoundException("Art file not ready: ${file.absolutePath}")
         }
         return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)

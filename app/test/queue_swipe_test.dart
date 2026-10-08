@@ -146,24 +146,24 @@ void main() {
     });
   });
 
-  group('long-press add to queue (addToQueueEnd = copy)', () {
-    test('lands once at the end, playhead untouched', () {
+  group('long-press = play next at current+1 (playNextNewItem, never bottom)', () {
+    test('new song lands right after current, playhead untouched', () {
       final qp = QueuePlayer.instance;
-      _reset(qp, const ['A', 'B'], 0);
-      expect(qp.addToQueueEnd(_song('C')), isTrue);
-      expect(_titles(qp), ['A', 'B', 'C']);
-      expect(qp.items.where((it) => it.title == 'C').length, 1);
+      _reset(qp, const ['A', 'B', 'C'], 0);
+      expect(qp.playNextNewItem(_song('X')), isTrue);
+      expect(_titles(qp), ['A', 'X', 'B', 'C']);
       expect(qp.index, 0);
-      expect(qp.items.last.manuallyPlaced, isTrue);
-      expect(qp.queueLength.value, 3);
+      expect(qp.items.where((it) => it.title == 'X').length, 1);
+      expect(qp.items[1].manuallyPlaced, isTrue);
+      expect(qp.queueLength.value, 4);
     });
 
     test('lands behind the play-next chain, not after current', () {
       final qp = QueuePlayer.instance;
       _reset(qp, const ['A', 'B', 'C'], 0);
       qp.moveToPlayNext(1); // B queued next: [A B C]
-      expect(qp.addToQueueEnd(_song('Z')), isTrue);
-      expect(_titles(qp), ['A', 'B', 'C', 'Z']);
+      expect(qp.playNextNewItem(_song('Z')), isTrue);
+      expect(_titles(qp), ['A', 'B', 'Z', 'C']);
       expect(qp.items.where((it) => it.title == 'Z').length, 1);
     });
 
@@ -178,8 +178,8 @@ void main() {
         lyricsArtist: 'Artist',
         lyricsTitle: 'NewSong',
       );
-      expect(qp.addToQueueEnd(lazy), isTrue);
-      final added = qp.items.last;
+      expect(qp.playNextNewItem(lazy), isTrue);
+      final added = qp.items[1];
       expect(identical(added, lazy), isTrue);
       expect(added.url, isNotEmpty);
       expect(added.videoId, 'VID123');
@@ -193,7 +193,7 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       _reset(qp, const [], 0);
       qp.index = 0;
-      expect(qp.addToQueueEnd(_song('First')), isTrue);
+      expect(qp.playNextNewItem(_song('First')), isTrue);
       expect(_titles(qp), ['First']);
       expect(qp.index, 0);
     });

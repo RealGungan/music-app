@@ -136,8 +136,16 @@ class MainActivity : AudioServiceActivity() {
     // (fire-and-forget composer) and needs no handling.
     private fun shareStoryToInstagram(link: String): Boolean {
         return try {
+            // Preflight BEFORE firing the intent: a missing OR zero-byte art
+            // file makes Instagram open then immediately close (flash) — fall
+            // back to the generic sheet without launching anything.
             val file = java.io.File(getExternalFilesDir(null), ArtFileProvider.ART_FILE_NAME)
-            if (!file.exists() || !file.canRead()) return false
+            if (!file.exists() || !file.canRead() || file.length() <= 0L) return false
+            // Resolve BEFORE granting: no grant when IG can't handle it.
+            val probe = Intent("com.instagram.share.ADD_TO_STORY").apply {
+                setPackage("com.instagram.android")
+            }
+            if (packageManager.resolveActivity(probe, 0) == null) return false
             val uri = ArtFileProvider.ART_URI
             val story = Intent("com.instagram.share.ADD_TO_STORY").apply {
                 setDataAndType(uri, "image/jpeg")
@@ -155,7 +163,6 @@ class MainActivity : AudioServiceActivity() {
             grantUriPermission(
                 "com.instagram.android", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION,
             )
-            if (packageManager.resolveActivity(story, 0) == null) return false
             runCatching { startActivity(story) }.isSuccess
         } catch (_: Exception) {
             false

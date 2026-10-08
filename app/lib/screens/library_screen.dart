@@ -2196,9 +2196,10 @@ try {
   /// [playAll] distinguishes the "Play All" button (which is allowed to fully
   /// randomize everything) from a tapped row whose startIndex happens to be 0
   /// (which must still play the tapped song first).
-  /// Optimistic autoplay (funnel): the head song's audio starts NOW —
-  /// prewarmed single-item queue — while the tail appends behind it
-  /// instead of blocking first sound on queue assembly.
+  /// Optimistic autoplay (funnel): the head song's audio starts NOW.
+  /// The whole queue installs ATOMICALLY (single playList call): the old
+  /// playList([head]) + tail-append loop raced the single-item refill —
+  /// refill rows landed mid-tail and the order fought (len=1 rem=0 race).
   Future<void> _playQueueShuffled(
     List<QueueItem> q, {
     required int startIndex,
@@ -2231,18 +2232,14 @@ try {
     }
     _shuffleOn = shuffle;
     final head = q[startIndex];
-    final tail = [...q]..removeAt(startIndex);
     widget.api.prewarmFile(head.url);
     await QueuePlayer.instance.playList(
-      [head],
-      startIndex: 0,
+      q,
+      startIndex: startIndex,
       startShuffled: shuffle,
       playFromPlaylist: true,
       playlistName: widget.name,
     );
-    for (final it in tail) {
-      QueuePlayer.instance.addToQueueEnd(it);
-    }
   }
 
 Future<void> _playFrom(int i) async {

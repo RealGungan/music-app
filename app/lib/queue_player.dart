@@ -155,7 +155,12 @@ _player.onPlayerComplete.listen((_) async {
     });
     _player.onPlayerStateChanged.listen((s) {
       _lastPlayerState = s;
-      if (s == PlayerState.playing) loading.value = false;
+      if (s == PlayerState.playing) {
+        loading.value = false;
+        // Single-item starts defer their refill until audio is confirmed —
+        // this IS the confirmation, so re-arm the top-up now.
+        unawaited(_maybeAutoplay());
+      }
     });
     _player.onError.listen((e) {
       lastError.value = e;
@@ -839,18 +844,6 @@ _player.onPlayerComplete.listen((_) async {
     }
     final target = (end + 1).clamp(0, items.length);
     items.insert(target, item);
-    item.manuallyPlaced = true;
-    queueLength.value = items.length;
-    _refreshEngineNext();
-    return true;
-  }
-
-  /// Append a brand-new [item] to the end of the queue ("add to queue").
-  /// The item is marked [manuallyPlaced] so autoplay respects it. An empty
-  /// queue starts playing it (same as [playNextNewItem]).
-  bool addToQueueEnd(QueueItem item) {
-    if (items.isEmpty) return playNextNewItem(item);
-    items.add(item);
     item.manuallyPlaced = true;
     queueLength.value = items.length;
     _refreshEngineNext();
@@ -1755,6 +1748,15 @@ _player.onPlayerComplete.listen((_) async {
       debugPrint('[autoplay] shouldRefill=false remaining=$remaining refillWhen=${planner.refillWhen}');
       return;
     }
+    // Single-item start: the optimistic head hasn't produced audio yet and
+    // the real tail (playlist rows / jump target) hasn't landed — a refill
+    // now appends internet rows the tail then fights (len=1 rem=0 race).
+    // Defer until playing is confirmed (the state listener re-arms); the
+    // completion path (force:true) still tops up a truly single queue.
+    if (!force && items.length <= 1 && _lastPlayerState != PlayerState.playing) {
+      DiagLog.restart.log('fill skip: single-item starting (audio unconfirmed)');
+      return;
+    }
     if (_autoplayForIndex == index) {
       DiagLog.restart.log(
           'fill skip: already filled for idx=$index remaining=$remaining');
@@ -1873,6 +1875,14 @@ final int need =
         return;
       }
       if (_itemKey(items[index]) != requestKey) {
+        if (items.length <= 1) {
+          // Single-item start moved on mid-flight: stale-seed rows must not
+          // land on the fresh single queue (tail fight). Drop; the re-armed
+          // trigger refills for the new position once it plays.
+          DiagLog.restart.log('fill drop: landed late on single-item start');
+          _autoplayForIndex = -1;
+          return;
+        }
         DiagLog.restart.log(
             'fill landed late (idx=$index) — appending anyway');
         _autoplayForIndex = -1;
@@ -2129,6 +2139,10 @@ if (fresh.isEmpty) return;
     if (_recentlyPlayed.length > _maxRecent) {
       _recentlyPlayed.removeAt(0);
     }
+    // The handler advanced on its own = audio IS flowing (it can't advance
+    // a paused track). Mark it so the single-item refill gate below doesn't
+    // mistake a stale UI-isolate state for "audio unconfirmed".
+    _lastPlayerState = PlayerState.playing;
     _prefetchNext();
     _maybeAutoplay();
     _refreshEngineNext();
