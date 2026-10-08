@@ -24,7 +24,9 @@ Playlists/**/*.ogg
 Playlists/**/*.jpg
 Playlists/**/*.png
 
-# --- OS junk ---
+# --- Release APKs: ignore stray APKs, but TRACK versioned NASMusic-*.apk ---
+*.apk
+!NASMusic-*.apk
 .DS_Store
 Thumbs.db
 
