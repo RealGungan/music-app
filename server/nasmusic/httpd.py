@@ -155,7 +155,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.261"
+APP_VERSION = "1.0.262"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -3544,7 +3544,7 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             return self._error(400, "invalid JSON")
         kind = str(body.get("kind") or "error")[:40]
-        message = str(body.get("message") or "")[:500]
+        message = str(body.get("message") or "")[:2000]
         if not message:
             return self._error(400, "empty message")
         try:
@@ -3560,7 +3560,9 @@ class Handler(BaseHTTPRequestHandler):
             kl = kind.lower()
             if kl.startswith(("playback", "playback-gave-up",
                                "playback-error", "heal", "unplayab",
-                               "autoplay", "playing")):
+                               "autoplay", "playing", "resync", "pause-fire",
+                               "resume-fire", "stamp-switch", "noisy",
+                               "focus", "interrupt")):
                 section = "playback"
             elif kl.startswith(("download", "replace", "staging")):
                 section = "download_failed"

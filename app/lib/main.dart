@@ -109,6 +109,14 @@ void _decodeAudioJson(String json) {
         if (phase == 'lost-honored' ||
             phase == 'regained' ||
             phase == 'regained-stay-paused') {
+          // Interrupt hooks on the LIVE path (right next to the onResumed
+          // call that proves it executes): external pause-fire / resume-fire
+          // rows instead of silent icon flips.
+          if (phase == 'lost-honored') {
+            qp.report('pause-fire', 'focus lost-honored ${m?['type']}');
+          } else {
+            qp.report('resume-fire', 'focus $phase ${m?['type']}');
+          }
           unawaited(qp.onResumed());
         }
       }
@@ -368,6 +376,9 @@ Future<void> _initAudioService() async {
     // receiver in MainActivity is what reaches Dart here.
     _kAudioEventChannel.setMethodCallHandler((call) async {
       if (call.method == 'becomingNoisy') {
+        // Pause-fire hook: headphones/car-stereo disconnect is the one
+        // pause path with no UI tap, so it gets its own row (was silent).
+        QueuePlayer.instance.report('pause-fire', 'becoming-noisy');
         QueuePlayer.instance.pause();
       }
     });

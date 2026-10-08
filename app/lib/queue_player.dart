@@ -635,6 +635,13 @@ class QueuePlayer {
   /// API client for error logging. Set by main.dart after login.
   ApiClient? _api;
 
+  /// Fire-and-forget diagnostic row (interrupt/pause/resume/resync/stamp
+  /// evidence). logClientError never throws and carries ?av= itself, so this
+  /// is safe on every hot path — no try/catch needed around it.
+  void report(String kind, String message) {
+    unawaited(_api?.logClientError(kind, message));
+  }
+
   Future<void> playList(
     List<QueueItem> q, {
     int startIndex = 0,
@@ -1000,6 +1007,10 @@ class QueuePlayer {
   Future<void> onResumed() {
     final p = _player;
     if (p is RemoteEngine) {
+      // Interrupt-resync hook: this IS the live path (app resume +
+      // focus regain both land here — main.dart), so the row proves the
+      // resync fired instead of vanishing into a swallowed catch.
+      report('resync', 'fired playing=$playing items=${items.length}');
       stateSyncing.value = true;
       return p.resync().whenComplete(() => stateSyncing.value = false);
     }
@@ -1050,6 +1061,16 @@ class QueuePlayer {
     // Completed tracks seal the full duration: the UI position clock is
     // frozen while backgrounded, so a natural finish would bank ~0s.
     final prevSec = completedSecs ?? position.value.inSeconds;
+    // Stamp-switch hook: log ONLY when a stale clock could actually flash —
+    // the bar holds a non-trivial previous-track timestamp while that track
+    // never produced ticks of its own (failed load: no ticks to correct it).
+    // Healthy advances stay silent (server 60/h cap must stay free for real
+    // errors). Reads position BEFORE the zeroing below.
+    if (position.value > const Duration(seconds: 1) &&
+        _posMax <= const Duration(seconds: 1)) {
+      report('stamp-switch',
+          '"$prevTitle" clock=${position.value.inSeconds}s max=${_posMax.inSeconds}s -> "${items[index].title}"');
+    }
     // New track = fresh clock: the old position/duration belong to the
     // previous song. Without this reset a failed internet load (which
     // emits no ticks) freezes the bar at the old song's timestamp, and

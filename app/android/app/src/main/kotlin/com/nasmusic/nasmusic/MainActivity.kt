@@ -133,9 +133,12 @@ class MainActivity : AudioServiceActivity() {
         }
     }
 
-    // Instagram Stories share: the current track's art file (written by the
-    // audio handler for the notification) as the sticker + the resolved
-    // track link as the tappable attribution. Returns 'ok' or
+    // Instagram Stories share: MINIMAL known-good ADD_TO_STORY — a single
+    // background image asset URI + source_application + grant flags. The
+    // sticker asset (interactive_asset_uri), content_url attribution and
+    // background colors are deliberately DROPPED: taps launched fine ('ok')
+    // but Instagram opened-then-closed = content rejected inside IG, and the
+    // sticker extra is the prime reject suspect. Returns 'ok' or
     // 'fail: <reason> artExists=.. artSize=.. authority=.. err=..'
     // so one User-errors row reveals the cause. False-equivalent = not
     // installed / no art on disk / launch failed → Dart falls back to the
@@ -170,13 +173,7 @@ class MainActivity : AudioServiceActivity() {
                 val story = Intent("com.instagram.share.ADD_TO_STORY").apply {
                     setDataAndType(uri, "image/jpeg")
                     putExtra("source_application", packageName)
-                    putExtra("interactive_asset_uri", uri)
-                    if (link.isNotBlank()) putExtra("content_url", link)
-                    putExtra("top_background_color", "#191919")
-                    putExtra("bottom_background_color", "#191919")
-                    clipData = ClipData.newUri(contentResolver, "story", uri).apply {
-                        addItem(ClipData.Item(uri))
-                    }
+                    clipData = ClipData.newUri(contentResolver, "story", uri)
                     setPackage(pkg)
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }

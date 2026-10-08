@@ -1351,7 +1351,7 @@ class ApiClient {
 
   Future<void> logClientError(String kind, String message) async {
     final k = kind.length > 40 ? kind.substring(0, 40) : kind;
-    final m = message.length > 500 ? message.substring(0, 500) : message;
+    final m = message.length > 2000 ? message.substring(0, 2000) : message;
     if (m.isEmpty) return;
     await _flushQueuedLogs();
     try {

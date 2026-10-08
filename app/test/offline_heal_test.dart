@@ -89,5 +89,15 @@ void main() {
       expect(q.first, contains('m5'));
       expect(q.last, contains('m54'));
     });
+    test('long exception bodies survive (2000, not 500)', () async {
+      final api = ApiClient(
+          baseUrl: 'http://127.0.0.1:9', client: _OfflineClient());
+      final long = 'e' * 1500;
+      await api.logClientError('playback', long);
+      final prefs = await SharedPreferences.getInstance();
+      final q = prefs.getStringList('clientlog.queue.v1') ?? [];
+      expect(q, hasLength(1));
+      expect(q.single, contains(long));
+    });
   });
 }

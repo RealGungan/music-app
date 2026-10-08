@@ -194,7 +194,7 @@ class Database:
         """Persist a per-user error row (developer viewer). Cap 200/user."""
         try:
             user = (username or "").strip()
-            msg = (message or "").strip()[:500]
+            msg = (message or "").strip()[:2100]
             if not user or not msg:
                 return
             self.execute(

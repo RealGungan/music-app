@@ -204,6 +204,7 @@ class _UserErrorDetailState extends State<_UserErrorDetailScreen> {
   String _error = '';
   String _section = '';
   final _search = TextEditingController();
+  final _expanded = <int>{};
 
   @override
   void initState() {
@@ -303,8 +304,10 @@ class _UserErrorDetailState extends State<_UserErrorDetailScreen> {
           ),
           title: Text(
             msg,
-            maxLines: 3,
-            overflow: TextOverflow.ellipsis,
+            maxLines: _expanded.contains(i) ? null : 3,
+            overflow: _expanded.contains(i)
+                ? TextOverflow.visible
+                : TextOverflow.ellipsis,
             style: seen
                 ? const TextStyle(color: Colors.white38)
                 : null,
@@ -324,6 +327,11 @@ class _UserErrorDetailState extends State<_UserErrorDetailScreen> {
                 )
               : null,
           onTap: () {
+            // Tap expands the full body in place (3-line ellipsis hides
+            // exception tails); the full text is still copied as before.
+            setState(() {
+              if (!_expanded.remove(i)) _expanded.add(i);
+            });
             Clipboard.setData(ClipboardData(text: '[$sec] $msg'));
           },
         );

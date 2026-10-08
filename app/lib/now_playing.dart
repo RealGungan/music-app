@@ -1353,7 +1353,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
     }
     if (!mounted) return;
     if (target == _ShareTarget.instagram) {
-      // Tier 1 Stories (sticker + attribution) → tier 2 direct IG content
+      // Tier 1 Stories (minimal background image, no sticker) → tier 2 direct
       // share (IG itself opens) → tier 3 generic sheet → clipboard. A user
       // cancel inside Instagram is unobservable (fire-and-forget composer).
       // Each failed tier logs its native diagnostic (caught launch exception

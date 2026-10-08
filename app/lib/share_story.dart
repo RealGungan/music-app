@@ -1,9 +1,9 @@
 import 'package:flutter/services.dart';
 
-/// Instagram Stories share: sticker (artwork) + attribution link via the
-/// platform Stories API (`com.instagram.share.ADD_TO_STORY`), then a direct
-/// IG content share (ACTION_SEND pinned to the IG package), then a
-/// generic share-sheet + clipboard fallback.
+/// Instagram Stories share: minimal background-image ADD_TO_STORY (single
+/// asset URI + source_application + grant flags — NO sticker asset: it made
+/// Instagram open-then-close), then a direct IG content share (ACTION_SEND
+/// pinned to the IG package), then a generic share-sheet + clipboard fallback.
 ///
 /// The Stories composer is fire-and-forget (no result code): a user cancel
 /// inside Instagram is unobservable and counts as done. Only a `false` /
