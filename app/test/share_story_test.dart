@@ -18,4 +18,30 @@ void main() {
     expect(storyFallbackNeeded(false), true);
     expect(storyFallbackNeeded(null), true); // cancel / no-result == fallback
   });
+
+  test('IG tier order: story -> direct IG -> generic sheet', () {
+    expect(instagramShareTierOrder,
+        ['shareStory', 'shareDirectInstagram', 'shareText']);
+  });
+
+  test('generic sheet only when both IG tiers fail', () {
+    expect(instagramGenericNeeded(storyOk: true, directOk: false), false);
+    expect(instagramGenericNeeded(storyOk: false, directOk: true), false);
+    expect(instagramGenericNeeded(storyOk: true, directOk: true), false);
+    expect(instagramGenericNeeded(storyOk: false, directOk: false), true);
+  });
+
+  test('tier reply: ok/true succeed, fail-strings/throws fall through', () {
+    expect(shareTierOk(true), true);
+    expect(shareTierOk('ok'), true);
+    expect(shareTierOk('OK'), true);
+    expect(shareTierOk(false), false);
+    expect(shareTierOk(null), false);
+    expect(
+        shareTierOk(
+            'fail: no-art artExists=false artSize=-1 readable=false authority=com.nasmusic.nasmusic.art'),
+        false);
+    expect(shareTierOk('fail: no-resolve artExists=true artSize=42 '
+        'resolve=false authority=com.nasmusic.nasmusic.art'), false);
+  });
 }

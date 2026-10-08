@@ -1270,14 +1270,29 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
     }
     if (!mounted) return;
     if (target == _ShareTarget.instagram) {
-      // Stories carry title+artist+artwork+link (sticker = the current
-      // track's art file, attribution = the resolved link). Fail (no
-      // Instagram / no art on disk) falls back to the generic sheet,
-      // then clipboard — a user cancel inside Instagram is unobservable
-      // (fire-and-forget composer) and needs no handling.
-      if (!await shareStoryToInstagram(link: p.spLink)) {
-        await _shipShare(context,
-            link: storyCaption(p.subject, p.spLink), subject: p.subject);
+      // Tier 1 Stories (sticker + attribution) → tier 2 direct IG content
+      // share (IG itself opens) → tier 3 generic sheet → clipboard. A user
+      // cancel inside Instagram is unobservable (fire-and-forget composer).
+      // Each failed tier logs its native diagnostic (exception +
+      // resolveActivity + art exists/size + authority) to User errors so
+      // one retest reveals the cause.
+      final api = ServerContext.of(context);
+      final story = await shareStoryDetailed(link: p.spLink);
+      if (!story.ok) {
+        unawaited(api.logClientError(
+            'share-ig-story', '${cur.title} ${story.detail}'));
+      }
+      if (story.ok) return;
+      final caption = storyCaption(p.subject, p.spLink);
+      final direct = await shareDirectDetailed(text: caption);
+      if (!direct.ok) {
+        unawaited(api.logClientError(
+            'share-ig-direct', '${cur.title} ${direct.detail}'));
+      }
+      if (instagramGenericNeeded(storyOk: story.ok, directOk: direct.ok)) {
+        unawaited(api.logClientError('share-ig-fallback',
+            '${cur.title} story=${story.detail} direct=${direct.detail}'));
+        await _shipShare(context, link: caption, subject: p.subject);
       }
       return;
     }
@@ -1292,13 +1307,17 @@ onVerticalDragStart: _queueDragging ? null : _queueDragStart,
   }) async {
     try {
       const channel = MethodChannel('com.nasmusic.nasmusic/share');
-      final sent = await channel.invokeMethod<bool>('shareText', {
+      final sent = await channel.invokeMethod<Object>('shareText', {
         'text': link,
         'subject': subject,
       });
-      if (sent == true) return;
-    } catch (_) {
+      if (shareTierOk(sent)) return;
+      unawaited(ServerContext.of(context).logClientError(
+          'share-sheet', '$subject sheet=${sent ?? 'null'}'));
+    } catch (e) {
       // Desktop has no share sheet — fall through to the clipboard.
+      unawaited(ServerContext.of(context)
+          .logClientError('share-sheet', '$subject exception: $e'));
     }
     if (!context.mounted) return;
     await Clipboard.setData(ClipboardData(text: link));

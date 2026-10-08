@@ -56,6 +56,9 @@ class MainActivity : AudioServiceActivity() {
                 } else if (call.method == "shareStory") {
                     val link = call.argument<String>("link").orEmpty()
                     result.success(shareStoryToInstagram(link))
+                } else if (call.method == "shareDirectInstagram") {
+                    val text = call.argument<String>("text").orEmpty()
+                    result.success(shareDirectToInstagram(text))
                 } else {
                     result.notImplemented()
                 }
@@ -130,22 +133,35 @@ class MainActivity : AudioServiceActivity() {
 
     // Instagram Stories share: the current track's art file (written by the
     // audio handler for the notification) as the sticker + the resolved
-    // track link as the tappable attribution. False = not installed / no
-    // art on disk / launch failed → Dart falls back to the generic sheet +
-    // clipboard. A user cancel inside Instagram returns nothing
-    // (fire-and-forget composer) and needs no handling.
-    private fun shareStoryToInstagram(link: String): Boolean {
+    // track link as the tappable attribution. Returns 'ok' or
+    // 'fail: <reason> artExists=.. artSize=.. resolve=.. authority=.. err=..'
+    // so one User-errors row reveals the cause. False-equivalent = not
+    // installed / no art on disk / launch failed → Dart falls back to the
+    // generic sheet + clipboard. A user cancel inside Instagram returns
+    // nothing (fire-and-forget composer) and needs no handling.
+    // Authority MUST match the manifest provider
+    // (com.nasmusic.nasmusic.art) — verified, custom ArtFileProvider.
+    private fun shareStoryToInstagram(link: String): String {
+        val authority = ArtFileProvider.AUTHORITY
         return try {
             // Preflight BEFORE firing the intent: a missing OR zero-byte art
             // file makes Instagram open then immediately close (flash) — fall
             // back to the generic sheet without launching anything.
             val file = java.io.File(getExternalFilesDir(null), ArtFileProvider.ART_FILE_NAME)
-            if (!file.exists() || !file.canRead() || file.length() <= 0L) return false
+            val exists = file.exists()
+            val size = if (exists) file.length() else -1L
+            val readable = if (exists) file.canRead() else false
+            if (!exists || !readable || size <= 0L) {
+                return "fail: no-art artExists=$exists artSize=$size readable=$readable authority=$authority"
+            }
             // Resolve BEFORE granting: no grant when IG can't handle it.
             val probe = Intent("com.instagram.share.ADD_TO_STORY").apply {
                 setPackage("com.instagram.android")
             }
-            if (packageManager.resolveActivity(probe, 0) == null) return false
+            val resolved = packageManager.resolveActivity(probe, 0) != null
+            if (!resolved) {
+                return "fail: no-resolve artExists=$exists artSize=$size resolve=false authority=$authority"
+            }
             val uri = ArtFileProvider.ART_URI
             val story = Intent("com.instagram.share.ADD_TO_STORY").apply {
                 setDataAndType(uri, "image/jpeg")
@@ -163,9 +179,59 @@ class MainActivity : AudioServiceActivity() {
             grantUriPermission(
                 "com.instagram.android", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION,
             )
-            runCatching { startActivity(story) }.isSuccess
-        } catch (_: Exception) {
-            false
+            val launched = runCatching { startActivity(story) }.isSuccess
+            if (launched) {
+                "ok"
+            } else {
+                "fail: launch-failed artExists=$exists artSize=$size resolve=$resolved authority=$authority"
+            }
+        } catch (e: Exception) {
+            "fail: exception=${e} authority=$authority"
+        }
+    }
+
+    // Middle tier: direct IG content share (artwork + caption) pinned to the
+    // Instagram package so IG itself opens — never the generic sheet (where
+    // the user could pick WhatsApp). Tries full then Lite. Same art
+    // preflight as Stories: missing/unreadable/zero-byte art → fail string
+    // without launching anything.
+    private fun shareDirectToInstagram(text: String): String {
+        val authority = ArtFileProvider.AUTHORITY
+        return try {
+            val file = java.io.File(getExternalFilesDir(null), ArtFileProvider.ART_FILE_NAME)
+            val exists = file.exists()
+            val size = if (exists) file.length() else -1L
+            val readable = if (exists) file.canRead() else false
+            if (!exists || !readable || size <= 0L) {
+                return "fail: no-art artExists=$exists artSize=$size readable=$readable authority=$authority"
+            }
+            val uri = ArtFileProvider.ART_URI
+            val pkgs = listOf("com.instagram.android", "com.instagram.lite")
+            val resolveMap = pkgs.associateWith { pkg ->
+                packageManager.resolveActivity(
+                    Intent(Intent.ACTION_SEND).apply { setPackage(pkg) }, 0,
+                ) != null
+            }
+            if (resolveMap.values.none { it }) {
+                return "fail: no-resolve artExists=$exists artSize=$size resolve=$resolveMap authority=$authority"
+            }
+            for (pkg in pkgs) {
+                val probe = Intent(Intent.ACTION_SEND).apply { setPackage(pkg) }
+                if (packageManager.resolveActivity(probe, 0) == null) continue
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "image/jpeg"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    if (text.isNotBlank()) putExtra(Intent.EXTRA_TEXT, text)
+                    clipData = ClipData.newUri(contentResolver, "share", uri)
+                    setPackage(pkg)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                grantUriPermission(pkg, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                if (runCatching { startActivity(send) }.isSuccess) return "ok"
+            }
+            "fail: launch-failed artExists=$exists artSize=$size resolve=$resolveMap authority=$authority"
+        } catch (e: Exception) {
+            "fail: exception=$e authority=$authority"
         }
     }
 

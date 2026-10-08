@@ -95,6 +95,29 @@ typedef NameResolver = Future<String> Function(String artist, String title);
 /// slow NAS check can never stall first audio.
 typedef NasLookup = Future<String?> Function(String artist, String title);
 
+/// Stale-tick gate for the position stream (pure, unit-tested): drop a tick
+/// that still belongs to the PREVIOUS track load. New audio always starts
+/// near 0, so any tick jumping far past everything accepted for this load
+/// ([maxAccepted]) with no matching recent user seek is the old engine's
+/// tail arriving late — accepting it flashes the previous song's timestamp.
+/// Normal advance, small rewinds, and heal seek-backs (all within
+/// maxAccepted + 3s) pass; genuine user seeks pass via the seek match.
+bool dropStalePositionTick({
+  required Duration tick,
+  required Duration maxAccepted,
+  required Duration? seekTarget,
+  required DateTime seekAt,
+  required DateTime now,
+}) {
+  if (tick <= maxAccepted + const Duration(seconds: 3)) return false;
+  if (seekTarget != null &&
+      now.difference(seekAt).inSeconds < 5 &&
+      (tick - seekTarget).abs() <= const Duration(seconds: 2)) {
+    return false;
+  }
+  return true;
+}
+
 /// App-wide playback queue with shuffle — the "streaming engine".
 class QueuePlayer {
   QueuePlayer._() {
@@ -145,7 +168,23 @@ _player.onPlayerComplete.listen((_) async {
       // and the seek-back often emits nothing until resume — without
       // this guard the bar stuck at 0:00 (fixed 2026-09-18).
       if (_isSpuriousZero(d)) return;
+      // Stale-tick gate: the old engine's tail position (e.g. 1:23) can
+      // arrive AFTER the synchronous zero reset — even after legit small
+      // ticks already landed, when the exact-zero check no longer holds.
+      // The per-load max gates on track identity, so only a real seek
+      // (or normal advance) moves the stamp forward.
+      final now = DateTime.now();
+      if (dropStalePositionTick(
+        tick: d,
+        maxAccepted: _posMax,
+        seekTarget: _userSeekTarget,
+        seekAt: _userSeekAt,
+        now: now,
+      )) {
+        return;
+      }
       position.value = d;
+      if (d > _posMax) _posMax = d;
       _posGen = _playGen;
       _onTick();
     });
@@ -290,6 +329,12 @@ _player.onPlayerComplete.listen((_) async {
   /// it to tell a stale position (belongs to the previous track load)
   /// from a live one.
   int _posGen = -1;
+
+  /// Largest position accepted for the current track load. The stale-tick
+  /// gate keys on this (reset per load), so a late tail from the previous
+  /// track can never flash its timestamp — even after small live ticks
+  /// already moved the clock off exact zero.
+  Duration _posMax = Duration.zero;
 
   /// Last engine state. Paused-vs-stopped matters for [_isSpuriousZero]:
   /// only while truly paused is a zero tick guaranteed spurious.
@@ -949,9 +994,10 @@ _player.onPlayerComplete.listen((_) async {
   /// on cold start, dead URL), heal once (re-resolve + replay) instead
   /// of spinning until the app is killed. The heal budget bounds retries;
   /// if it also stalls, a tappable error remains.
-  void _boundLoading(int gen) {
+  void _boundLoading(int gen, int hid) {
     Future.delayed(const Duration(seconds: 12), () {
       if (gen == _playGen &&
+          hid == _healGen &&
           loading.value &&
           _lastPlayerState != PlayerState.playing) {
         loading.value = false;
@@ -963,6 +1009,10 @@ _player.onPlayerComplete.listen((_) async {
 
   Future<void> _playCurrent({int? completedSecs, int skipDepth = 0}) async {
     final gen = ++_playGen;
+    // Pause-intent token for this play: any delayed resume/nudge/fallback
+    // checks it at FIRE time (pause() bumps _healGen), so play+instant-pause
+    // never auto-resumes.
+    final playHeal = _healGen;
     final sw = Stopwatch()..start();
     if (index < 0 || index >= items.length) {
       currentTitle.value = '';
@@ -973,6 +1023,9 @@ _player.onPlayerComplete.listen((_) async {
     _healStrikes = 0;
     _healTrackId = items[index];
     _gaveUp = false;
+    // Track-switch stamp: zero the clock SYNCHRONOUSLY with the new title
+    // (before any async resolve/audio), and reset the per-load max so stale
+    // position ticks from the PREVIOUS track can't flash its timestamp.
     // Wrapped log: seal the outgoing track with its listened seconds
     // (fire-and-forget — never slow down playback). Read BEFORE the clock
     // reset below, or prevSec is always 0.
@@ -985,6 +1038,7 @@ _player.onPlayerComplete.listen((_) async {
     // emits no ticks) freezes the bar at the old song's timestamp, and
     // the NEXT song visibly "starts at X".
     position.value = Duration.zero;
+    _posMax = Duration.zero;
     trackDuration.value = Duration.zero;
     currentTitle.value = items[index].title;
     PlayLog.switched(prevTitle, prevSec, items[index].title);
@@ -1014,7 +1068,10 @@ _player.onPlayerComplete.listen((_) async {
         // Hung online resolve (NAS dead, radio up): cached file now at 0,
         // regardless of the offline flag — same as heal failover.
         if (resolveTimedOut && gen == _playGen) {
-          if (await _failoverCached(item, Duration.zero, playing)) return;
+          if (await _failoverCached(item, Duration.zero, playing,
+              hid: playHeal, gen: gen)) {
+            return;
+          }
         }
         // Offline/NAS-dead safety net (auto-advance, heal, race where the
         // flag flipped after next()/jumpTo ran online): never dead-resolve
@@ -1094,7 +1151,10 @@ _player.onPlayerComplete.listen((_) async {
           url.startsWith(_api!.serverBase)) {
         if (!isOffline.value && await _nasDown()) isOffline.value = true;
         if (isOffline.value && gen == _playGen) {
-          if (await _failoverCached(item, Duration.zero, playing)) return;
+          if (await _failoverCached(item, Duration.zero, playing,
+              hid: playHeal, gen: gen)) {
+            return;
+          }
           final n = await _nextCachedIndex(index);
           if (n >= 0 && n != index) {
             index = n;
@@ -1129,16 +1189,21 @@ _player.onPlayerComplete.listen((_) async {
       _lastPlayStartAt = DateTime.now();
       // Cold-start guard: a dropped remote command (handler not engaged
       // yet) emits no event ever, leaving loading=true forever. Bound it.
-      _boundLoading(gen);
+      _boundLoading(gen, playHeal);
       if (gen != _playGen) return;
       unawaited(
         _player.play(url).catchError((Object e) async {
-          // Only surface errors for the winning operation.
-          if (gen != _playGen) return;
+          // Only surface errors for the winning operation. Fire-time
+          // pause-intent check: play+instant-pause must NOT resume via
+          // the cached fallback.
+          if (gen != _playGen || playHeal != _healGen) return;
           // Dead relay/network URL on explicit tap: cached file now at 0
           // instead of a stuck error (not only when isOffline is set).
           final fb = await _cachedUriFor(items[index]);
-          if (fb != null && fb != url && gen == _playGen) {
+          if (fb != null &&
+              fb != url &&
+              gen == _playGen &&
+              playHeal == _healGen) {
             try {
               await _player.play(fb);
               _loadedUrl = fb;
@@ -1352,10 +1417,16 @@ _player.onPlayerComplete.listen((_) async {
 
   /// Seek awaited before resume (+ pos-before/after log). Callers skip the
   /// setSource teardown first when resuming the same bytes (no snapback).
+  /// Fire-time pause-intent guard: a user pause (or newer heal/track) that
+  /// lands during the seek await must NOT auto-resume — check [hid]/[gen]
+  /// AFTER the await, not just at schedule time.
   Future<void> _healSeekResume(
-      Duration target, bool wasPlaying, String why) async {
+      Duration target, bool wasPlaying, String why,
+      {required int hid, required int gen}) async {
     final before = position.value;
     await _player.seek(target);
+    // Fire-time check: pause bumps _healGen, track change bumps _playGen.
+    if (hid != _healGen || gen != _playGen) return;
     if (wasPlaying) await _player.resume();
     DiagLog.restart.log('heal($why) seek-resume at=${target.inSeconds}s '
         'pos-before=${before.inSeconds}s pos-after=${target.inSeconds}s');
@@ -1365,9 +1436,11 @@ _player.onPlayerComplete.listen((_) async {
   /// failover — tried regardless of [isOffline], not only when the flag
   /// says so). True = recovered, caller returns.
   Future<bool> _failoverCached(
-      QueueItem item, Duration target, bool wasPlaying) async {
+      QueueItem item, Duration target, bool wasPlaying,
+      {required int hid, required int gen}) async {
     final cur = await _cachedUriFor(item);
     if (cur == null) return false;
+    if (hid != _healGen || gen != _playGen) return false;
     try {
       // Seek BEFORE resume: play-then-seek replays ~0.5s from 0 first
       // (audible jumpback). Same-bytes resume skips the setSource
@@ -1376,7 +1449,8 @@ _player.onPlayerComplete.listen((_) async {
         await _player.setSource(cur);
         _loadedUrl = cur;
       }
-      await _healSeekResume(target, wasPlaying, 'failover');
+      if (hid != _healGen || gen != _playGen) return false;
+      await _healSeekResume(target, wasPlaying, 'failover', hid: hid, gen: gen);
       loading.value = false;
       _lastHealEnd = DateTime.now();
       _lastPlayStartAt = DateTime.now();
@@ -1510,7 +1584,8 @@ _player.onPlayerComplete.listen((_) async {
                 await _player.setSource(cur);
                 _loadedUrl = cur;
               }
-              await _healSeekResume(target, wasPlaying, reason);
+              await _healSeekResume(target, wasPlaying, reason,
+                  hid: hid, gen: gen);
               if (hid != _healGen) {
                 try {
                   await _player.pause();
@@ -1556,7 +1631,8 @@ _player.onPlayerComplete.listen((_) async {
           await _player.setSource(url);
           _loadedUrl = url;
         }
-        await _healSeekResume(target, wasPlaying, reason);
+        await _healSeekResume(target, wasPlaying, reason,
+            hid: hid, gen: gen);
         // User paused mid-heal: never leave it playing — re-pause.
         if (hid != _healGen) {
           try {
@@ -1570,7 +1646,8 @@ _player.onPlayerComplete.listen((_) async {
         // same position — don't just back off on a corpse.
         if (hid == _healGen &&
             gen == _playGen &&
-            await _failoverCached(item, target, wasPlaying)) {
+            await _failoverCached(item, target, wasPlaying,
+                hid: hid, gen: gen)) {
           return;
         }
         continue; // engine rejected it — back off and retry
@@ -1612,7 +1689,8 @@ _player.onPlayerComplete.listen((_) async {
       // now instead of another backoff on the same corpse.
       if (hid == _healGen &&
           gen == _playGen &&
-          await _failoverCached(item, target, wasPlaying)) {
+          await _failoverCached(item, target, wasPlaying,
+              hid: hid, gen: gen)) {
         return;
       }
       // else: fall through to the next backoff attempt
@@ -2131,6 +2209,7 @@ if (fresh.isEmpty) return;
     PlayLog.switched(prevTitle, prevSec, it.title);
     currentThumb.value = it.thumbUrl ?? '';
     position.value = Duration.zero;
+    _posMax = Duration.zero;
     trackDuration.value = Duration.zero;
     AppHistory.recordListen(it.title);
     final recentKey = it.title.toLowerCase();
