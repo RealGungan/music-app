@@ -83,6 +83,15 @@ Duration durationForNewTrackPub() => Duration.zero;
 /// suspends the UI isolate in the background: the lock-screen / notification
 /// controls and the media session all talk to the player directly.
 
+/// Focus-gain audit (pure, unit-tested): on ANY focus gain while ducked, the
+/// handler must restore the USER volume (never 1.0) and clear the duck flag —
+/// otherwise audio strands at 25% under a playing skin ("stopped but shows
+/// playing"). Returns the volume to set, or null when nothing is ducked.
+double? gainRestoreVolume({
+  required bool ducked,
+  required double userVolume,
+}) => ducked ? userVolume : null;
+
 /// Self-echo window for our OWN play/focus-take. Our play path takes focus
 /// AND the player requests it again internally, so the OS reports a focus
 /// loss back to our own session after EVERY tap-to-play — network plays
@@ -200,9 +209,14 @@ class NASMusicAudioHandler extends BaseAudioHandler {
             return;
           case CarFocusAction.restoreDuck:
             debugPrint('[handler] audio focus unduck');
-            if (_ducked) {
+            final restore = gainRestoreVolume(
+              ducked: _ducked,
+              userVolume: _userVolume,
+            );
+            if (restore != null) {
               _ducked = false;
-              _player.setVolume(_userVolume);
+              _player.setVolume(restore);
+              _publishPlayback();
             }
             _sendEvent({'ev': 'focus', 'phase': 'unducked'});
             return;
@@ -253,6 +267,18 @@ class NASMusicAudioHandler extends BaseAudioHandler {
           );
         } else {
           debugPrint('[handler] audio focus regained: ${event.type}');
+          // Focus-gain audit: a duck interrupted by a transient pause (or
+          // any gain path that isn't restoreDuck) must still clear — no
+          // path may strand audio at 25% under a playing skin.
+          final restore = gainRestoreVolume(
+            ducked: _ducked,
+            userVolume: _userVolume,
+          );
+          if (restore != null) {
+            _ducked = false;
+            _player.setVolume(restore);
+            _publishPlayback();
+          }
           final resume = !_focusLostPermanent;
           _focusLostPermanent = false;
           if (!resume) {

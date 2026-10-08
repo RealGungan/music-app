@@ -185,6 +185,23 @@ String skinMismatchMessage({
     'expected=${nativePlaying ? 'playing' : 'paused'} '
     'engine=$engine handler=$handler';
 
+/// Stall-detector verdict (pure, unit-tested): compares the engine's CLAIM
+/// against NATIVE position movement. Either direction of lie is corrected —
+/// playing-with-frozen-clock paints paused, paused-with-moving-clock paints
+/// playing — so the skin can never strand on the wrong icon by construction.
+enum StallFix { none, toPaused, toPlaying }
+
+StallFix stallAudit({
+  required bool enginePlaying,
+  required bool posAdvanced,
+  required bool loading,
+}) {
+  if (loading) return StallFix.none;
+  if (enginePlaying && !posAdvanced) return StallFix.toPaused;
+  if (!enginePlaying && posAdvanced) return StallFix.toPlaying;
+  return StallFix.none;
+}
+
 /// App-wide playback queue with shuffle — the "streaming engine".
 class QueuePlayer {
   QueuePlayer._() {
@@ -364,6 +381,50 @@ class QueuePlayer {
         _healCurrent(reason: 'stall');
       }
     });
+    // Stall detector: the engine CLAIM vs NATIVE clock, sampled every 3s.
+    // A frozen clock under a playing claim (dead socket with no complete/
+    // error) — or a moving clock under a paused claim (lost resume event) —
+    // re-feeds the native truth through the state stream, which is the
+    // skin's sole source, so the lie corrects itself within one tick.
+    // Repaint-only: the handler keeps actual audio state, so a false
+    // positive self-reverses on the next tick instead of killing sound.
+    _auditTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+        _auditPos = position.value;
+        return;
+      }
+      if (items.isEmpty || index < 0 || index >= items.length) {
+        _auditPos = position.value;
+        return;
+      }
+      final pos = position.value;
+      final advanced = pos != _auditPos;
+      _auditPos = pos;
+      final fix = stallAudit(
+        enginePlaying: _player.isPlaying,
+        posAdvanced: advanced,
+        loading: loading.value,
+      );
+      if (fix == StallFix.none) return;
+      // Slow-start guard (mirrors the watchdog): a frozen clock <20s after
+      // play() is buffering, not a stall.
+      if (fix == StallFix.toPaused &&
+          DateTime.now().difference(_lastPlayStartAt).inSeconds < 20) {
+        return;
+      }
+      final p = _player;
+      if (p is! RemoteEngine) return;
+      p.feedRemoteEvent({
+        'ev': 'state',
+        's': fix == StallFix.toPaused ? 'paused' : 'playing',
+      });
+      final msg =
+          'stall-corrected -> ${fix == StallFix.toPaused ? 'paused' : 'playing'} '
+          'pos=${pos.inSeconds}s idx=$index "${items[index].title}"';
+      debugPrint('[queue] $msg');
+      DiagLog.restart.log(msg);
+      report('stall-corrected', msg);
+    });
     // Background auto-advance: the handler isolate starts the pre-pushed
     // next track on its own when this isolate sleeps (screen off). Adopt
     // it here — move state, never touch playback (it's already playing).
@@ -539,6 +600,13 @@ class QueuePlayer {
   Timer? _watchTimer;
   Duration _watchPos = Duration.zero;
   DateTime _watchSince = DateTime.now();
+
+  /// Stall-detector baseline: native position at the last 3s audit tick.
+  // App-lifetime audit (singleton player); never cancelled.
+  // ignore: unused_field
+  // ignore: unused_field — held so the audit lives as long as the app.
+  Timer? _auditTimer;
+  Duration _auditPos = Duration.zero;
 
   bool _shuffle = false;
 

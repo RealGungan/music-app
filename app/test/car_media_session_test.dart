@@ -68,6 +68,16 @@ void main() {
     });
   });
 
+  group('focus-gain audit (no strand at ducked 25%)', () {
+    test('gain-restores-volume: ducked gain returns USER volume', () {
+      expect(gainRestoreVolume(ducked: true, userVolume: 0.6), 0.6);
+      // Never blasts to full when the user had lowered it.
+      expect(gainRestoreVolume(ducked: true, userVolume: 1.0), isNotNull);
+    });
+    test('unducked gain touches nothing', () {
+      expect(gainRestoreVolume(ducked: false, userVolume: 0.6), isNull);
+    });
+  });
   group('media session id stability (car flicker guard)', () {
     test('strips re-resolving ?token= query', () {
       expect(

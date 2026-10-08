@@ -222,4 +222,38 @@ void main() {
       expect(healResumeAllowed(wasPlaying: true, pauseIntent: true), isFalse);
     }
   });
+
+  group('stall detector (claim vs native clock)', () {
+    test('stall-corrects-to-paused: playing claim, frozen clock', () {
+      expect(
+        stallAudit(
+            enginePlaying: true, posAdvanced: false, loading: false),
+        StallFix.toPaused,
+      );
+    });
+    test('reverse: paused claim, moving clock corrects to playing', () {
+      expect(
+        stallAudit(
+            enginePlaying: false, posAdvanced: true, loading: false),
+        StallFix.toPlaying,
+      );
+    });
+    test('loading/buffering never corrects (no false pause)', () {
+      expect(
+        stallAudit(enginePlaying: true, posAdvanced: false, loading: true),
+        StallFix.none,
+      );
+    });
+    test('agreement never corrects', () {
+      expect(
+        stallAudit(enginePlaying: true, posAdvanced: true, loading: false),
+        StallFix.none,
+      );
+      expect(
+        stallAudit(
+            enginePlaying: false, posAdvanced: false, loading: false),
+        StallFix.none,
+      );
+    });
+  });
 }
