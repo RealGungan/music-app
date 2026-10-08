@@ -1,9 +1,15 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
-        android:label="nasmusic"
+        android:label="gungan.fm"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
@@ -26,7 +32,80 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- Deep links: open songs from shared Spotify / YouTube-Music links
+                 straight inside the app. -->
+            <!-- Spotify's mobile Share button emits spotify.link SHORT links
+                 that redirect to open.spotify.com/track/<id> — a filter for
+                 the short-link host is required or the OS never routes the
+                 uri to this app. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="open.spotify.com"/>
+                <data android:scheme="https" android:host="spotify.link"/>
+                <data android:scheme="https" android:host="*.spotify.link"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http" android:host="open.spotify.com"/>
+                <data android:scheme="http" android:host="spotify.link"/>
+                <data android:scheme="http" android:host="*.spotify.link"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="music.youtube.com"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="www.youtube.com"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="youtu.be"/>
+            </intent-filter>
         </activity>
+        <!-- audio_service media session + foreground service (lock screen /
+             notification controls + keeps playing when the phone sleeps). -->
+        <service
+            android:name="com.ryanheise.audioservice.AudioService"
+            android:foregroundServiceType="mediaPlayback"
+            android:stopWithTask="true"
+            android:exported="true"
+            tools:ignore="Instantiatable">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService"/>
+            </intent-filter>
+        </service>
+        <receiver
+            android:name="com.ryanheise.audioservice.MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON"/>
+            </intent-filter>
+        </receiver>
+        <!-- Exposes the album-art cache file to SystemUI via an exported
+             content:// URI. Plain ContentProviders CAN be exported (unlike
+             androidx FileProvider, which throws if exported). This lets
+             SystemUI's MediaDataManager fetch the artwork for the notification /
+             lock-screen media card instead of falling back to a gray placeholder. -->
+        <provider
+            android:name=".ArtFileProvider"
+            android:authorities="com.nasmusic.nasmusic.art"
+            android:exported="true"
+            android:grantUriPermissions="true" />
+        <!-- Android Auto: advertises the media-browse service to car hosts. -->
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
@@ -39,9 +118,36 @@
 
          In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
     <queries>
+        <package android:name="com.instagram.android" />
+        <package android:name="com.instagram.lite" />
+        <!-- Launch-first discovery: any Morphe/modded client claiming the
+             Stories action under its own package name. The share paths try
+             startActivity per package (catching ActivityNotFoundException),
+             so a blocked query here never stops a launch — this only feeds
+             the chooser-row label. -->
+        <intent>
+            <action android:name="com.instagram.share.ADD_TO_STORY" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="image/jpeg" />
+        </intent>
+        <!-- instagram.* enumeration for the share tiers (Morphe/modded
+             clients under their own package names): lets the app query
+             generic text shares and keep the instagram ones. -->
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="text/plain" />
+        </intent>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- Let Custom Tabs (Spotify login via flutter_web_auth_2) find a
+             browser on Android 11+ package visibility. Without this the
+             login tab can't bind and the flow dies as CANCELED. -->
+        <intent>
+            <action android:name="android.support.customtabs.action.CustomTabsService"/>
         </intent>
     </queries>
 </manifest>

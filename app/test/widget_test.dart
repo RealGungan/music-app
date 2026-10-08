@@ -26,4 +26,34 @@ void main() {
       'http://localhost:6680/staging/api/cover?f=pl%3ALiked%2Fsong.mp3',
     );
   });
+
+  test('LyricsData parses synced vs plain payloads', () {
+    final synced = LyricsData.fromJson({
+      'found': true,
+      'source': 'lrclib',
+      'synced': [
+        {'t': 12.34, 'text': 'Hello'},
+        {'t': 15.0, 'text': 'World'},
+      ],
+      'plain': [],
+    });
+    expect(synced.isSynced, isTrue);
+    expect(synced.synced, hasLength(2));
+    expect(synced.synced[0].text, 'Hello');
+    expect(synced.synced[1].t, 15.0);
+
+    final plain = LyricsData.fromJson({
+      'found': true,
+      'source': 'lyricsovh',
+      'synced': <Map<String, dynamic>>[],
+      'plain': ['line one', 'line two'],
+    });
+    expect(plain.isSynced, isFalse);
+    expect(plain.plain, ['line one', 'line two']);
+
+    final empty = LyricsData.fromJson(
+        {'found': false, 'synced': <Map<String, dynamic>>[], 'plain': []});
+    expect(empty.isSynced, isFalse);
+    expect(empty.found, isFalse);
+  });
 }

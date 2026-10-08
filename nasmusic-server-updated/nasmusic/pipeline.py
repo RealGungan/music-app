@@ -30,8 +30,14 @@ class Pipeline:
         self._threads = []
 
     def _target_path(self, base_name):
-        return os.path.join(self.state.config.staging_dir,
-                            f"{base_name}.mp3")
+        # Containment (2026-09-18, public URL): base_name reaches the
+        # filesystem via yt-dlp -o templates, so never let it escape the
+        # staging dir even if a caller forgets to validate.
+        staging = os.path.normpath(self.state.config.staging_dir)
+        target = os.path.normpath(os.path.join(staging, f"{base_name}.mp3"))
+        if target != staging and not target.startswith(staging + os.sep):
+            raise ValueError("bad base_name")
+        return target
 
     # ------------------------------------------------------------ status
     def job_status(self, did):
@@ -48,11 +54,21 @@ class Pipeline:
             "path": row["path"],
         }
 
-    def all_jobs(self):
-        return [self.job_status(d["id"]) for d in self.db.list_downloads()]
+    def all_jobs(self, owner=None):
+        return [self.job_status(d["id"])
+                for d in self.db.list_downloads(owner=owner)]
 
-    # ----------------------------------------------------------------- api
-    def start_stage(self, artist, title, force=False):
+    # ------------------------------------------------------------ api
+    def start_stage(self, artist, title, force=False, owner=""):
+        # Validate before spawning (public URL — artist/title are
+        # attacker-controlled; 2026-09-18). ValueError -> HTTP 400.
+        for what, v in (("artist", artist or ""), ("title", title or "")):
+            v = (v or "").strip()
+            if what == "title" and not v:
+                raise ValueError("missing title")
+            if ("/" in v or "\\" in v or "\x00" in v or "\n" in v
+                    or "\r" in v or len(v) > 120 or v in (".", "..")):
+                raise ValueError("bad %s" % what)
         base = f"{artist} - {title}"
         existing = self.db.find_download_by_base(base)
         target = self._target_path(base)
@@ -60,7 +76,10 @@ class Pipeline:
             return (existing["id"] if existing else None), {"skipped": True}
 
         did = ((existing or {}).get("id")
-               or self.db.create_download(artist, title))
+               or self.db.create_download(artist, title, owner))
+        if existing and not (existing.get("owner") or "") and owner:
+            # Adopt unattributed legacy rows for their stager.
+            self.db.update_download(did, owner=owner)
         self.db.update_download(did, status="pending")
         self._spawn(did, self._do_stage, did)
         return did, {}

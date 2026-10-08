@@ -15,6 +15,19 @@ services:
       NASMUSIC_EXPIRY_DAYS: "7"
       NASMUSIC_PORT: "6680"
       NASMUSIC_APP_DIR: /app
+      # AcoustID API key -> enables acoustically fingerprinting NAS files to
+      # detect mislabeled songs (S5). Free key from https://acoustid.org/applications
+      NASMUSIC_ACOUSTID_API_KEY: t2GAp42WWH
+      # (Optional) Spotify API creds -> enables Spotify artist photos + album
+      # covers. Create a free app at https://developer.spotify.com/dashboard
+      SPOTIFY_CLIENT_ID: PASTE_YOUR_CLIENT_ID_HERE
+      SPOTIFY_CLIENT_SECRET: PASTE_YOUR_CLIENT_SECRET_HERE
+    # Explicit public DNS so the first-boot apt/pip install can resolve
+    # packages even when the host/daemon DNS is unreachable from inside the
+    # container (symptom: "Could not resolve 'deb.debian.org'").
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     # --- Mount your music folders + the server/ source code ---
     volumes:
       # The NASMusic server source (from this repo's server/ folder).

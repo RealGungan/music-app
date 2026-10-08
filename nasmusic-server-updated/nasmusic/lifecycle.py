@@ -10,14 +10,15 @@ import shutil
 import time
 
 
-def append_entry(state, playlist, abs_path, keep_basename=False):
+def append_entry(state, playlist, abs_path, keep_basename=False, m3u=None):
     """Append a path to <playlist>.m3u if not already there.
 
     If the path is a library file, store it relative to the library root
     so the file is portable across NAS paths. Otherwise store it relative
-    to the playlist dir (staging/kept files).
+    to the playlist dir (staging/kept files). Pass m3u= to target a
+    per-user playlist file instead of the global one.
     """
-    m3u = state.m3u_for(playlist)
+    m3u = m3u or state.m3u_for(playlist)
     root = os.path.normpath(state.config.music_root)
     existing = set()
     if os.path.exists(m3u):
@@ -61,7 +62,23 @@ def keep_staged(state, row):
                              promoted_at=time.time())
     state.db.event("promoted", {"id": row["id"], "base": row["base_name"],
                                 "to": dest})
+    _save_lyrics_background(state, row["base_name"], dest_dir)
     return dest
+
+
+def _save_lyrics_background(state, base_name, dest_dir):
+    """Fetch + write the lyrics sidecar next to the kept song without
+    blocking the keep-path (never raises)."""
+    import threading
+    from . import lyrics as _ly
+
+    def _work():
+        try:
+            _ly.save_sidecar(state, base_name, dest_dir)
+        except Exception:                             # noqa: BLE001
+            pass
+
+    threading.Thread(target=_work, daemon=True).start()
 
 
 def promote_if_referenced(state, base_name):

@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../api_client.dart';
 import '../theme.dart';
+import '../widgets.dart';
+import 'lang.dart';
 
 /// Bottom sheet to pick an existing playlist or create a new one.
 class KeepPlaylistSheet extends StatefulWidget {
@@ -36,61 +38,85 @@ class _KeepPlaylistSheetState extends State<KeepPlaylistSheet> {
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Save to playlist',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _newName,
-            decoration: InputDecoration(
-              hintText: 'New playlist name…',
-              filled: true,
-              fillColor: Spots.subtle,
-              border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide.none),
-              suffixIcon: TextButton(
-                onPressed: _createNew,
-                child: const Text('Create',
-                    style: TextStyle(color: Spots.green)),
-              ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              tr('Save to playlist'),
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
             ),
-            onSubmitted: (_) => _createNew(),
-          ),
-          const SizedBox(height: 8),
-          FutureBuilder<List<PlaylistInfo>>(
-            future: _future,
-            builder: (context, snap) {
-              if (snap.connectionState != ConnectionState.done) {
-                return const Padding(
-                  padding: EdgeInsets.all(16),
-                  child: Center(child: CircularProgressIndicator()),
-                );
-              }
-              final pls = snap.data ?? [];
-              if (pls.isEmpty) {
-                return const Padding(
-                  padding: EdgeInsets.all(16),
-                  child: Text('No playlists yet.',
-                      style: TextStyle(color: Colors.white54)),
-                );
-              }
-              return Flexible(
-                child: ListView.builder(
-                  shrinkWrap: true,
-                  itemCount: pls.length,
-                  itemBuilder: (_, i) => ListTile(
-                    leading: const Icon(Icons.queue_music,
-                        color: Colors.white70),
-                    title: Text(pls[i].name),
-                    subtitle: Text('${pls[i].tracks} tracks'),
-                    onTap: () => Navigator.pop(context, pls[i].name),
-                  ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _newName,
+              decoration: InputDecoration(
+                hintText: tr('New playlist name…'),
+                filled: true,
+                fillColor: Spots.subtle,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
                 ),
-              );
-            },
-          ),
-        ]),
+                suffixIcon: TextButton(
+                  onPressed: _createNew,
+                  child: Text(tr('Create'), style: TextStyle(color: Spots.green)),
+                ),
+              ),
+              onSubmitted: (_) => _createNew(),
+            ),
+            const SizedBox(height: 8),
+            FutureBuilder<List<PlaylistInfo>>(
+              future: _future,
+              builder: (context, snap) {
+                if (snap.connectionState != ConnectionState.done) {
+                  return const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Center(child: CircularProgressIndicator()),
+                  );
+                }
+                final pls = snap.data ?? [];
+                if (pls.isEmpty) {
+                  return Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Text(
+                      tr('No playlists yet.'),
+                      style: TextStyle(color: Colors.white54),
+                    ),
+                  );
+                }
+                return Flexible(
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: pls.length,
+                    itemBuilder: (_, i) {
+                      final pl = pls[i];
+                      return ListTile(
+                        // Pinned colors: M3 hover/focus tints read as a
+                        // (whitish) selection on this dark sheet.
+                        tileColor: Colors.transparent,
+                        hoverColor: Colors.white10,
+                        focusColor: Colors.transparent,
+                        leading: pl.hasCover
+                            ? CoverThumb(
+                                title: pl.name,
+                                thumbUrl: _api.playlistCoverUrl(pl.name),
+                                size: 40,
+                              )
+                            : const Icon(
+                                Icons.queue_music,
+                                color: Colors.white70,
+                              ),
+                        title: Text(pl.name),
+                        subtitle: Text('${pl.tracks} ${tr('tracks')}'),
+                        onTap: () => Navigator.pop(context, pl.name),
+                      );
+                    },
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
       ),
     );
   }
