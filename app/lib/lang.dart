@@ -294,6 +294,9 @@ const Map<String, String> _es = {
   'Debug overlay': 'Superposición de depuración',
   'Tiny ground-truth HUD: engine, queue, last actions.':
       'Mini HUD de verdad: motor, cola, últimas acciones.',
+  'Export debug bundle': 'Exportar paquete de depuración',
+  'Logcat + logs + versions in one file to share.':
+      'Logcat + registros + versiones en un archivo para compartir.',
   'Send the restart and car logs (plus a copy saved to the ':
       'Envía los registros (más copia guardada en ',
   'Broadcast': 'Difusión',

@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../api_client.dart';
 import '../announcer.dart';
 import '../auth_store.dart';
+import '../debug_bundle.dart';
 import '../debug_overlay.dart';
 import '../diag_log.dart';
 import '../import_sheet.dart';
@@ -103,6 +104,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   CheckSongsStatus? _check;
   bool _checking = false;
   bool _loggingOut = false;
+  bool _exportingBundle = false;
   late bool _showDev = widget.initialShowDev;
   String? _checkError;
   Timer? _poll;
@@ -1295,6 +1297,23 @@ if (check != null && check.running)
               },
             ),
           ),
+          ListTile(
+            leading: _exportingBundle
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.inventory_2_outlined),
+            title: Text(tr('Export debug bundle')),
+            subtitle: Text(
+              tr('Logcat + logs + versions in one file to share.'),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _exportingBundle ? null : _exportDebugBundle,
+          ),
           ]),
           _sectionCard(tr('Phone storage'), [
           ValueListenableBuilder<int>(
@@ -1776,6 +1795,32 @@ if (check != null && check.running)
       icon: Icons.check_circle,
       background: Spots.green,
     );
+  }
+
+  /// Non-owner visible: one-tap debug bundle (logcat + DiagLog disk logs +
+  /// versions + queue state) saved to app docs and opened in the share sheet.
+  Future<void> _exportDebugBundle() async {
+    if (_exportingBundle) return;
+    setState(() => _exportingBundle = true);
+    try {
+      final usedSheet = await DebugBundle.export(
+        server: _baseUrl,
+        user: AuthStore.instance.username ?? '-',
+      );
+      if (!mounted) return;
+      toast(
+        context,
+        usedSheet ? tr('Logs shared.') : tr('Logs copied to clipboard.'),
+        icon: Icons.check_circle,
+        background: Spots.green,
+      );
+    } catch (e) {
+      if (mounted) {
+        toast(context, "${tr('Failed')}: $e", icon: Icons.error_outline);
+      }
+    } finally {
+      if (mounted) setState(() => _exportingBundle = false);
+    }
   }
 
   Future<void> _openDiagnostics() async {
