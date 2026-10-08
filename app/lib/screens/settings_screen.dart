@@ -656,7 +656,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               leading: const Icon(Icons.info_outlined),
               title: Text(tr('App version')),
               subtitle: Text(snap.hasData
-                  ? '${snap.data!.version} (${snap.data!.buildNumber})'
+                  ? 'gungan.fm ${snap.data!.version}+${snap.data!.buildNumber}'
                   : '…'),
             ),
           ),
