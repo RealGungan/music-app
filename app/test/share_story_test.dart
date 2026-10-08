@@ -174,6 +174,20 @@ void main() {
     );
   });
 
+  test('gallery-save tier writes shared Pictures/ (IG-picker visible)', () {
+    // Must match MainActivity.kt RELATIVE_PATH — app-private files are
+    // invisible to the IG picker.
+    expect(instagramGalleryRelativePath, 'Pictures/NASMusic');
+    expect(instagramGalleryRelativePath.startsWith('Pictures/'), true);
+  });
+
+  test('Stories/direct tiers stay first (gallery is fallback only)', () {
+    expect(instagramShareTierOrder[0], 'shareStory');
+    expect(instagramShareTierOrder[1], 'shareDirectInstagram');
+    expect(instagramShareTierOrder.indexOf('shareInstagramFallback'),
+        greaterThan(1));
+  });
+
   test('shareTrace never throws (dead-tap logging is total)', () {
     shareTrace('tap test');
     shareTrace('attempt shareStory');

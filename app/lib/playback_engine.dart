@@ -315,7 +315,9 @@ class RemoteEngine implements PlaybackEngine {
     _lastUrl = url;
     _tryEngage();
     if (_remoteUp) {
-      _lastState = PlayerState.stopped;
+      // No optimistic state flip: buffering keeps the last skin icon until
+      // the native state-stream answers (stream is sole truth; 500ms poll
+      // is backup only).
       _send({'cmd': 'play', 'url': url});
       return;
     }

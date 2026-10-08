@@ -312,6 +312,12 @@ class NASMusicAudioHandler extends BaseAudioHandler {
       // start it HERE (the UI isolate may be suspended with the screen
       // off) and tell main to adopt it instead of replaying. Otherwise
       // the legacy complete path (main advances when it wakes).
+      // Never autostart a paused track: pause-intent wins over the push —
+      // drop it and hand advancement back to main (which stays paused).
+      if (_userPaused) {
+        _nextUrl = null;
+        _nextTitle = _nextArtist = _nextAlbum = null;
+      }
       final nu = _nextUrl;
       if (nu != null && nu.isNotEmpty) {
         _nextUrl = null;

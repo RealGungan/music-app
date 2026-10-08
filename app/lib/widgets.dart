@@ -157,10 +157,12 @@ class _MiniPlayerBarState extends State<MiniPlayerBar> {
                                 stream: QueuePlayerShim.instance.stateStream,
                                 initialData: null,
                                 builder: (_, snap) {
-                                  final playing =
-                                      snap.data == PlayerState.playing ||
-                                      (snap.data == null &&
-                                          QueuePlayerShim.instance.playing);
+                                  // Sole truth = native state-stream; cached
+                                  // playing only seeds the null (buffering) frame.
+                                  final playing = skinShowsPlaying(
+                                      snap.data,
+                                      lastPlaying: QueuePlayerShim
+                                          .instance.playing);
                                   return Icon(
                                     playing ? Icons.pause : Icons.play_arrow,
                                     color: Spots.green,

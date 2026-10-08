@@ -49,6 +49,12 @@ void shareTrace(String msg) {
     spLink: 'https://open.spotify.com/search/$q',
   );
 }
+/// Gallery-save tier contract (must match MainActivity.kt RELATIVE_PATH):
+/// the fallback writes the cover to SHARED MediaStore Pictures/ (never the
+/// app-private dir — invisible to the IG picker), copies the caption, then
+/// launches IG. Stories/direct tiers stay first (see [instagramShareTierOrder]).
+const instagramGalleryRelativePath = 'Pictures/NASMusic';
+
 /// True when BOTH IG-native tiers failed and the gallery fallback is still
 /// needed (last resort before the generic sheet).
 bool instagramFallbackNeeded({required bool storyOk, required bool directOk}) =>

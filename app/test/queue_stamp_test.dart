@@ -152,4 +152,74 @@ void main() {
       isFalse,
     );
   });
+
+  test('resumeFireAllowed: pause latch kills even fresh-token resumes', () {
+    // Heal STARTED after the pause owns a fresh token (healToken ==
+    // currentHeal) with stale isPlaying=true (ack in flight) — the latch
+    // alone must still kill it.
+    expect(
+      resumeFireAllowed(
+        gen: 7,
+        playGen: 7,
+        healToken: 4,
+        currentHeal: 4,
+        isPlaying: true,
+        pauseIntent: true,
+      ),
+      isFalse,
+    );
+    expect(
+      resumeFireAllowed(
+        gen: 7,
+        playGen: 7,
+        healToken: 4,
+        currentHeal: 4,
+        isPlaying: false,
+        pauseIntent: false,
+      ),
+      isTrue,
+    );
+  });
+
+  test('healResumeAllowed: paused never resumes, playing resumes', () {
+    expect(healResumeAllowed(wasPlaying: true, pauseIntent: false), isTrue);
+    expect(healResumeAllowed(wasPlaying: true, pauseIntent: true), isFalse);
+    expect(healResumeAllowed(wasPlaying: false, pauseIntent: false), isFalse);
+    expect(healResumeAllowed(wasPlaying: false, pauseIntent: true), isFalse);
+  });
+
+  test('pause at +200ms stays paused for 5s (no auto-resume)', () {
+    // Timeline: play at t=0 (gen=1, heal=5). Cold-start nudge scheduled
+    // (gen=1, healToken=5, fires ~2s), slow-start watchdog (~4s), spinner
+    // bound (~12s). User pauses at +200ms: healGen bumps (5→6) + latch set.
+    // Every deferred fire point through 12s must stay dead — including a
+    // heal STARTED after the pause (fresh token 6==6) reading stale
+    // isPlaying=true while the engine ack is still in flight.
+    const gen = 1, playGen = 1, scheduledHeal = 5, afterPauseHeal = 6;
+    for (final _ in [2000, 4000, 5000, 12000]) {
+      expect(
+        resumeFireAllowed(
+          gen: gen,
+          playGen: playGen,
+          healToken: scheduledHeal,
+          currentHeal: afterPauseHeal,
+          isPlaying: false,
+          pauseIntent: true,
+        ),
+        isFalse,
+      );
+      expect(
+        resumeFireAllowed(
+          gen: gen,
+          playGen: playGen,
+          healToken: afterPauseHeal,
+          currentHeal: afterPauseHeal,
+          isPlaying: true, // stale: pause ack in flight
+          pauseIntent: true,
+        ),
+        isFalse,
+      );
+      expect(healResumeAllowed(wasPlaying: true, pauseIntent: true), isFalse);
+    }
+  });
 }

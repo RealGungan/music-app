@@ -128,7 +128,9 @@ bool stampHidden({required int posGen, required int playGen}) =>
 /// Pause-token gate for EVERY deferred resume (nudge/heal/autoplay refill/
 /// completion advance/_boundLoading/RemoteEngine toggle): a delayed resume
 /// may only fire when its track generation still wins, no pause (or newer
-/// heal) landed since it was scheduled, and audio isn't already flowing.
+/// heal) landed since it was scheduled, audio isn't already flowing, AND no
+/// explicit pause intent is latched (covers heals STARTED after the pause,
+/// which own a fresh token but must still never resume a paused track).
 /// pause() bumps [_healGen] (see [QueuePlayer.pause]), so any play+
 /// instant-pause auto-resume dies here — no exceptions, no call-site
 /// shortcuts. Pure so unit tests pin the matrix.
@@ -138,12 +140,41 @@ bool resumeFireAllowed({
   required int healToken,
   required int currentHeal,
   required bool isPlaying,
-}) => gen == playGen && healToken == currentHeal && !isPlaying;
+  bool pauseIntent = false,
+}) =>
+    gen == playGen &&
+    healToken == currentHeal &&
+    !isPlaying &&
+    !pauseIntent;
+
+/// Heal-end resume gate (pure, unit-tested): a heal may resume audio only
+/// when it was playing AND no user pause intent is latched. pause() sets
+/// the latch synchronously (before the async engine ack), so even a heal
+/// that starts mid-pause-ack — when stale `isPlaying` still reads true —
+/// stays paused.
+bool healResumeAllowed({
+  required bool wasPlaying,
+  required bool pauseIntent,
+}) =>
+    wasPlaying && !pauseIntent;
+
+/// Skin truth mapping (pure, unit-tested): the play/pause skin reads the
+/// NATIVE player state-stream as sole truth. Any start (playing) shows the
+/// pause icon; ANY stoppage by any means (paused/stopped/completed/disposed)
+/// shows the play icon; buffering/null keeps the last icon (spinner covers
+/// the wait, delayed past 800ms only).
+bool skinShowsPlaying(PlayerState? state, {required bool lastPlaying}) {
+  if (state == null) return lastPlaying;
+  return state == PlayerState.playing;
+}
 
 /// App-wide playback queue with shuffle — the "streaming engine".
 class QueuePlayer {
   QueuePlayer._() {
     _player.onPlayerComplete.listen((_) async {
+      // Paused audio never completes: a late event after pause-intent must
+      // not advance (or replay) the queue unattended.
+      if (_pausedIntent) return;
       // Dropout guard: a completion with most of the track unplayed is a
       // dead network stream, not a finished song — heal it in place
       // instead of skipping to the next track. Completions landing within
@@ -219,8 +250,10 @@ class QueuePlayer {
     });
     _player.onPlayerStateChanged.listen((s) {
       _lastPlayerState = s;
+      // Any settled native state clears the buffering spinner; playing also
+      // confirms audio so the deferred autoplay top-up re-arms now.
+      _setLoading(false);
       if (s == PlayerState.playing) {
-        loading.value = false;
         // Single-item starts defer their refill until audio is confirmed —
         // this IS the confirmation, so re-arm the top-up now.
         unawaited(_maybeAutoplay());
@@ -391,6 +424,10 @@ class QueuePlayer {
   /// Track changes are covered separately: every _playCurrent bumps
   /// [_playGen], and heals also verify index + item identity.
   int _healGen = 0;
+  /// Synchronous pause-intent latch: pause() sets it BEFORE the async engine
+  /// ack, resume()/new-play clears it. Heals started after a pause own a
+  /// fresh hid but must still never resume — they check this, not just hid.
+  bool _pausedIntent = false;
   DateTime _lastHealAt = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastHealEnd = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastPlayStartAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -596,6 +633,27 @@ class QueuePlayer {
 
   final ValueNotifier<String> currentThumb = ValueNotifier('');
   final ValueNotifier<bool> loading = ValueNotifier(false);
+  /// Spinner only after a real stall: fast loads (<800ms) never flash the
+  /// wheel — the pause/play icon stays optimistically. Armed via
+  /// [_setLoading]; every clear cancels the pending arm.
+  static const kSpinnerDelay = Duration(milliseconds: 800);
+  Timer? _loadingTimer;
+
+  /// Single choke point for the spinner: `true` arms it delayed (gen-guarded,
+  /// cancelled by playing/pause/track-change), `false` clears it now.
+  void _setLoading(bool v) {
+    _loadingTimer?.cancel();
+    if (!v) {
+      loading.value = false; // direct: this IS the choke point, no recurse
+      return;
+    }
+    final g = _playGen;
+    _loadingTimer = Timer(kSpinnerDelay, () {
+      if (g == _playGen && _lastPlayerState != PlayerState.playing) {
+        loading.value = true;
+      }
+    });
+  }
   final ValueNotifier<String?> lastError = ValueNotifier(null);
   final ValueNotifier<double> volume = ValueNotifier(1.0);
   final ValueNotifier<Duration> position = ValueNotifier(Duration.zero);
@@ -783,7 +841,7 @@ class QueuePlayer {
     if (isOffline.value) {
       final n = await _nextCachedIndex(index);
       if (n < 0) {
-        loading.value = false;
+        _setLoading(false);
         lastError.value = 'No connection — tap play to retry.';
         return;
       }
@@ -832,7 +890,7 @@ class QueuePlayer {
     if (isOffline.value) {
       final p = await _prevCachedIndex(index);
       if (p < 0) {
-        loading.value = false;
+        _setLoading(false);
         lastError.value = 'No connection — tap play to retry.';
         return;
       }
@@ -868,7 +926,7 @@ class QueuePlayer {
     if (isOffline.value && await _cachedUriFor(items[i]) == null) {
       final n = await _nextCachedIndex(i - 1);
       if (n < 0) {
-        loading.value = false;
+        _setLoading(false);
         lastError.value = 'No connection — tap play to retry.';
         return;
       }
@@ -993,7 +1051,9 @@ class QueuePlayer {
 
   Future<void> pause() {
     // A deliberate pause cancels any in-flight auto-resume: the user's
-    // intent wins over the heal loop.
+    // intent wins over the heal loop. Latched synchronously (before the
+    // async engine ack) so heals starting mid-ack still see it.
+    _pausedIntent = true;
     _healGen++;
     DebugInfo.pause('tap');
     return _player.pause().then((_) => DebugInfo.pause('ok')).catchError((e) {
@@ -1003,6 +1063,7 @@ class QueuePlayer {
   }
 
   Future<void> resume() {
+    _pausedIntent = false;
     DebugInfo.resume('tap');
     return _player.resume().then((_) => DebugInfo.resume('ok')).catchError((e) {
       DebugInfo.resume('err $e');
@@ -1026,9 +1087,14 @@ class QueuePlayer {
     // on fresh truth instead of pausing a ghost.
     if (p is RemoteEngine) {
       stateSyncing.value = true;
-      return p.toggleRecover().whenComplete(() => stateSyncing.value = false);
+      return p.toggleRecover().whenComplete(() {
+        // toggleRecover flips: outcome IS the intent (playing→play latch
+        // clear, paused→fresh pause latch) so later heals obey this tap.
+        _pausedIntent = !p.isPlaying;
+        stateSyncing.value = false;
+      });
     }
-    return playing ? pause() : _player.resume();
+    return playing ? pause() : resume();
   }
 
   /// Called on app resume (UI isolate may have slept while the handler
@@ -1073,7 +1139,7 @@ class QueuePlayer {
           hid == _healGen &&
           loading.value &&
           _lastPlayerState != PlayerState.playing) {
-        loading.value = false;
+        _setLoading(false);
         lastError.value = 'Playback did not start — retrying…';
         _healCurrent(reason: 'cold-start-timeout');
       }
@@ -1082,6 +1148,8 @@ class QueuePlayer {
 
   Future<void> _playCurrent({int? completedSecs, int skipDepth = 0}) async {
     final gen = ++_playGen;
+    // New play = intent to hear audio (clears any pause latch).
+    _pausedIntent = false;
     // Pause-intent token for this play: any delayed resume/nudge/fallback
     // checks it at FIRE time (pause() bumps _healGen), so play+instant-pause
     // never auto-resumes.
@@ -1089,7 +1157,7 @@ class QueuePlayer {
     final sw = Stopwatch()..start();
     if (index < 0 || index >= items.length) {
       currentTitle.value = '';
-      loading.value = false;
+      _setLoading(false);
       return;
     }
     // New track = fresh heal budget.
@@ -1129,7 +1197,7 @@ class QueuePlayer {
     currentTitle.value = items[index].title;
     PlayLog.switched(prevTitle, prevSec, items[index].title);
     currentThumb.value = items[index].thumbUrl ?? '';
-    loading.value = true;
+    _setLoading(true);
     AppHistory.recordListen(items[index].title);
     final recentKey = items[index].title.toLowerCase();
     _recentlyPlayed.remove(recentKey);
@@ -1214,7 +1282,7 @@ class QueuePlayer {
         // Offline with nothing cached says so explicitly (a reconnect
         // heals automatically via the network-change listener).
         if (gen == _playGen) {
-          loading.value = false;
+          _setLoading(false);
           if (resolveTimedOut) {
             lastError.value = tr('Play failed');
             // Unstick the engine; the hung future can't block later taps
@@ -1309,7 +1377,7 @@ class QueuePlayer {
             } catch (_) {}
           }
           if (gen != _playGen) return;
-          loading.value = false;
+          _setLoading(false);
           lastError.value = e.toString();
           _api?.logClientError(
             'playback',
@@ -1333,6 +1401,7 @@ class QueuePlayer {
           healToken: tapHeal,
           currentHeal: _healGen,
           isPlaying: _player.isPlaying,
+          pauseIntent: _pausedIntent,
         )) {
           DebugInfo.nudge('gated');
           return;
@@ -1346,7 +1415,7 @@ class QueuePlayer {
         if (gen != _playGen || tapHeal != _healGen || _player.isPlaying) {
           return;
         }
-        loading.value = false;
+        _setLoading(false);
         lastError.value = tr('Play failed');
         _api?.logClientError(
           'timeout',
@@ -1363,7 +1432,7 @@ class QueuePlayer {
     } catch (e) {
       // Only surface errors for the winning operation.
       if (gen == _playGen) {
-        loading.value = false;
+        _setLoading(false);
         lastError.value = e is TimeoutException
             ? tr('Play failed')
             : e.toString();
@@ -1552,7 +1621,9 @@ class QueuePlayer {
     await _player.seek(target);
     // Fire-time check: pause bumps _healGen, track change bumps _playGen.
     if (hid != _healGen || gen != _playGen) return;
-    if (wasPlaying) await _player.resume();
+    if (healResumeAllowed(wasPlaying: wasPlaying, pauseIntent: _pausedIntent)) {
+      await _player.resume();
+    }
     DiagLog.restart.log(
       'heal($why) seek-resume at=${target.inSeconds}s '
       'pos-before=${before.inSeconds}s pos-after=${target.inSeconds}s',
@@ -1582,7 +1653,7 @@ class QueuePlayer {
       }
       if (hid != _healGen || gen != _playGen) return false;
       await _healSeekResume(target, wasPlaying, 'failover', hid: hid, gen: gen);
-      loading.value = false;
+      _setLoading(false);
       _lastHealEnd = DateTime.now();
       _lastPlayStartAt = DateTime.now();
       DiagLog.restart.log(
@@ -1650,7 +1721,9 @@ class QueuePlayer {
     final gen = _playGen;
     final idx = index;
     final item = items[idx];
-    final wasPlaying = playing;
+    // Latch read synchronously: a pause ack still in flight leaves stale
+    // `playing == true` — the latch is the truth, never the cached flag.
+    final wasPlaying = playing && !_pausedIntent;
     // Stopped = user intent: never autoplay, refill, or rewrite the queue
     // on heal. Stay stopped.
     if (!wasPlaying && _lastPlayerState == PlayerState.stopped) {
@@ -1677,7 +1750,7 @@ class QueuePlayer {
       'pos=${position.value.inSeconds}s dur=${trackDuration.value.inSeconds}s '
       'state=${_lastPlayerState.name}',
     );
-    loading.value = true;
+    _setLoading(true);
     // Radio-up ≠ reachable: a stall/VPN/funnel drop reads online but the
     // NAS is gone — ping first so we read cache instead of burning
     // resolve attempts on dead network URLs.
@@ -1735,7 +1808,7 @@ class QueuePlayer {
                 } catch (_) {}
                 return;
               }
-              loading.value = false;
+              _setLoading(false);
               _lastHealEnd = DateTime.now();
               _lastPlayStartAt = DateTime.now();
               DiagLog.restart.log(
@@ -1751,7 +1824,7 @@ class QueuePlayer {
           if (n >= 0 && wasPlaying) {
             index = n;
             playPos = n;
-            loading.value = false;
+            _setLoading(false);
             DiagLog.restart.log(
               'heal($reason) offline skip (no cached-current) -> idx=$n',
             );
@@ -1763,7 +1836,7 @@ class QueuePlayer {
               'heal($reason) offline next-cached idx=$n ignored (paused)',
             );
           }
-          loading.value = false;
+          _setLoading(false);
           lastError.value = 'No connection — tap play to retry.';
         }
         if (isOffline.value) return;
@@ -1809,7 +1882,7 @@ class QueuePlayer {
         // nothing more while paused, which left the bar at 0:00.
         position.value = target;
         _lastHealEnd = DateTime.now();
-        loading.value = false;
+        _setLoading(false);
         return;
       }
       // Playing path: confirm audio actually flows (position advances)
@@ -1847,7 +1920,7 @@ class QueuePlayer {
       // else: fall through to the next backoff attempt
     }
     if (hid == _healGen && gen == _playGen) {
-      loading.value = false;
+      _setLoading(false);
       if (!wasPlaying) position.value = posBefore;
       final gaveUp = _healStrikes >= kMaxHealsPerTrack;
       lastError.value = gaveUp

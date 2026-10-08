@@ -865,8 +865,11 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
                                   onPressed: (_edit || qp.stateSyncing.value)
                                       ? null
                                       : () => qp.resumeOrPause(),
+                                  // Sole truth = native state-stream; cached
+                                  // qp.playing only seeds the first frame.
                                   icon: Icon(
-                                    snap.data == PlayerState.playing
+                                    skinShowsPlaying(snap.data,
+                                            lastPlaying: qp.playing)
                                         ? Icons.pause_circle_filled
                                         : Icons.play_circle_fill,
                                     color: Colors.white,
