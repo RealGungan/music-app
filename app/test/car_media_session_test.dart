@@ -88,4 +88,17 @@ void main() {
       expect(stableMediaId('', 'A - T'), 'A - T');
     });
   });
+
+  group('BT transport report (AVRCP action mapping)', () {
+    test('pause/play report fold to queue intent', () {
+      expect(transportReportFor('pause'), TransportReport.paused);
+      expect(transportReportFor('play'), TransportReport.resumed);
+    });
+    test('unknown ops are ignored, never crash', () {
+      expect(transportReportFor('stop'), isNull);
+      expect(transportReportFor('next'), isNull);
+      expect(transportReportFor(null), isNull);
+      expect(transportReportFor(''), isNull);
+    });
+  });
 }

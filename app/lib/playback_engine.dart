@@ -424,26 +424,40 @@ class RemoteEngine implements PlaybackEngine {
   /// the handler's state reply (via [feedRemoteEvent]) so [_lastState] is
   /// forced + listeners repainted BEFORE this returns — the UI gates taps
   /// on that (QueuePlayer.stateSyncing), so no tap lands on a stale icon.
-  /// Falls back to the local correction when the handler is gone/timeout.
+  /// Also awaits the same round-trip's pos echo so the clock is fresh on
+  /// return — a state-only resync leaves a frozen timestamp when the
+  /// position stream died in the background. Falls back to the local
+  /// correction when the handler is gone/timeout.
   Future<void> resync({
     Duration timeout = const Duration(milliseconds: 1200),
   }) async {
     _tryEngage();
     if (_remoteUp) {
+      // Subscribe BEFORE the send: a state event queued before it (stale
+      // truth from a destroyed surface) must not satisfy the wait — only
+      // the handler's fresh reply completes it.
+      final stateFut = _sbState.stream.first.timeout(timeout);
+      final posFut = _sbPos.stream.first.timeout(timeout);
       _send({'cmd': 'getState'});
       // The port can die between engage and send (_send demotes on miss):
       // fall through to the local correction below instead of leaving
       // _lastState stale.
-      // Subscribe AFTER the send: a state event queued before it (stale
-      // truth from a destroyed surface) must not satisfy the wait — only
-      // the handler's fresh reply completes it.
       if (_remoteUp) {
+        var answered = false;
         try {
-          await _sbState.stream.first.timeout(timeout);
-          return;
+          await stateFut;
+          answered = true;
         } catch (_) {
           // Timeout: handler didn't answer — fall through to correction.
         }
+        try {
+          await posFut;
+          answered = true;
+        } catch (_) {
+          // Clock echo lost: the live position stream (or the stall
+          // detector's next audit) corrects it; never block resume on it.
+        }
+        if (answered) return;
       }
     }
     // Handler unreachable (killed while backgrounded): the local player is

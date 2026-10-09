@@ -102,12 +102,21 @@ typedef NasLookup = Future<String?> Function(String artist, String title);
 /// tail arriving late — accepting it flashes the previous song's timestamp.
 /// Normal advance, small rewinds, and heal seek-backs (all within
 /// maxAccepted + 3s) pass; genuine user seeks pass via the seek match.
+/// A late tail can only arrive shortly after the new load started, so a
+/// far-ahead tick landing long after ([loadAt] + [window]) is genuine
+/// background progress (the handler kept playing while the UI slept) and
+/// passes: dropping it freezes the clock forever (_posMax never advances,
+/// so every later tick drops too — the frozen-timestamp class).
+const staleTailWindow = Duration(seconds: 10);
+
 bool dropStalePositionTick({
   required Duration tick,
   required Duration maxAccepted,
   required Duration? seekTarget,
   required DateTime seekAt,
   required DateTime now,
+  required DateTime loadAt,
+  Duration window = staleTailWindow,
 }) {
   if (tick <= maxAccepted + const Duration(seconds: 3)) return false;
   if (seekTarget != null &&
@@ -115,6 +124,7 @@ bool dropStalePositionTick({
       (tick - seekTarget).abs() <= const Duration(seconds: 2)) {
     return false;
   }
+  if (now.difference(loadAt) > window) return false;
   return true;
 }
 
@@ -268,6 +278,7 @@ class QueuePlayer {
         seekTarget: _userSeekTarget,
         seekAt: _userSeekAt,
         now: now,
+        loadAt: _lastPlayStartAt,
       )) {
         return;
       }
@@ -1153,6 +1164,26 @@ class QueuePlayer {
       DebugInfo.pause('err $e');
       throw e;
     });
+  }
+
+  /// Transport-pause from the media session (BT headset / car wheel /
+  /// notification button): it bypasses pause(), so latch the intent + bump
+  /// the heal token here — otherwise the heal loop auto-resumes over a BT
+  /// pause within seconds. Same latch, no engine command (the handler
+  /// already paused its player; re-sending would loop back here).
+  void onTransportPause() {
+    _pausedIntent = true;
+    _healGen++;
+    DebugInfo.pause('transport');
+    report('pause-fire', 'transport pause');
+  }
+
+  /// Transport-play from the media session: clear the latch so heals may
+  /// resume again (a stuck latch blocks every heal-resume after a BT play).
+  void onTransportResume() {
+    _pausedIntent = false;
+    DebugInfo.resume('transport');
+    report('resume-fire', 'transport play');
   }
 
   Future<void> resume() {

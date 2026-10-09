@@ -3232,16 +3232,8 @@ Future<void> _playFrom(int i) async {
                             )
                           : const SizedBox.shrink(),
                 ),
-                if (playable)
-                  IconButton(
-                    // The existing play triangle turns green when this song is the
-                    // one currently playing.
-                    icon: Icon(
-                      Icons.play_arrow,
-                      color: isCurrent ? Spots.green : null,
-                    ),
-                    onPressed: () => _playFrom(shownIndex),
-                  ),
+                // Tap-to-play (ListTile onTap below) + long-press menu carry
+                // playback; no per-row play button.
                 PopupMenuButton<String>(
                   onSelected: (v) {
                     if (v == 'remove') {

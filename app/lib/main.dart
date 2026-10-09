@@ -17,6 +17,7 @@ import 'package:workmanager/workmanager.dart';
 
 import 'api_client.dart';
 import 'announcer.dart';
+import 'deep_link.dart';
 import 'audio_handler.dart';
 import 'audio_session_state.dart';
 import 'auth_store.dart';
@@ -100,6 +101,19 @@ void _decodeAudioJson(String json) {
       }
       final e = qp.engine;
       if (e is RemoteEngine) e.feedRemoteEvent(m);
+      // Media-session transport reports (BT headset / car wheel /
+      // notification play/pause): the handler already Paused/resumed its
+      // player — fold the intent into the queue so the heal loop obeys it
+      // (pause latches, play clears), without re-sending a command back.
+      if (ev == 'transport') {
+        final rep = transportReportFor(m?['op']?.toString());
+        if (rep == TransportReport.paused) {
+          qp.onTransportPause();
+        } else if (rep == TransportReport.resumed) {
+          qp.onTransportResume();
+        }
+        return;
+      }
       // External-audio callbacks must FORCE handler truth, not just fold the
       // event in: a focus loss/regain that lands while the UI isolate sleeps
       // leaves a stale icon (events alone already missed once). Re-query via
@@ -411,6 +425,8 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
   bool? _sessionValid;
   final _messengerKey = GlobalKey<ScaffoldMessengerState>();
   final _navigatorKey = GlobalKey<NavigatorState>();
+  String? _lastDlUrl;
+  DateTime? _lastDlAt;
 
   /// Deep-link flow logging (debugPrint only; not visible in release builds
   /// without adb/logcat).
@@ -750,24 +766,26 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
 
   Future<void> _openDeepLink(String rawUrl) async {
     _traceDl('openDeepLink: $rawUrl');
+    // Cold start + warm openUrl can deliver the same URL twice (native
+    // flush + getInitialLink raced before the MainActivity fix; belt and
+    // braces against any future double delivery): play once.
+    final now = DateTime.now();
+    if (isDuplicateDeepLink(_lastDlUrl, _lastDlAt, rawUrl, now)) {
+      _traceDl('duplicate deep link ignored');
+      return;
+    }
+    _lastDlUrl = rawUrl;
+    _lastDlAt = now;
     final url = Uri.tryParse(rawUrl);
     if (url == null) {
       _traceDl('URI parse FAILED');
       _dlToast("Deep link unparseable: $rawUrl");
       return;
     }
+    final kind = classifyDeepLink(rawUrl);
     final host = (url.host.isNotEmpty ? url.host : url.path).toLowerCase();
-    final isSpotify =
-        host == 'open.spotify.com' ||
-        host == 'spotify.link' ||
-        host.endsWith('.spotify.com') ||
-        host.endsWith('.spotify.link');
-    final isYt =
-        host == 'youtu.be' ||
-        host == 'www.youtube.com' ||
-        host == 'm.youtube.com' ||
-        host == 'music.youtube.com' ||
-        host.endsWith('youtube.com');
+    final isSpotify = kind == DeepLinkKind.spotify;
+    final isYt = kind == DeepLinkKind.youtube;
     _traceDl('host=$host isSpotify=$isSpotify isYt=$isYt');
     if (!isSpotify && !isYt) {
       _dlToast("Not a music share link ($host)");

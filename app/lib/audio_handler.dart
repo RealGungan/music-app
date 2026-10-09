@@ -76,6 +76,26 @@ String stableMediaId(String? url, String fallback) {
 /// track's dur_ms until measured (timestamp flash on the car). Pure for tests.
 Duration durationForNewTrackPub() => Duration.zero;
 
+/// AVRCP/media-button transport report (pure, unit-tested). The media-session
+/// transport callbacks (BT headset, car wheel, notification) act on the
+/// HANDLER's player directly, bypassing the queue — so each one also reports
+/// back to the main isolate, which folds it into QueuePlayer intent (a BT
+/// pause must latch pause-intent or the heal loop auto-resumes over it; a BT
+/// play must clear it or heals stay blocked). Unknown ops map to null
+/// (ignored — never crash on a new button).
+enum TransportReport { paused, resumed }
+
+TransportReport? transportReportFor(String? op) {
+  switch (op) {
+    case 'pause':
+      return TransportReport.paused;
+    case 'play':
+      return TransportReport.resumed;
+    default:
+      return null;
+  }
+}
+
 /// Media-session handler that OWNS the real audioplayers player on Android.
 ///
 /// audio_service runs this class in a SEPARATE isolate. Keeping the
@@ -344,36 +364,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         _nextUrl = null;
         _nextTitle = _nextArtist = _nextAlbum = null;
       }
-      final nu = _nextUrl;
-      if (nu != null && nu.isNotEmpty) {
-        _nextUrl = null;
-        if (_nextTitle != null) _title = _nextTitle!;
-        if (_nextArtist != null) _artist = _nextArtist!;
-        if (_nextAlbum != null) _album = _nextAlbum!;
-        _nextTitle = _nextArtist = _nextAlbum = null;
-        // The item id is the stream URL: adopt it BEFORE publishing so the
-        // car never sees the new title under the previous track's id.
-        _currentUrl = nu;
-        _duration = durationForNewTrackPub();
-        _position = Duration.zero;
-        _publishMedia();
-        try {
-          // Same single-instance reuse as 'play' (no stop/reset/release).
-          await _player
-              .play(sourceForUrl(nu))
-              .timeout(const Duration(seconds: 10));
-        } catch (e) {
-          _sendEvent({'ev': 'err', 'm': e.toString()});
-          // Blind autostart failed (dead pre-push): hand advancement back to
-          // main — its completion path pings NAS and wraps to cache offline.
-          _sendEvent({'ev': 'complete'});
-          _publishPlayback();
-          return;
-        }
-        _sendEvent({'ev': 'advanced', 'url': nu});
-        _publishPlayback();
-        return;
-      }
+      if (await _startPrePushed()) return;
       _sendEvent({'ev': 'complete'});
       _publishPlayback();
     });
@@ -422,6 +413,41 @@ class NASMusicAudioHandler extends BaseAudioHandler {
 
   void _sendBridge(String msg) {
     IsolateNameServer.lookupPortByName(kAudioBridgePort)?.send(msg);
+  }
+
+  /// Starts the pre-pushed next track (gapless handoff). The main isolate
+  /// pushes the upcoming track ahead of time; whoever fires first — natural
+  /// completion with the UI asleep, or a screen-off BT/car NEXT — starts it
+  /// HERE and reports 'advanced' so main adopts instead of replaying.
+  /// Returns true when audio is now flowing on the new track; false when
+  /// there was nothing pre-pushed or the start failed (caller runs its
+  /// legacy path: completion event for onCompletion, queue bridge for next).
+  Future<bool> _startPrePushed() async {
+    final nu = _nextUrl;
+    if (nu == null || nu.isEmpty) return false;
+    _nextUrl = null;
+    if (_nextTitle != null) _title = _nextTitle!;
+    if (_nextArtist != null) _artist = _nextArtist!;
+    if (_nextAlbum != null) _album = _nextAlbum!;
+    _nextTitle = _nextArtist = _nextAlbum = null;
+    // The item id is the stream URL: adopt it BEFORE publishing so the
+    // car never sees the new title under the previous track's id.
+    _currentUrl = nu;
+    _duration = durationForNewTrackPub();
+    _position = Duration.zero;
+    _publishMedia();
+    try {
+      // Same single-instance reuse as 'play' (no stop/reset/release).
+      await _player.play(sourceForUrl(nu)).timeout(const Duration(seconds: 10));
+    } catch (e) {
+      _sendEvent({'ev': 'err', 'm': e.toString()});
+      // Blind autostart failed (dead pre-push): caller hands advancement
+      // back to main — its path pings NAS and wraps to cache offline.
+      return false;
+    }
+    _sendEvent({'ev': 'advanced', 'url': nu});
+    _publishPlayback();
+    return true;
   }
 
   void _onIncoming(dynamic message) {
@@ -806,11 +832,16 @@ class NASMusicAudioHandler extends BaseAudioHandler {
     );
   }
 
-  /// Lock-screen / notification transport. Play/pause/seek go straight to OUR
-  /// player; next/prev are queue decisions, so they bounce to the app.
+  /// Lock-screen / notification / BT-headset / car-wheel transport. Play/pause
+  /// go straight to OUR player AND report back so the main isolate folds them
+  /// into queue intent (see TransportReport); next/prev are queue decisions,
+  /// so they bounce to the app — except a screen-off NEXT with a warm
+  /// pre-push, which starts here (the UI isolate may be asleep) and reports
+  /// 'advanced' for main to adopt on wake.
   @override
   Future<void> play() async {
     _userPaused = false;
+    _sendEvent({'ev': 'transport', 'op': 'play'});
     if (!_hasMedia || _currentUrl == null) {
       // Resume race / service restart lost the metadata push but the URL
       // is ground truth: re-publish + play instead of dropping (drop =
@@ -844,6 +875,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
   @override
   Future<void> pause() async {
     _userPaused = true;
+    _sendEvent({'ev': 'transport', 'op': 'pause'});
     return _player.pause();
   }
 
@@ -869,7 +901,13 @@ class NASMusicAudioHandler extends BaseAudioHandler {
   Future<void> seek(Duration position) async => _player.seek(position);
 
   @override
-  Future<void> skipToNext() async => _sendBridge('next');
+  Future<void> skipToNext() async {
+    // Paused stays bridged: an explicit next while paused must advance the
+    // queue WITHOUT starting audio, and only the queue (main) knows the
+    // paused target — _startPrePushed would consume the push + autostart.
+    if (_playing && !_userPaused && await _startPrePushed()) return;
+    _sendBridge('next');
+  }
 
   @override
   Future<void> skipToPrevious() async => _sendBridge('prev');

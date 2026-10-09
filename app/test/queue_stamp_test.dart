@@ -10,12 +10,15 @@ bool _drop({
   Duration? seek,
   DateTime? seekAt,
   DateTime? now,
+  DateTime? loadAt,
 }) => dropStalePositionTick(
   tick: tick,
   maxAccepted: max,
   seekTarget: seek,
   seekAt: seekAt ?? _t(0),
   now: now ?? _t(100),
+  // Default: fresh load (tail window open), preserving the original cases.
+  loadAt: loadAt ?? now ?? _t(100),
 );
 
 void main() {
@@ -52,6 +55,51 @@ void main() {
       _drop(
         tick: const Duration(seconds: 25),
         max: const Duration(seconds: 30),
+      ),
+      false,
+    );
+  });
+
+  test('background advance after long idle passes (frozen-clock guard)', () {
+    // Handler kept playing while the UI slept: the resync tick jumps far
+    // past the pre-background max. Dropping it would freeze the clock
+    // forever (max never advances, so every later tick drops too).
+    final load = _t(0);
+    expect(
+      _drop(
+        tick: const Duration(seconds: 180),
+        max: const Duration(seconds: 45),
+        now: _t(300),
+        loadAt: load,
+      ),
+      false,
+    );
+    // Same jump seconds after the load is still the old engine's tail.
+    expect(
+      _drop(
+        tick: const Duration(seconds: 180),
+        max: const Duration(seconds: 45),
+        now: _t(5),
+        loadAt: load,
+      ),
+      true,
+    );
+    // Window edge: inside 10s drops, past it adopts.
+    expect(
+      _drop(
+        tick: const Duration(seconds: 60),
+        max: Duration.zero,
+        now: _t(9),
+        loadAt: load,
+      ),
+      true,
+    );
+    expect(
+      _drop(
+        tick: const Duration(seconds: 60),
+        max: Duration.zero,
+        now: _t(11),
+        loadAt: load,
       ),
       false,
     );

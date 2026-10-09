@@ -119,8 +119,10 @@ class MainActivity : AudioServiceActivity() {
                     result.notImplemented()
                 }
             }
-        // If a deep link arrived before the engine was configured, flush it now.
-        pendingUrl?.let { forwardDeepLink(it) }
+        // Cold start goes ONLY via getInitialLink (Dart pulls it post-frame
+        // when the navigator exists). Forwarding here too would deliver the
+        // same URL twice (openUrl event + getInitialLink) → double
+        // NowPlaying push + double playOne race.
         registerNoisyReceiver()
     }
 
