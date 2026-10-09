@@ -29,3 +29,44 @@ bool isDuplicateDeepLink(String? lastUrl, DateTime? lastAt, String url, DateTime
   if (lastUrl == null || lastAt == null) return false;
   return lastUrl == url && now.difference(lastAt) < window;
 }
+
+/// Strip share-tracking query params WhatsApp/Spotify append (`?si=…`,
+/// `utm_*`, `fbclid`, …). Spotify track ids live in the path, so the whole
+/// query goes; YouTube keeps only playback params (`v`, `list`, `t`,
+/// `index`). Returns the input unchanged when unparseable.
+String stripTrackingParams(String rawUrl) {
+  final url = Uri.tryParse(rawUrl.trim());
+  if (url == null || !url.hasScheme) return rawUrl;
+  final kind = classifyDeepLink(rawUrl);
+  if (kind == DeepLinkKind.spotify) {
+    if (url.query.isEmpty && url.fragment.isEmpty) return rawUrl.trim();
+    // NOTE: Uri.replace(query: null) KEEPS the query — rebuild instead.
+    final port = url.hasPort ? ':${url.port}' : '';
+    return '${url.scheme}://${url.host}$port${url.path}';
+  }
+  if (kind == DeepLinkKind.youtube) {
+    if (url.query.isEmpty) return rawUrl.trim();
+    const keep = {'v', 'list', 't', 'index'};
+    final kept = Map<String, String>.fromEntries(
+      url.queryParameters.entries.where((e) => keep.contains(e.key)),
+    );
+    final port = url.hasPort ? ':${url.port}' : '';
+    final base = '${url.scheme}://${url.host}$port${url.path}';
+    if (kept.isEmpty) return base;
+    final clean = '$base?${Uri(queryParameters: kept).query}';
+    if (clean == rawUrl.trim()) return rawUrl.trim();
+    return clean;
+  }
+  return rawUrl;
+}
+
+final _urlRe = RegExp(r'https?://[^\s]+');
+
+/// First http(s) URL inside shared text (WhatsApp "share to app" sends
+/// ACTION_SEND text/plain, not a VIEW intent). Strips trailing punctuation
+/// messengers leave behind. Returns '' when none found.
+String extractFirstUrl(String text) {
+  final m = _urlRe.firstMatch(text);
+  if (m == null) return '';
+  return m.group(0)!.replaceAll(RegExp(r'[)\].,;!]+$'), '');
+}

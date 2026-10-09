@@ -15,6 +15,25 @@ void main() {
   test('non-music link is other', () {
     expect(classifyDeepLink('https://example.com/foo'), DeepLinkKind.other);
   });
+  test('spotify ?si=/utm_ stripped entirely', () {
+    expect(
+      stripTrackingParams('https://open.spotify.com/track/4uLU6hMCjMI75M1A2tkuQ?si=abc123&utm_source=whatsapp'),
+      'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tkuQ',
+    );
+  });
+  test('youtube keeps v, drops si/utm', () {
+    expect(
+      stripTrackingParams('https://music.youtube.com/watch?v=dQw4w9WgXcQ&si=xyz&utm_source=wa'),
+      'https://music.youtube.com/watch?v=dQw4w9WgXcQ',
+    );
+  });
+  test('extractFirstUrl finds link in share text', () {
+    expect(
+      extractFirstUrl('Listen! https://open.spotify.com/track/ABC?si=x, so good'),
+      'https://open.spotify.com/track/ABC?si=x',
+    );
+    expect(extractFirstUrl('no link here'), isEmpty);
+  });
   test('cold+warm duplicate suppressed, later replay allowed', () {
     final t0 = DateTime(2026, 1, 1);
     expect(isDuplicateDeepLink(null, null, 'u', t0), isFalse);

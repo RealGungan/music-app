@@ -87,6 +87,15 @@
                 <data android:scheme="http" android:host="youtube.com"/>
                 <data android:scheme="http" android:host="youtu.be"/>
             </intent-filter>
+            <!-- WhatsApp "share to app": ACTION_SEND text/plain carrying a
+                 link in EXTRA_TEXT (tap-on-chat-URL comes as VIEW above).
+                 Dart/MainActivity.extractLink pulls the first http(s) URL
+                 out of the text and plays it like any deep link. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="text/plain"/>
+            </intent-filter>
         </activity>
         <!-- audio_service media session + foreground service (lock screen /
              notification controls + keeps playing when the phone sleeps). -->

@@ -714,7 +714,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
   /// receive warm links whenever onNewIntent fires. Each one opens the song
   /// like a tapped discovery row.
   Future<void> _wireDeepLinks() async {
-    _traceDl('BUILD=V39');
+    _traceDl('BUILD=V40');
     String? initial;
     try {
       initial = await _kDeepLinkChannel.invokeMethod<String>('getInitialLink');
@@ -766,6 +766,10 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
 
   Future<void> _openDeepLink(String rawUrl) async {
     _traceDl('openDeepLink: $rawUrl');
+    // WhatsApp tacks on ?si=…/utm_source=… — strip before dedup + classify
+    // so a re-tap of the same song with different tracking still dedups
+    // and the server sees the canonical link.
+    rawUrl = stripTrackingParams(rawUrl);
     // Cold start + warm openUrl can deliver the same URL twice (native
     // flush + getInitialLink raced before the MainActivity fix; belt and
     // braces against any future double delivery): play once.

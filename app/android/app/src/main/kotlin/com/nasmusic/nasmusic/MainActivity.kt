@@ -34,15 +34,32 @@ class MainActivity : AudioServiceActivity() {
     // either in onCreate (cold start) or onNewIntent (warm). The URL is kept
     // so the app can pull it on first boot ("getInitialLink") or be pushed it
     // immediately ("openUrl") when it's already running.
+    // WhatsApp shares arrive TWO ways: tapping a chat URL = VIEW with
+    // tracking query (?si=…&utm_source=… — our filters carry NO pathPattern
+    // so any path+query still matches); "share to app" = ACTION_SEND
+    // text/plain with the link inside EXTRA_TEXT (intent.data is null there).
     private var pendingUrl: String? = null
     private var messenger: BinaryMessenger? = null
+
+    private fun extractLink(intent: Intent?): String? {
+        if (intent == null) return null
+        intent.data?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
+        if (intent.action == Intent.ACTION_SEND) {
+            val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+                .orEmpty() + "\n" + intent.getCharSequenceExtra(Intent.EXTRA_SUBJECT)?.toString().orEmpty()
+            Regex("""https?://\S+""").find(text)?.value
+                ?.trimEnd(')', ']', '.', ',', ';', '!')
+                ?.takeIf { it.isNotBlank() }?.let { return it }
+        }
+        return null
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         // Capture the cold-start intent data up front — configureFlutterEngine
         // runs INSIDE super.onCreate, i.e. BEFORE our onCreate body stores it,
         // so grabbing it here (plus the eager flush below) removes any race in
         // which a deep link is orphaned between activity start and first frame.
-        intent?.data?.toString()?.let { pendingUrl = it }
+        extractLink(intent)?.let { pendingUrl = it }
         super.configureFlutterEngine(flutterEngine)
         messenger = flutterEngine.dartExecutor.binaryMessenger
         audioEventChannel = MethodChannel(
@@ -128,13 +145,13 @@ class MainActivity : AudioServiceActivity() {
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
-        intent?.data?.toString()?.let { pendingUrl = it }
+        extractLink(intent)?.let { pendingUrl = it }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        intent.data?.toString()?.let {
+        extractLink(intent)?.let {
             pendingUrl = it
             forwardDeepLink(it)
         }

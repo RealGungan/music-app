@@ -155,7 +155,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.276"
+APP_VERSION = "1.0.277"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -2160,15 +2160,53 @@ class Handler(BaseHTTPRequestHandler):
                     m = None
             if m:
                 tid = m.group(1)
-                artist, title, image = self._spotify_track_meta(tid)
-                if not (artist and title):
-                    # Page scrape 404s for region/account-gated tracks that
-                    # STILL play in the app. The pathfinder getTrack query is
-                    # what the web player actually uses — the anonymous token
-                    # is minted from the same MarkAir server, not the user's
-                    # session, so it mirrors the page's market exactly. It
-                    # succeeds where the <title> scrape is anti-bot-blocked.
-                    artist, title, image = self._spotify_track_meta_api(tid)
+                ck = "spm:" + tid
+                got = None
+                try:
+                    got = self.state.db.misc_get(ck, 7 * 86400)
+                except Exception:                            # noqa: BLE001
+                    got = None
+                if isinstance(got, dict) and got.get("artist") \
+                        and got.get("title"):
+                    artist, title, image = (got["artist"], got["title"],
+                                            got.get("image") or "")
+                else:
+                    # Page scrape 404s under anti-bot while getTrack needs a
+                    # token round-trip — run both at once, first good wins
+                    # (cold = max, not sum). Warm hits the spm: cache above.
+                    out = {}
+
+                    def _w(which, fn):
+                        try:
+                            out[which] = fn()
+                        except Exception:                    # noqa: BLE001
+                            out[which] = ("", "", "")
+                    ts = [threading.Thread(
+                              target=_w, args=("s", lambda:
+                                               self._spotify_track_meta(tid)),
+                              daemon=True),
+                          threading.Thread(
+                              target=_w, args=("a", lambda:
+                                               self._spotify_track_meta_api(
+                                                   tid)),
+                              daemon=True)]
+                    for t in ts:
+                        t.start()
+                    for t in ts:
+                        t.join(15)
+                    artist = title = image = ""
+                    for k in ("a", "s"):
+                        a2, t2, i2 = out.get(k) or ("", "", "")
+                        if a2 and t2:
+                            artist, title, image = a2, t2, i2
+                            break
+                    if artist and title:
+                        try:
+                            self.state.db.misc_put(
+                                ck, {"artist": artist, "title": title,
+                                     "image": image or ""})
+                        except Exception:                    # noqa: BLE001
+                            pass
                 if artist and title:
                     return {
                         "kind": "spotify", "artist": artist, "title": title,
@@ -2177,21 +2215,35 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 # Track genuinely unresolvable anonymously (removed / not in
                 # this market): tell the app so it can say so, not silently.
+                logger.warning("open-url: spotify %s unresolvable", tid)
                 return {"kind": "unknown", "url": url,
                         "unresolved": "spotify"}
             return {"kind": "unknown", "url": url}
         return {"kind": "unknown", "url": url}
 
-    @staticmethod
-    def _yt_video_meta(video_id):
+    def _yt_video_meta(self, video_id):
         """Best-effort artist+title for a video id (one YTMusic get_song call;
-        the app can still stream purely from video_id if this fails)."""
+        the app can still stream purely from video_id if this fails).
+        Cached 7d (ytm:) so repeat opens are instant."""
+        try:
+            got = self.state.db.misc_get("ytm:" + video_id, 7 * 86400)
+            if isinstance(got, dict) and (got.get("artist")
+                                          or got.get("title")):
+                return got.get("artist") or "", got.get("title") or ""
+        except Exception:                                  # noqa: BLE001
+            pass
         try:
             from ytmusicapi import YTMusic
             s = YTMusic().get_song(video_id)
             d = s.get("videoDetails") or {}
             title = (d.get("title") or "").strip()
             artist = (d.get("author") or "").strip()
+            if artist or title:
+                try:
+                    self.state.db.misc_put("ytm:" + video_id,
+                                            {"artist": artist, "title": title})
+                except Exception:                          # noqa: BLE001
+                    pass
             return artist, title
         except Exception:                                  # noqa: BLE001
             return "", ""
@@ -7679,23 +7731,31 @@ class Handler(BaseHTTPRequestHandler):
             cached = self._cover_cache.get(key)
         if cached:
             return self._redirect_or_body(*cached)
-        try:
-            req = urllib.request.Request(
-                f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
-                headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                body = resp.read(MAX_COVER_BYTES + 1)
-                ctype = resp.headers.get("Content-Type", "image/jpeg")
-            if len(body) < 64 or len(body) > MAX_COVER_BYTES:
-                return self.send_error(404, "no artwork")
-            with self._cover_cache_lock:
-                self._cover_cache[key] = (body, ctype)
-                while len(self._cover_cache) > MAX_COVER_CACHE:
-                    self._cover_cache.pop(next(iter(self._cover_cache)))
-            return self._redirect_or_body(body, ctype)
-        except Exception as ex:                       # noqa: BLE001
-            logger.info("cover vid failed: %s", str(ex)[:80])
-            return self.send_error(502, "cover fetch failed")
+        # Fallback chain: hq -> mq -> default (deleted/private videos 404
+        # some qualities but still serve others; never fail on first miss).
+        err = ""
+        for qual in ("hqdefault", "mqdefault", "default"):
+            try:
+                req = urllib.request.Request(
+                    f"https://i.ytimg.com/vi/{video_id}/{qual}.jpg",
+                    headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    body = resp.read(MAX_COVER_BYTES + 1)
+                    ctype = resp.headers.get("Content-Type", "image/jpeg")
+                if len(body) < 64 or len(body) > MAX_COVER_BYTES:
+                    err = f"{qual} bad size {len(body)}"
+                    continue
+                with self._cover_cache_lock:
+                    self._cover_cache[key] = (body, ctype)
+                    while len(self._cover_cache) > MAX_COVER_CACHE:
+                        self._cover_cache.pop(next(iter(self._cover_cache)))
+                return self._redirect_or_body(body, ctype)
+            except Exception as ex:                       # noqa: BLE001
+                err = str(ex)[:80]
+                continue
+        logger.warning("cover vid %s failed all qualities: %s", video_id,
+                       err)
+        return self.send_error(502, "cover fetch failed")
 
     def _save_cover_url(self, user, name, url):
         """Auto-cover on import: fetch url (SSRF-guarded) into the
