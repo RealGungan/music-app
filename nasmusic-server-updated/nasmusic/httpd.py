@@ -155,7 +155,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.279"
+APP_VERSION = "1.0.289"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1253,15 +1253,9 @@ class Handler(BaseHTTPRequestHandler):
             artist, title = None, None
 
         qkey = self._norm(q)
-        cached = state.db.misc_get("sr3:" + qkey, self._search_cache_ttl)
-        if cached is None:  # dual-read: pre-rename sr2 rows stay warm
-            cached = state.db.misc_get("sr2:" + qkey,
-                                       self._search_cache_ttl)
-            if cached is not None:
-                try:
-                    state.db.misc_put("sr3:" + qkey, cached)
-                except Exception:                       # noqa: BLE001
-                    pass
+        # sr4: album now attached per row (Deezer, like covers) — older
+        # album-less sr3: rows are NOT migrated, they rebuild once.
+        cached = state.db.misc_get("sr4:" + qkey, self._search_cache_ttl)
         was_cold = cached is None
         pending = cached is None
         if cached:
@@ -1340,11 +1334,11 @@ class Handler(BaseHTTPRequestHandler):
             # window returns discovery_pending=true and the app polls it in.
             # ONE pass: songs+artists land in the SAME response (no 0.6s
             # cold + 1.2s poll gap). Discovery gets up to 1.2s; artists
-            # get the remaining budget. Caches sr3:/rz: unchanged.
+            # get the remaining budget. Caches sr4:/rz: unchanged.
             _t0 = time.time()
             ev = self._discovery_sync(q, qkey)
             ev.wait(timeout=1.2)
-            _refetch = state.db.misc_get("sr3:" + qkey,
+            _refetch = state.db.misc_get("sr4:" + qkey,
                                          self._search_cache_ttl)
             if _refetch:
                 cached = _refetch
@@ -1523,10 +1517,21 @@ class Handler(BaseHTTPRequestHandler):
                 ids.append(c["video_id"])
                 if len(virtual) >= 8:
                     break
-            # Inline CACHE HITS first (cheap ms: dz:cover + song_meta, no
-            # network) so the first sr3 write already carries imgs; only
-            # misses background-fetch below then rewrite.
+            # Inline CACHE HITS first (cheap ms: dz:cover + dz:album +
+            # song_meta, no network) so the first sr4 write already carries
+            # imgs + albums; only misses background-fetch below then rewrite.
             for r in virtual:
+                if not r.get("album"):
+                    try:
+                        _ab = state.db.misc_get(
+                            "dz:album:" + self._norm(
+                                "%s - %s" % (r.get("artist") or "",
+                                             r.get("title") or "")),
+                            7 * 86400)
+                        if _ab:
+                            r["album"] = _ab
+                    except Exception:                   # noqa: BLE001
+                        pass
                 if r.get("album_image"):
                     continue
                 try:
@@ -1547,7 +1552,7 @@ class Handler(BaseHTTPRequestHandler):
             # pixelated YT thumb. Rows are written FIRST (see below) so the
             # waiting search poll sees them without cover latency; this fill
             # only upgrades the cached rows afterwards.
-            state.db.misc_put("sr3:" + qkey, {
+            state.db.misc_put("sr4:" + qkey, {
                 "artist": c_artist, "title": c_title,
                 "provider": provider, "expected_dur": expected_dur,
                 "discovery": virtual})
@@ -1564,16 +1569,24 @@ class Handler(BaseHTTPRequestHandler):
                 import concurrent.futures
 
                 def _fill(r):
-                    if r.get("album_image"):
-                        return
-                    try:
-                        cov = self._deezer_cover_cached(
-                            "%s - %s" % (r.get("artist") or "",
-                                         r.get("title") or ""))
-                    except Exception:                   # noqa: BLE001
-                        cov = None
-                    if cov:
-                        r["album_image"] = cov
+                    if not r.get("album_image"):
+                        try:
+                            cov = self._deezer_cover_cached(
+                                "%s - %s" % (r.get("artist") or "",
+                                             r.get("title") or ""))
+                        except Exception:               # noqa: BLE001
+                            cov = None
+                        if cov:
+                            r["album_image"] = cov
+                    if not r.get("album"):
+                        try:
+                            alb = self._deezer_album_cached(
+                                "%s - %s" % (r.get("artist") or "",
+                                             r.get("title") or ""))
+                        except Exception:               # noqa: BLE001
+                            alb = None
+                        if alb:
+                            r["album"] = alb
 
                 with concurrent.futures.ThreadPoolExecutor(
                         max_workers=min(8, len(virtual))) as ex:
@@ -1582,7 +1595,7 @@ class Handler(BaseHTTPRequestHandler):
             # prewarmed): the app only needs the rows to exist to show them,
             # and the poll/refetch path reads this cache directly. The URL
             # prewarm then runs to completion in this same worker afterwards.
-            state.db.misc_put("sr3:" + qkey, {
+            state.db.misc_put("sr4:" + qkey, {
                 "artist": c_artist, "title": c_title,
                 "provider": provider, "expected_dur": expected_dur,
                 "discovery": virtual})
@@ -1980,6 +1993,20 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:                       # noqa: BLE001
                     pass
         if got and isinstance(got, dict) and got.get("url"):
+            if not got.get("album"):
+                # Pre-album rz:/ry: rows (14d TTL): heal in place via the
+                # cached Deezer title so resolve replies carry album now.
+                try:
+                    _alb = (self._deezer_album_cached(
+                        f"{artist} - {title}") or "")
+                except Exception:                       # noqa: BLE001
+                    _alb = ""
+                if _alb:
+                    got["album"] = _alb
+                    try:
+                        state.db.misc_put(key, got)
+                    except Exception:                   # noqa: BLE001
+                        pass
             return self._json(got)
         # NAS-first on the tap path (exact _innas + lenient fallback):
         # owned songs play the local file instantly, relay only when
@@ -1989,10 +2016,16 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:                               # noqa: BLE001
             hit = None
         if hit and hit.get("found") and hit.get("url"):
+            try:
+                _alb0 = (hit.get("album")
+                         or self._deezer_album_cached(
+                             f"{artist} - {title}") or "")
+            except Exception:                               # noqa: BLE001
+                _alb0 = ""
             return self._json({
                 "url": hit["url"], "in_nas": True,
                 "nas_base": hit.get("base_name"),
-                "artist": artist, "title": title})
+                "artist": artist, "title": title, "album": _alb0})
         try:
             _base = self._innas_lenient(artist, title)
         except Exception:                               # noqa: BLE001
@@ -2001,10 +2034,17 @@ class Handler(BaseHTTPRequestHandler):
             _full = (self._local_files_map() or {}).get(_base)
             _url = self._entry_url(_full) if _full else None
             if _url:
+                try:
+                    _m0 = state.db.song_meta_get(_base) or {}
+                    _alb1 = (_m0.get("album")
+                             or self._deezer_album_cached(
+                                 f"{artist} - {title}") or "")
+                except Exception:                           # noqa: BLE001
+                    _alb1 = ""
                 return self._json({
                     "url": _url, "in_nas": True,
                     "nas_base": _base,
-                    "artist": artist, "title": title})
+                    "artist": artist, "title": title, "album": _alb1})
         # Cold: one shared worker per key; concurrent taps/albums join it and
         # poll again instead of spawning their own yt-dlp processes. A user
         # TAP always routes through the TAP lane: if a PREWARM background job
@@ -2103,9 +2143,17 @@ class Handler(BaseHTTPRequestHandler):
                     _fail()
                     return
                 state.db.resolved_cache_put(vid, url)
+                try:
+                    album = (winner.get("album") or
+                             self._deezer_album_cached(
+                                 f"{artist} - {title}") or
+                             state.scorer.video_album(vid) or "")
+                except Exception:                       # noqa: BLE001
+                    album = ""
                 out = {"video_id": vid, "url": self._play_url(vid),
                         "thumb": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
-                       "artist": artist, "title": title,
+                        "artist": artist, "title": title,
+                        "album": album,
                        # The ACTUAL resolved media identity (what will play), so
                        # the app can key lyrics/album by the real video instead of
                        # the discovery identity (metadata fix for internet items).
@@ -2158,9 +2206,15 @@ class Handler(BaseHTTPRequestHandler):
             if not vid:
                 return {"kind": "unknown", "url": url}
             artist, title = self._yt_video_meta(vid)
+            try:
+                album = (self._deezer_album_cached(
+                    f"{artist} - {title}") or "") if artist and title else ""
+            except Exception:                           # noqa: BLE001
+                album = ""
             return {
                 "kind": "youtube", "video_id": vid,
                 "artist": artist or "", "title": title or "",
+                "album": album,
                 "url": f"https://music.youtube.com/watch?v={vid}",
             }
         # ---- Spotify track
@@ -2234,9 +2288,23 @@ class Handler(BaseHTTPRequestHandler):
                         except Exception:                    # noqa: BLE001
                             pass
                 if artist and title:
+                    if not image:
+                        # Spotify art dead here (scrape 404 + getTrack
+                        # GenericError, e.g. bXfP9D6XFNA): Deezer cover
+                        # instead of "" so the app isn't left gradient-only.
+                        try:
+                            image = self._deezer_cover_cached(
+                                f"{artist} - {title}") or ""
+                        except Exception:                    # noqa: BLE001
+                            image = ""
+                    try:
+                        album = (self._deezer_album_cached(
+                            f"{artist} - {title}") or "")
+                    except Exception:                        # noqa: BLE001
+                        album = ""
                     return {
                         "kind": "spotify", "artist": artist, "title": title,
-                        "image": image or "",
+                        "album": album, "image": image or "",
                         "url": f"https://open.spotify.com/track/{tid}",
                     }
                 # Track genuinely unresolvable anonymously (removed / not in
@@ -2264,6 +2332,10 @@ class Handler(BaseHTTPRequestHandler):
             d = s.get("videoDetails") or {}
             title = (d.get("title") or "").strip()
             artist = (d.get("author") or "").strip()
+            # Auto-generated Topic videos report "Artist - Topic": strip it
+            # so Deezer album/cover lookups verify against the real artist.
+            if artist.lower().endswith(" - topic"):
+                artist = artist[: -len(" - topic")].strip()
             if artist or title:
                 try:
                     self.state.db.misc_put("ytm:" + video_id,
@@ -2657,7 +2729,14 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 if isinstance(v, dict) and v.get("video_id") == video_id \
                         and v.get("url"):
-                    return v["url"]
+                    _u = v["url"]
+                    # ry:/rz: rows store the RELAY url (_play_url), not the
+                    # googlevideo direct url — relaying that self-requests
+                    # (404/loop -> instant 502 for every vid). Only reuse
+                    # real direct urls here; else fall through to fresh yt-dlp.
+                    if "googlevideo.com/" in _u:
+                        return _u
+                    continue
         except Exception:                               # noqa: BLE001
             return None
         return None
@@ -4682,6 +4761,23 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:                               # noqa: BLE001
             pass
         return cover or None
+
+    def _deezer_album_cached(self, base_name):
+        """Deezer album title for one 'Artist - Title', cached 7 days
+        (dz:album:). Misses negative-cache as '' so they don't refetch."""
+        key = "dz:album:" + self._norm(base_name or "")
+        got = self.state.db.misc_get(key, 7 * 86400)
+        if got is not None:
+            return got or None
+        try:
+            album = self.state.scorer._deezer_album(base_name) or ""
+        except Exception:                               # noqa: BLE001
+            album = ""
+        try:
+            self.state.db.misc_put(key, album)
+        except Exception:                               # noqa: BLE001
+            pass
+        return album or None
 
     def _spotify_album_image_cached(self, artist, album):
         """Spotify album cover, cached 7 days. Returns image URL or None."""

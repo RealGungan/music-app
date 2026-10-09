@@ -148,6 +148,7 @@ class Scorer:
                     video_id=vid, duration_s=int(dur or 0),
                     title=r.get("title", ""), channel=artists,
                     uploader="", views=0,
+                    album=((r.get("album") or {}).get("name") or ""),
                 ))
             return out
         except Exception as ex:                       # noqa: BLE001
@@ -208,6 +209,33 @@ class Scorer:
             if c["video_id"] not in seen:
                 out.append(c)
         return out
+
+    def video_album(self, video_id):
+        """Best-effort album title for a YouTube video_id (no download).
+        YTMusic meta first (fast), yt-dlp %(album)s second. Returns ""."""
+        try:
+            from ytmusicapi import YTMusic
+            s = YTMusic().get_song(video_id) or {}
+            for k in ("videoDetails", "microformat", "microFormat"):
+                d = s.get(k) or {}
+                for ak in ("album", "albumName"):
+                    a = d.get(ak)
+                    if isinstance(a, dict):
+                        a = a.get("name") or a.get("title") or ""
+                    if a:
+                        return str(a)
+        except Exception:                               # noqa: BLE001
+            pass
+        try:
+            r = self.ytdlp(
+                ["--skip-download", "--print", "%(album)s",
+                 f"https://www.youtube.com/watch?v={video_id}"],
+                timeout=30)
+            a = (r.stdout or "").strip().splitlines()
+            a = a[-1].strip() if a else ""
+            return "" if a.lower() in ("", "na", "none") else a
+        except Exception:                               # noqa: BLE001
+            return ""
 
     def resolve_url(self, video_id, timeout=120):
         """Direct streamable URL (googlevideo) for instant playback.
@@ -1167,13 +1195,9 @@ class Scorer:
         return out
 
 
-    def _deezer_cover(self, base_name):
-        """Best-effort Deezer album art for a track by 'Artist - Title'.
-
-        YouTube candidate titles carry '(Official Video)'-style suffixes
-        that make a literal `search?q=<full string>&limit=1` return nothing,
-        so clean the title and verify the artist over the top hits instead
-        of blindly taking hit #1."""
+    def _deezer_track_match(self, base_name):
+        """First Deezer /search hit matching 'Artist - Title' (same
+        suffix-strip + artist-verify as covers). Returns the track dict."""
         import re as _re
         import unicodedata as _ud
         parts = (base_name or "").split(" - ", 1)
@@ -1206,19 +1230,38 @@ class Scorer:
             for e in (data.get("data") if data else None) or []:
                 ea = _nx((e.get("artist") or {}).get("name"))
                 et = _nx(e.get("title_short") or e.get("title"))
-                cov = (e.get("album") or {}).get("cover_big")
-                if not cov:
-                    continue
                 if artist and ea != want_a:
                     continue
                 if fallback is None:
-                    fallback = cov
+                    fallback = e
                 if et and want_t and (et == want_t or want_t in et
                                       or et in want_t):
-                    return cov
+                    return e
             if fallback:
                 return fallback
         return None
+
+    def _deezer_album(self, base_name):
+        """Best-effort Deezer album title for 'Artist - Title' or None."""
+        try:
+            e = self._deezer_track_match(base_name)
+            return ((e.get("album") or {}).get("title") or None) if e else None
+        except Exception:                               # noqa: BLE001
+            return None
+
+    def _deezer_cover(self, base_name):
+        """Best-effort Deezer album art for a track by 'Artist - Title'.
+
+        YouTube candidate titles carry '(Official Video)'-style suffixes
+        that make a literal `search?q=<full string>&limit=1` return nothing,
+        so clean the title and verify the artist over the top hits instead
+        of blindly taking hit #1."""
+        try:
+            e = self._deezer_track_match(base_name)
+            return ((e.get("album") or {}).get("cover_big") or None) \
+                if e else None
+        except Exception:                               # noqa: BLE001
+            return None
 
     def _deezer_get(self, url, timeout=12):
         import urllib.request
