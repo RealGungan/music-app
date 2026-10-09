@@ -155,7 +155,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.277"
+APP_VERSION = "1.0.279"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -606,6 +606,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.command == "GET":
                 payload = []
                 for base, _full, url, meta in self._suggest_index():
+                    if not self._lib_visible(base, self._me()):
+                        continue
                     payload.append({
                         "base_name": base,
                         "url": url,
@@ -927,6 +929,24 @@ class Handler(BaseHTTPRequestHandler):
                     return self._error(400, "bad ids")
                 ok = self.state.db.mark_user_errors_seen(user, ids or None)
                 return self._json({"ok": ok})
+
+        # ---- /api/flags (feature flags in DB; default OFF; rollback = off).
+        # GET: anyone authed reads. POST {per_user_libs: bool}: owner only.
+        if seg == "flags" and parts[1:] == []:
+            if self.command == "GET":
+                return self._json({
+                    "per_user_libs": self._per_user_libs()})
+            if self.command == "POST":
+                if self._me() != self.LEGACY_USER:
+                    return self._error(403, "owner only")
+                body = self._body_json() or {}
+                if "per_user_libs" not in body:
+                    return self._error(400, "missing per_user_libs")
+                self.state.db.flag_put(
+                    "per_user_libs", bool(body.get("per_user_libs")))
+                type(self)._owner_map_cache = (0.0, {})
+                return self._json({
+                    "per_user_libs": self._per_user_libs()})
 
         # ---- /api/innas (does this artist+title exist on the NAS? — used by
         # the queue to prefer the NAS copy of an internet song, bug O)
@@ -1265,6 +1285,8 @@ class Handler(BaseHTTPRequestHandler):
         ar_norm = self._norm(art) if art else ""
         scored_local = []
         for base, full in local_idx.items():
+            if not self._lib_visible(base, self._me()):
+                continue
             hay = self._norm(base)
             hits = sum(1 for t in token_norms if t in hay)
             if not hits:
@@ -1788,6 +1810,8 @@ class Handler(BaseHTTPRequestHandler):
             ar_norm = self._norm(
                 qq.split(" - ", 1)[0].strip()) if " - " in qq else ""
             for base, full, url, meta in self._suggest_index():
+                if not self._lib_visible(base, self._me()):
+                    continue
                 hay = self._norm(base)
                 hits = sum(1 for t in token_norms if t in hay)
                 if not hits:
@@ -1825,6 +1849,8 @@ class Handler(BaseHTTPRequestHandler):
                 qq.split(" - ", 1)[1]) if " - " in qq else self._norm_core(qq)
             seen_bases = {s[1] for s in scored}
             for base, full, url, meta in self._suggest_index():
+                if not self._lib_visible(base, self._me()):
+                    continue
                 if base in seen_bases:
                     continue
                 t = 0
@@ -3194,6 +3220,42 @@ class Handler(BaseHTTPRequestHandler):
         """base_name -> full path, for every audio file we can play."""
         return self.state.local_mp3_index()
 
+    _owner_map_cache = (0.0, {})
+
+    def _per_user_libs(self):
+        """Visibility split on? Env default OFF; DB flag wins when set."""
+        try:
+            if getattr(self.state.config, "per_user_libs", False):
+                return True
+            return bool(self.state.db.flag_get("per_user_libs", False))
+        except Exception:                                # noqa: BLE001
+            return False
+
+    def _cached_owner_map(self):
+        now = time.time()
+        ts, cached = type(self)._owner_map_cache
+        if now - ts < 30 and cached is not None:
+            return cached
+        try:
+            m = self.state.db.owner_map()
+        except Exception:                                # noqa: BLE001
+            m = {}
+        type(self)._owner_map_cache = (now, m)
+        return m
+
+    def _lib_visible(self, base, user):
+        """Visibility-only gate (never deletes). Flag OFF = all visible.
+        Flag ON = legacy owner='' visible to all, else only the uploader."""
+        if not self._per_user_libs():
+            return True
+        try:
+            owner = (self._cached_owner_map().get(base) or "")
+        except Exception:                                # noqa: BLE001
+            return True
+        if not owner:
+            return True
+        return owner == (user or "")
+
     # ------------------------------------------------ in-nas lookup (O)
     @staticmethod
     def _innas_score(q_ar, q_ti, q_both, b_ar_c, b_ti_c, base_norm):
@@ -3258,8 +3320,10 @@ class Handler(BaseHTTPRequestHandler):
         state = self.state
         ar = (artist or "").strip()
         ti = (title or "").strip()
-        key = "innas:{}\x00{}".format(
-            self._norm_core(ar), self._norm_core(ti))
+        me = self._me() or ""
+        scope = me if self._per_user_libs() else ""
+        key = "innas:{}\x00{}\x00{}".format(
+            self._norm_core(ar), self._norm_core(ti), scope)
         got = state.db.misc_get(key, 2 * 3600)
         if got is not None:
             return got
@@ -3269,6 +3333,8 @@ class Handler(BaseHTTPRequestHandler):
         best = None
         best_score = -1
         for base, _full, url, meta in self._suggest_index():
+            if not self._lib_visible(base, me or None):
+                continue
             if " - " in base:
                 b_ar, b_ti = base.split(" - ", 1)
                 b_ar_c = self._norm_core(b_ar)
@@ -3346,6 +3412,8 @@ class Handler(BaseHTTPRequestHandler):
         best = None
         best_score = -1
         for base in self.state.local_mp3_index():
+            if not self._lib_visible(base, self._me()):
+                continue
             if " - " in base:
                 b_ar, b_ti = base.split(" - ", 1)
                 b_ar_c = self._norm_core(b_ar)
@@ -4554,6 +4622,8 @@ class Handler(BaseHTTPRequestHandler):
             return False
 
         for bn, full in idx.items():
+            if not self._lib_visible(bn, self._me()):
+                continue
             lead = bn.split(" - ", 1)[0].strip() if " - " in bn else bn
             meta = self.state.db.song_meta_get(bn)
             if not fits((meta or {}).get("artist"),
@@ -4806,6 +4876,8 @@ class Handler(BaseHTTPRequestHandler):
             seen.add(ck)
             bn = base or f"{ar} - {ti}"
             full = local_idx.get(bn)
+            if full is not None and not self._lib_visible(bn, self._me()):
+                full = None
             owned = full is not None or (
                 self._innas_lenient(ar, ti) is not None)
             if full is None and owned:

@@ -65,6 +65,12 @@ class Config:
         # signup. Rotate it there to cut off old shares (existing sessions
         # and users are unaffected).
         self.invite_code = pick("INVITE_CODE", "")
+        # Per-user libraries (visibility-only split of the shared library).
+        # Default OFF; DB flag `flag:per_user_libs` (owner toggle) wins when
+        # set. Rollback = flag off (or env 0). Nothing is ever deleted.
+        self.per_user_libs = str(
+            pick("PER_USER_LIBS", "0")).strip().lower() in (
+                "1", "true", "yes", "on")
         # Spotify app credentials (bare SPOTIFY_* names also accepted).
         # Secret never leaves the NAS.
         import os as _os

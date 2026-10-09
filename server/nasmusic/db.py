@@ -190,6 +190,33 @@ class Database:
                 "ORDER BY updated_at DESC", (status,))
         return self.query("SELECT * FROM downloads ORDER BY updated_at DESC")
 
+    def owner_map(self):
+        """base_name -> owner (uploader) for file-visibility filtering.
+
+        Legacy rows carry owner='' (visible to all when per-user libs
+        are on). Single cheap query; callers cache briefly."""
+        try:
+            return {r["base_name"]: (r["owner"] or "")
+                    for r in self.query(
+                        "SELECT base_name, owner FROM downloads")}
+        except Exception:                                # noqa: BLE001
+            return {}
+
+    def flag_get(self, name, default=False):
+        """Persistent feature flag (webcache, never expires). OFF unless set."""
+        try:
+            got = self.misc_get("flag:" + str(name), 0)
+        except Exception:                                # noqa: BLE001
+            return default
+        if got is None:
+            return default
+        if isinstance(got, dict) and "v" in got:
+            return bool(got["v"])
+        return bool(got)
+
+    def flag_put(self, name, value):
+        self.misc_put("flag:" + str(name), {"v": bool(value)})
+
     def log_user_error(self, username, section, message):
         """Persist a per-user error row (developer viewer). Cap 200/user."""
         try:
