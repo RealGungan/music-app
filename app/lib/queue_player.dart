@@ -83,12 +83,35 @@ class QueueItem {
   });
 }
 
+/// Instant placeholder for a Spotify /track/ deep-link parse ([OpenLink]
+/// from /api/open-url): plays immediately; the engine fills the stream URL
+/// (+ resolvname album) lazily via [QueueItem.resolveName]. [art] is the
+/// already-proxied cover (open-url image, null when unknown). Single
+/// construction site for deep-link rows so parse->item is unit-testable.
+QueueItem spotifyDeepLinkItem(OpenLink info, {String? art}) {
+  return QueueItem(
+    '${info.artist} - ${info.title}',
+    '',
+    resolveName: (artist: info.artist, title: info.title),
+    fromInternet: true,
+    lyricsArtist: info.artist,
+    lyricsTitle: info.title,
+    thumbUrl: art,
+    album: info.album,
+    albumImage: art,
+  );
+}
+
 /// Turns a discovery [videoId] into a direct streamable audio URL.
 typedef UrlResolver = Future<String> Function(String videoId);
 
-/// Turns an [artist]+[title] pair into a direct streamable audio URL (for
-/// online album/artist rows that have no video id yet).
-typedef NameResolver = Future<String> Function(String artist, String title);
+/// Turns an [artist]+[title] pair into a streamable URL + art (for
+/// online album/artist rows that have no video id yet). Returns url + thumb
+/// so the lazy resolve can attach the resolvename hqdefault cover instead
+/// of dropping it (null art -> gradient).
+typedef NameResolver =
+    Future<({String url, String thumb, String? videoId, String? album})>
+    Function(String artist, String title);
 
 /// Turns an [artist]+[title] pair into a NAS file URL (or null when the NAS
 /// has no exact copy). Bounded by callers — the engine caps it at 2s so a
@@ -102,12 +125,21 @@ typedef NasLookup = Future<String?> Function(String artist, String title);
 /// tail arriving late — accepting it flashes the previous song's timestamp.
 /// Normal advance, small rewinds, and heal seek-backs (all within
 /// maxAccepted + 3s) pass; genuine user seeks pass via the seek match.
+/// A late tail can only arrive shortly after the new load started, so a
+/// far-ahead tick landing long after ([loadAt] + [window]) is genuine
+/// background progress (the handler kept playing while the UI slept) and
+/// passes: dropping it freezes the clock forever (_posMax never advances,
+/// so every later tick drops too — the frozen-timestamp class).
+const staleTailWindow = Duration(seconds: 10);
+
 bool dropStalePositionTick({
   required Duration tick,
   required Duration maxAccepted,
   required Duration? seekTarget,
   required DateTime seekAt,
   required DateTime now,
+  required DateTime loadAt,
+  Duration window = staleTailWindow,
 }) {
   if (tick <= maxAccepted + const Duration(seconds: 3)) return false;
   if (seekTarget != null &&
@@ -115,6 +147,7 @@ bool dropStalePositionTick({
       (tick - seekTarget).abs() <= const Duration(seconds: 2)) {
     return false;
   }
+  if (now.difference(loadAt) > window) return false;
   return true;
 }
 
@@ -157,6 +190,50 @@ bool healResumeAllowed({
   required bool pauseIntent,
 }) =>
     wasPlaying && !pauseIntent;
+
+/// Skin truth mapping (pure, unit-tested): the play/pause skin reads the
+/// NATIVE player state-stream as sole truth. Any start (playing) shows the
+/// pause icon; ANY stoppage by any means (paused/stopped/completed/disposed)
+/// shows the play icon; buffering/null keeps the last icon (spinner covers
+/// the wait, delayed past 800ms only).
+bool skinShowsPlaying(PlayerState? state, {required bool lastPlaying}) {
+  if (state == null) return lastPlaying;
+  return state == PlayerState.playing;
+}
+
+/// Watchdog comparator (pure, unit-tested): true when the rendered skin
+/// disagrees with direct native truth — catches stream-subscription death,
+/// dual-engine divergence, stale selector, whatever the cause.
+bool skinMismatch({required bool skinShows, required bool nativePlaying}) =>
+    skinShows != nativePlaying;
+
+/// skin-mismatch log line: kind/state/expected for logClientError.
+String skinMismatchMessage({
+  required bool skinShows,
+  required bool nativePlaying,
+  required String engine,
+  required String handler,
+}) =>
+    'skin=${skinShows ? 'playing' : 'paused'} '
+    'expected=${nativePlaying ? 'playing' : 'paused'} '
+    'engine=$engine handler=$handler';
+
+/// Stall-detector verdict (pure, unit-tested): compares the engine's CLAIM
+/// against NATIVE position movement. Either direction of lie is corrected —
+/// playing-with-frozen-clock paints paused, paused-with-moving-clock paints
+/// playing — so the skin can never strand on the wrong icon by construction.
+enum StallFix { none, toPaused, toPlaying }
+
+StallFix stallAudit({
+  required bool enginePlaying,
+  required bool posAdvanced,
+  required bool loading,
+}) {
+  if (loading) return StallFix.none;
+  if (enginePlaying && !posAdvanced) return StallFix.toPaused;
+  if (!enginePlaying && posAdvanced) return StallFix.toPlaying;
+  return StallFix.none;
+}
 
 /// App-wide playback queue with shuffle — the "streaming engine".
 class QueuePlayer {
@@ -224,6 +301,7 @@ class QueuePlayer {
         seekTarget: _userSeekTarget,
         seekAt: _userSeekAt,
         now: now,
+        loadAt: _lastPlayStartAt,
       )) {
         return;
       }
@@ -240,8 +318,12 @@ class QueuePlayer {
     });
     _player.onPlayerStateChanged.listen((s) {
       _lastPlayerState = s;
+      // Sole writer of the skin truth: bool and stream can never split.
+      playingN.value = s == PlayerState.playing;
+      // Any settled native state clears the buffering spinner; playing also
+      // confirms audio so the deferred autoplay top-up re-arms now.
+      _setLoading(false);
       if (s == PlayerState.playing) {
-        _setLoading(false);
         // Single-item starts defer their refill until audio is confirmed —
         // this IS the confirmation, so re-arm the top-up now.
         unawaited(_maybeAutoplay());
@@ -333,6 +415,50 @@ class QueuePlayer {
         _healCurrent(reason: 'stall');
       }
     });
+    // Stall detector: the engine CLAIM vs NATIVE clock, sampled every 3s.
+    // A frozen clock under a playing claim (dead socket with no complete/
+    // error) — or a moving clock under a paused claim (lost resume event) —
+    // re-feeds the native truth through the state stream, which is the
+    // skin's sole source, so the lie corrects itself within one tick.
+    // Repaint-only: the handler keeps actual audio state, so a false
+    // positive self-reverses on the next tick instead of killing sound.
+    _auditTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+        _auditPos = position.value;
+        return;
+      }
+      if (items.isEmpty || index < 0 || index >= items.length) {
+        _auditPos = position.value;
+        return;
+      }
+      final pos = position.value;
+      final advanced = pos != _auditPos;
+      _auditPos = pos;
+      final fix = stallAudit(
+        enginePlaying: _player.isPlaying,
+        posAdvanced: advanced,
+        loading: loading.value,
+      );
+      if (fix == StallFix.none) return;
+      // Slow-start guard (mirrors the watchdog): a frozen clock <20s after
+      // play() is buffering, not a stall.
+      if (fix == StallFix.toPaused &&
+          DateTime.now().difference(_lastPlayStartAt).inSeconds < 20) {
+        return;
+      }
+      final p = _player;
+      if (p is! RemoteEngine) return;
+      p.feedRemoteEvent({
+        'ev': 'state',
+        's': fix == StallFix.toPaused ? 'paused' : 'playing',
+      });
+      final msg =
+          'stall-corrected -> ${fix == StallFix.toPaused ? 'paused' : 'playing'} '
+          'pos=${pos.inSeconds}s idx=$index "${items[index].title}"';
+      debugPrint('[queue] $msg');
+      DiagLog.restart.log(msg);
+      report('stall-corrected', msg);
+    });
     // Background auto-advance: the handler isolate starts the pre-pushed
     // next track on its own when this isolate sleeps (screen off). Adopt
     // it here — move state, never touch playback (it's already playing).
@@ -347,9 +473,9 @@ class QueuePlayer {
   static PlaybackEngine _createEngine() {
     if (defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS) {
-      return RemoteEngine();
+      return buildSingleEngine(remote: true);
     }
-    return LocalEngine();
+    return buildSingleEngine(remote: false);
   }
 
   final PlaybackEngine _player = _createEngine();
@@ -509,6 +635,13 @@ class QueuePlayer {
   Duration _watchPos = Duration.zero;
   DateTime _watchSince = DateTime.now();
 
+  /// Stall-detector baseline: native position at the last 3s audit tick.
+  // App-lifetime audit (singleton player); never cancelled.
+  // ignore: unused_field
+  // ignore: unused_field — held so the audit lives as long as the app.
+  Timer? _auditTimer;
+  Duration _auditPos = Duration.zero;
+
   bool _shuffle = false;
 
   /// Set by discovery UI so resolve placeholders can be resolved lazily.
@@ -527,8 +660,18 @@ class QueuePlayer {
   /// NAS hits require an EXACT normCore match (the tolerant server check
   /// used to hand back same-artist different songs).
   void wireTapResolvers(ApiClient api) {
-    nameResolver = (artist, title) async =>
-        (await api.resolveByName(artist: artist, title: title)).url;
+    nameResolver = (artist, title) async {
+      final r = await api.resolveByName(artist: artist, title: title);
+      return (
+        url: r.url,
+        // ponytail: proxied thumb; raw hqdefault works too but drops ?token=
+        thumb: r.thumb.isNotEmpty && r.videoId.isNotEmpty
+            ? api.thumbUrl(r.videoId)
+            : '',
+        videoId: r.videoId.isNotEmpty ? r.videoId : null,
+        album: r.album,
+      );
+    };
     nasLookup = (artist, title) async {
       try {
         final nas = await api
@@ -638,7 +781,7 @@ class QueuePlayer {
     final g = _playGen;
     _loadingTimer = Timer(kSpinnerDelay, () {
       if (g == _playGen && _lastPlayerState != PlayerState.playing) {
-        _setLoading(true);
+        loading.value = true;
       }
     });
   }
@@ -648,6 +791,12 @@ class QueuePlayer {
   final ValueNotifier<Duration> trackDuration = ValueNotifier(Duration.zero);
   final ValueNotifier<double> progressFractionNotifier = ValueNotifier(0);
   final ValueNotifier<int> queueLength = ValueNotifier(0);
+  /// THE play/pause skin truth. One object, owned here: every play button
+  /// (full, mini) listens to this and nothing else. Written only by the
+  /// native state-stream listener below (+ the handler-advanced adoption,
+  /// which is an implicit playing event) — never seeded from a cached bool,
+  /// never snapshotted per-button, so two buttons can never disagree.
+  final ValueNotifier<bool> playingN = ValueNotifier(false);
   // True while onResumed/toggle re-queries handler truth. Play buttons
   // gate on this (spinner/disabled) so no tap lands on a stale icon.
   final ValueNotifier<bool> stateSyncing = ValueNotifier(false);
@@ -1048,6 +1197,26 @@ class QueuePlayer {
       DebugInfo.pause('err $e');
       throw e;
     });
+  }
+
+  /// Transport-pause from the media session (BT headset / car wheel /
+  /// notification button): it bypasses pause(), so latch the intent + bump
+  /// the heal token here — otherwise the heal loop auto-resumes over a BT
+  /// pause within seconds. Same latch, no engine command (the handler
+  /// already paused its player; re-sending would loop back here).
+  void onTransportPause() {
+    _pausedIntent = true;
+    _healGen++;
+    DebugInfo.pause('transport');
+    report('pause-fire', 'transport pause');
+  }
+
+  /// Transport-play from the media session: clear the latch so heals may
+  /// resume again (a stuck latch blocks every heal-resume after a BT play).
+  void onTransportResume() {
+    _pausedIntent = false;
+    DebugInfo.resume('transport');
+    report('resume-fire', 'transport play');
   }
 
   Future<void> resume() {
@@ -1547,29 +1716,37 @@ class QueuePlayer {
         var rn = item.resolveName!;
         // The tapped song is resolved by the caller, so it already has a real
         // URL; only rows further down the album need the lazy lookup.
-        url = await nameResolver!(
+        final res = await nameResolver!(
           rn.artist,
           rn.title,
         ).timeout(const Duration(seconds: 10));
+        url = res.url;
         if (gen != _playGen) return null;
         final idx = items.indexOf(item);
         if (idx < 0 || !identical(items[idx], item)) return null;
+        final hasArt = (item.thumbUrl?.isNotEmpty ?? false);
         items[idx] = QueueItem(
           item.title,
           url,
-          thumbUrl: item.thumbUrl,
+          thumbUrl: hasArt ? item.thumbUrl : (res.thumb.isNotEmpty ? res.thumb : null),
           baseName: item.baseName,
-          videoId: item.videoId,
+          videoId: item.videoId ?? res.videoId,
           // Preserve re-resolve keys (see above): replay must be able to
           // fetch a fresh URL instead of reusing a dead stored one.
           resolveName: item.resolveName,
           manuallyPlaced: item.manuallyPlaced,
           fromInternet: item.fromInternet,
-          album: item.album,
+          album: res.album ?? item.album,
           albumImage: item.albumImage,
           lyricsArtist: item.lyricsArtist,
           lyricsTitle: item.lyricsTitle,
         );
+        // Late fill (album/url art arrived after first build, same title):
+        // ping title listeners so Now Playing + lock-screen metadata pick
+        // up item.album without a track switch (same value still notifies).
+        // Without this an album-less deep-link placeholder keeps its null
+        // album forever and the album button never renders.
+        currentTitle.notifyListeners();
       }
       return url;
     } catch (_) {
@@ -2465,7 +2642,10 @@ class QueuePlayer {
     // The handler advanced on its own = audio IS flowing (it can't advance
     // a paused track). Mark it so the single-item refill gate below doesn't
     // mistake a stale UI-isolate state for "audio unconfirmed".
+    // handler-advanced adoption: an implicit playing event, so it writes
+    // the skin truth too (co-writer with the state listener only).
     _lastPlayerState = PlayerState.playing;
+    playingN.value = true;
     _prefetchNext();
     _maybeAutoplay();
     _refreshEngineNext();
@@ -2508,20 +2688,24 @@ class QueuePlayer {
     } else if (it.resolveName != null && nameResolver != null) {
       final rn = it.resolveName!;
       nameResolver!(rn.artist, rn.title)
-          .then((u) {
+          .then((res) {
             if (n < items.length && identical(items[n], it)) {
+              final warmArt = (it.thumbUrl?.isNotEmpty ?? false);
               items[n] = QueueItem(
                 it.title,
-                u,
-                thumbUrl: it.thumbUrl,
+                res.url,
+                thumbUrl: warmArt
+                    ? it.thumbUrl
+                    : (res.thumb.isNotEmpty ? res.thumb : null),
                 baseName: it.baseName,
-                videoId: it.videoId,
+                videoId: it.videoId ?? res.videoId,
                 // Same preservation as above: dropping these loses
-                // re-resolvability and art/album on replay.
+                // re-resolvability and art/album on replay. Backfilled
+                // resolvname album wins; never overwrite with null.
                 resolveName: it.resolveName,
                 manuallyPlaced: it.manuallyPlaced,
                 fromInternet: it.fromInternet,
-                album: it.album,
+                album: res.album ?? it.album,
                 albumImage: it.albumImage,
                 lyricsArtist: it.lyricsArtist,
                 lyricsTitle: it.lyricsTitle,
@@ -2585,10 +2769,11 @@ class QueuePlayer {
       } else if (it.resolveName != null && nameResolver != null) {
         final rn = it.resolveName!;
         try {
-          url = await nameResolver!(
+          url = (await nameResolver!(
             rn.artist,
             rn.title,
-          ).timeout(const Duration(seconds: 10));
+          ).timeout(const Duration(seconds: 10)))
+              .url;
         } catch (_) {
           return;
         }

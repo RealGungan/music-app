@@ -155,7 +155,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.289"
+APP_VERSION = "1.0.290"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1484,7 +1484,10 @@ class Handler(BaseHTTPRequestHandler):
                     cand_art = parts[0].strip()
                     cand_title = parts[1].strip()
                 if not cand_art:
-                    cand_art = c_artist or raw_title
+                    _ch = re.sub(r"\s+-\s+topic$", "",
+                                 c.get("channel") or "",
+                                 flags=re.I).strip()
+                    cand_art = c_artist or _ch or raw_title
                 # One discovery row per DISTINCT song: a free-text query returns
                 # many uploads of the same track, and showing 8 copies of "In the
                 # End" was reading as "only NAS results" (they were also owned).
@@ -4742,12 +4745,13 @@ class Handler(BaseHTTPRequestHandler):
         out = (self.state.scorer.deezer_album_tracks_by_id(album_id)
                if album_id
                else self.state.scorer.deezer_album_tracks(artist, album)) or []
-        self.state.db.misc_put(key, out)
+        if out:
+            self.state.db.misc_put(key, out)
         return out
 
     def _deezer_cover_cached(self, base_name):
         """Deezer cover_big for one 'Artist - Title', cached 7 days
-        (dz:cover:). Misses negative-cache as '' so they don't refetch."""
+        (dz:cover:). Failures are NOT cached so transport blips retry."""
         key = "dz:cover:" + self._norm(base_name or "")
         got = self.state.db.misc_get(key, 7 * 86400)
         if got is not None:
@@ -4756,15 +4760,16 @@ class Handler(BaseHTTPRequestHandler):
             cover = self.state.scorer._deezer_cover(base_name) or ""
         except Exception:                               # noqa: BLE001
             cover = ""
-        try:
-            self.state.db.misc_put(key, cover)
-        except Exception:                               # noqa: BLE001
-            pass
+        if cover:
+            try:
+                self.state.db.misc_put(key, cover)
+            except Exception:                           # noqa: BLE001
+                pass
         return cover or None
 
     def _deezer_album_cached(self, base_name):
         """Deezer album title for one 'Artist - Title', cached 7 days
-        (dz:album:). Misses negative-cache as '' so they don't refetch."""
+        (dz:album:). Failures are NOT cached so transport blips retry."""
         key = "dz:album:" + self._norm(base_name or "")
         got = self.state.db.misc_get(key, 7 * 86400)
         if got is not None:
@@ -4773,10 +4778,11 @@ class Handler(BaseHTTPRequestHandler):
             album = self.state.scorer._deezer_album(base_name) or ""
         except Exception:                               # noqa: BLE001
             album = ""
-        try:
-            self.state.db.misc_put(key, album)
-        except Exception:                               # noqa: BLE001
-            pass
+        if album:
+            try:
+                self.state.db.misc_put(key, album)
+            except Exception:                           # noqa: BLE001
+                pass
         return album or None
 
     def _spotify_album_image_cached(self, artist, album):
