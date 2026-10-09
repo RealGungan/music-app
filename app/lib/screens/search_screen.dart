@@ -573,6 +573,38 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
+  /// "Artist - Title" split helpers for NAS rows (baseName only).
+  static String libArtist(String baseName) {
+    final i = baseName.indexOf(' - ');
+    return i > 0 ? baseName.substring(0, i).trim() : '';
+  }
+
+  void _openArtistPage(String name) {
+    name = name.trim();
+    if (name.isEmpty) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ArtistScreen(api: widget.api, name: name),
+      ),
+    );
+  }
+
+  void _openAlbumPage(String artist, String? album, [String? cover]) {
+    artist = artist.trim();
+    album = (album ?? '').trim();
+    if (artist.isEmpty || album.isEmpty) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => AlbumScreen(
+          api: widget.api,
+          artist: artist,
+          album: album!,
+          coverImage: (cover?.isNotEmpty ?? false) ? cover : null,
+        ),
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _debounce?.cancel();
@@ -814,9 +846,38 @@ class _SearchScreenState extends State<SearchScreen> {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.play_arrow),
-                          onPressed: () => _playLibrary(t),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if ((t.album ?? '').trim().isNotEmpty)
+                              IconButton(
+                                visualDensity: VisualDensity.compact,
+                                icon: const Icon(Icons.album_outlined,
+                                    size: 20),
+                                tooltip: tr('Albums'),
+                                onPressed: () => _openAlbumPage(
+                                  libArtist(t.baseName).isNotEmpty
+                                      ? libArtist(t.baseName)
+                                      : t.folder,
+                                  t.album,
+                                ),
+                              ),
+                            IconButton(
+                              visualDensity: VisualDensity.compact,
+                              icon: const Icon(Icons.person_outline,
+                                  size: 20),
+                              tooltip: tr('Artist'),
+                              onPressed: () => _openArtistPage(
+                                libArtist(t.baseName).isNotEmpty
+                                    ? libArtist(t.baseName)
+                                    : t.folder,
+                              ),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.play_arrow),
+                              onPressed: () => _playLibrary(t),
+                            ),
+                          ],
                         ),
                         onTap: () => _playLibrary(t),
                       ),
@@ -937,7 +998,13 @@ class _SearchScreenState extends State<SearchScreen> {
                     if (songSugs.isNotEmpty) ...[
                       _sectionHeader(tr('Suggestions')),
                       for (final s in songSugs)
-                        GestureDetector(
+                        Builder(
+                          builder: (context) {
+                            final sugArtist = (s.artist ?? '').trim().isNotEmpty
+                                ? s.artist!.trim()
+                                : libArtist(s.baseName);
+                            final sugAlbum = (s.album ?? '').trim();
+                            return GestureDetector(
                           behavior: HitTestBehavior.opaque,
                           onLongPress: () => _showSongContext(
                             queueItem: _queueItemFromSuggestion(s),
@@ -989,15 +1056,41 @@ class _SearchScreenState extends State<SearchScreen> {
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                   ),
-                            trailing: IconButton(
-                              icon: Icon(
-                                Icons.play_arrow,
-                                color: s.isOnline ? Spots.green : null,
-                              ),
-                              onPressed: () => _playSuggestion(s),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (sugAlbum.isNotEmpty &&
+                                    sugArtist.isNotEmpty)
+                                  IconButton(
+                                    visualDensity: VisualDensity.compact,
+                                    icon: const Icon(Icons.album_outlined,
+                                        size: 20),
+                                    tooltip: tr('Albums'),
+                                    onPressed: () => _openAlbumPage(
+                                        sugArtist, sugAlbum),
+                                  ),
+                                if (sugArtist.isNotEmpty)
+                                  IconButton(
+                                    visualDensity: VisualDensity.compact,
+                                    icon: const Icon(Icons.person_outline,
+                                        size: 20),
+                                    tooltip: tr('Artist'),
+                                    onPressed: () =>
+                                        _openArtistPage(sugArtist),
+                                  ),
+                                IconButton(
+                                  icon: Icon(
+                                    Icons.play_arrow,
+                                    color: s.isOnline ? Spots.green : null,
+                                  ),
+                                  onPressed: () => _playSuggestion(s),
+                                ),
+                              ],
                             ),
                             onTap: () => _playSuggestion(s),
                           ),
+                        );
+                          },
                         ),
                     ],
                     const SizedBox(height: 6),

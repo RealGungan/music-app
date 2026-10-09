@@ -12,16 +12,22 @@ class LibraryTrack {
   final String baseName;
   final String folder;
   final String url;
+  final String? album;
+  final String? albumImage;
   LibraryTrack({
     required this.baseName,
     required this.folder,
     required this.url,
+    this.album,
+    this.albumImage,
   });
 
   factory LibraryTrack.fromJson(Map<String, dynamic> j) => LibraryTrack(
     baseName: j['base_name'],
     folder: j['folder'] ?? '',
     url: j['url'],
+    album: j['album']?.toString(),
+    albumImage: j['album_image']?.toString(),
   );
 }
 
