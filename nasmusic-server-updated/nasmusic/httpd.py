@@ -155,7 +155,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.270"
+APP_VERSION = "1.0.279"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -164,7 +164,7 @@ LANDING_HTML = """<!DOCTYPE html>
 <style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101010;color:#eee;font-family:system-ui,-apple-system,sans-serif;min-height:100vh;display:flex;justify-content:center;padding:24px 16px}h1{color:#1db954;margin:8px 0 4px;font-size:28px}.wrap{width:100%;max-width:480px}.sub{color:#bbb;margin:0 0 16px}.card{background:#1c1c1c;border:1px solid #2a2a2a;border-radius:14px;padding:16px;margin:0 0 12px;line-height:1.5}.step{color:#1db954;margin:8px 0 4px;font-size:28px}.btn{display:inline-block;background:#1db954;color:#06130c;font-weight:700;border-radius:10px;padding:12px 22px;text-decoration:none;margin-top:10px}</style>
 </head><body><div class="wrap">
 <h1>gungan.fm</h1><p class="sub">Private family music server. To join:</p>
-<div class="card"><span class="step">1.</span> <b>Install the app</b><br><a class="btn" href="/staging/app.apk">Download gungan.fm 1.0.16 (Android)</a></div>
+<div class="card"><span class="step">1.</span> <b>Install the app</b><br><a class="btn" href="/staging/app.apk?v=1.0.16">Download gungan.fm 1.0.16 (Android)</a></div>
 <div class="card"><span class="step">2.</span> <b>Create an account</b><br>Open the app, tap <b>Create account</b> and enter the invite code.</div>
 <div class="card"><span class="step">3.</span> <b>Log in</b><br>Sign in with your new account. Your playlists stay private to you.</div>
 </div></body></html>""".replace("1.0.16", APP_VERSION)
@@ -437,12 +437,14 @@ class Handler(BaseHTTPRequestHandler):
         # (Accept: text/html); API clients keep getting the gated JSON.
         if path == "/":
             return self._send(200, LANDING_HTML.encode("utf-8"),
-                              "text/html; charset=utf-8")
+                              "text/html; charset=utf-8",
+                              extra_headers={"Cache-Control": "no-cache"})
         wants_html = "text/html" in (
             self.headers.get("Accept") or "").lower()
         if wants_html and path in ("/staging", "/staging/"):
             return self._send(200, LANDING_HTML.encode("utf-8"),
-                              "text/html; charset=utf-8")
+                              "text/html; charset=utf-8",
+                              extra_headers={"Cache-Control": "no-cache"})
 
         # APK download for the landing page (public by design — the app
         # is useless without an account, and accounts are open anyway).
@@ -502,8 +504,10 @@ class Handler(BaseHTTPRequestHandler):
             # (log_message already redacts ?token=). Best-effort.
             try:
                 import time as _t
+                _av = (query.get("av") or [""])[0].strip()[:32]
                 self.state.db.misc_put(
-                    "lastav:" + str(authed), {"seen": int(_t.time())})
+                    "lastav:" + str(authed),
+                    {"seen": int(_t.time()), "av": _av})
             except Exception:                            # noqa: BLE001
                 pass
 
@@ -602,6 +606,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.command == "GET":
                 payload = []
                 for base, _full, url, meta in self._suggest_index():
+                    if not self._lib_visible(base, self._me()):
+                        continue
                     payload.append({
                         "base_name": base,
                         "url": url,
@@ -923,6 +929,24 @@ class Handler(BaseHTTPRequestHandler):
                     return self._error(400, "bad ids")
                 ok = self.state.db.mark_user_errors_seen(user, ids or None)
                 return self._json({"ok": ok})
+
+        # ---- /api/flags (feature flags in DB; default OFF; rollback = off).
+        # GET: anyone authed reads. POST {per_user_libs: bool}: owner only.
+        if seg == "flags" and parts[1:] == []:
+            if self.command == "GET":
+                return self._json({
+                    "per_user_libs": self._per_user_libs()})
+            if self.command == "POST":
+                if self._me() != self.LEGACY_USER:
+                    return self._error(403, "owner only")
+                body = self._body_json() or {}
+                if "per_user_libs" not in body:
+                    return self._error(400, "missing per_user_libs")
+                self.state.db.flag_put(
+                    "per_user_libs", bool(body.get("per_user_libs")))
+                type(self)._owner_map_cache = (0.0, {})
+                return self._json({
+                    "per_user_libs": self._per_user_libs()})
 
         # ---- /api/innas (does this artist+title exist on the NAS? — used by
         # the queue to prefer the NAS copy of an internet song, bug O)
@@ -1261,6 +1285,8 @@ class Handler(BaseHTTPRequestHandler):
         ar_norm = self._norm(art) if art else ""
         scored_local = []
         for base, full in local_idx.items():
+            if not self._lib_visible(base, self._me()):
+                continue
             hay = self._norm(base)
             hits = sum(1 for t in token_norms if t in hay)
             if not hits:
@@ -1784,6 +1810,8 @@ class Handler(BaseHTTPRequestHandler):
             ar_norm = self._norm(
                 qq.split(" - ", 1)[0].strip()) if " - " in qq else ""
             for base, full, url, meta in self._suggest_index():
+                if not self._lib_visible(base, self._me()):
+                    continue
                 hay = self._norm(base)
                 hits = sum(1 for t in token_norms if t in hay)
                 if not hits:
@@ -1821,6 +1849,8 @@ class Handler(BaseHTTPRequestHandler):
                 qq.split(" - ", 1)[1]) if " - " in qq else self._norm_core(qq)
             seen_bases = {s[1] for s in scored}
             for base, full, url, meta in self._suggest_index():
+                if not self._lib_visible(base, self._me()):
+                    continue
                 if base in seen_bases:
                     continue
                 t = 0
@@ -2156,15 +2186,53 @@ class Handler(BaseHTTPRequestHandler):
                     m = None
             if m:
                 tid = m.group(1)
-                artist, title, image = self._spotify_track_meta(tid)
-                if not (artist and title):
-                    # Page scrape 404s for region/account-gated tracks that
-                    # STILL play in the app. The pathfinder getTrack query is
-                    # what the web player actually uses — the anonymous token
-                    # is minted from the same MarkAir server, not the user's
-                    # session, so it mirrors the page's market exactly. It
-                    # succeeds where the <title> scrape is anti-bot-blocked.
-                    artist, title, image = self._spotify_track_meta_api(tid)
+                ck = "spm:" + tid
+                got = None
+                try:
+                    got = self.state.db.misc_get(ck, 7 * 86400)
+                except Exception:                            # noqa: BLE001
+                    got = None
+                if isinstance(got, dict) and got.get("artist") \
+                        and got.get("title"):
+                    artist, title, image = (got["artist"], got["title"],
+                                            got.get("image") or "")
+                else:
+                    # Page scrape 404s under anti-bot while getTrack needs a
+                    # token round-trip — run both at once, first good wins
+                    # (cold = max, not sum). Warm hits the spm: cache above.
+                    out = {}
+
+                    def _w(which, fn):
+                        try:
+                            out[which] = fn()
+                        except Exception:                    # noqa: BLE001
+                            out[which] = ("", "", "")
+                    ts = [threading.Thread(
+                              target=_w, args=("s", lambda:
+                                               self._spotify_track_meta(tid)),
+                              daemon=True),
+                          threading.Thread(
+                              target=_w, args=("a", lambda:
+                                               self._spotify_track_meta_api(
+                                                   tid)),
+                              daemon=True)]
+                    for t in ts:
+                        t.start()
+                    for t in ts:
+                        t.join(15)
+                    artist = title = image = ""
+                    for k in ("a", "s"):
+                        a2, t2, i2 = out.get(k) or ("", "", "")
+                        if a2 and t2:
+                            artist, title, image = a2, t2, i2
+                            break
+                    if artist and title:
+                        try:
+                            self.state.db.misc_put(
+                                ck, {"artist": artist, "title": title,
+                                     "image": image or ""})
+                        except Exception:                    # noqa: BLE001
+                            pass
                 if artist and title:
                     return {
                         "kind": "spotify", "artist": artist, "title": title,
@@ -2173,21 +2241,35 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 # Track genuinely unresolvable anonymously (removed / not in
                 # this market): tell the app so it can say so, not silently.
+                logger.warning("open-url: spotify %s unresolvable", tid)
                 return {"kind": "unknown", "url": url,
                         "unresolved": "spotify"}
             return {"kind": "unknown", "url": url}
         return {"kind": "unknown", "url": url}
 
-    @staticmethod
-    def _yt_video_meta(video_id):
+    def _yt_video_meta(self, video_id):
         """Best-effort artist+title for a video id (one YTMusic get_song call;
-        the app can still stream purely from video_id if this fails)."""
+        the app can still stream purely from video_id if this fails).
+        Cached 7d (ytm:) so repeat opens are instant."""
+        try:
+            got = self.state.db.misc_get("ytm:" + video_id, 7 * 86400)
+            if isinstance(got, dict) and (got.get("artist")
+                                          or got.get("title")):
+                return got.get("artist") or "", got.get("title") or ""
+        except Exception:                                  # noqa: BLE001
+            pass
         try:
             from ytmusicapi import YTMusic
             s = YTMusic().get_song(video_id)
             d = s.get("videoDetails") or {}
             title = (d.get("title") or "").strip()
             artist = (d.get("author") or "").strip()
+            if artist or title:
+                try:
+                    self.state.db.misc_put("ytm:" + video_id,
+                                            {"artist": artist, "title": title})
+                except Exception:                          # noqa: BLE001
+                    pass
             return artist, title
         except Exception:                                  # noqa: BLE001
             return "", ""
@@ -3138,6 +3220,42 @@ class Handler(BaseHTTPRequestHandler):
         """base_name -> full path, for every audio file we can play."""
         return self.state.local_mp3_index()
 
+    _owner_map_cache = (0.0, {})
+
+    def _per_user_libs(self):
+        """Visibility split on? Env default OFF; DB flag wins when set."""
+        try:
+            if getattr(self.state.config, "per_user_libs", False):
+                return True
+            return bool(self.state.db.flag_get("per_user_libs", False))
+        except Exception:                                # noqa: BLE001
+            return False
+
+    def _cached_owner_map(self):
+        now = time.time()
+        ts, cached = type(self)._owner_map_cache
+        if now - ts < 30 and cached is not None:
+            return cached
+        try:
+            m = self.state.db.owner_map()
+        except Exception:                                # noqa: BLE001
+            m = {}
+        type(self)._owner_map_cache = (now, m)
+        return m
+
+    def _lib_visible(self, base, user):
+        """Visibility-only gate (never deletes). Flag OFF = all visible.
+        Flag ON = legacy owner='' visible to all, else only the uploader."""
+        if not self._per_user_libs():
+            return True
+        try:
+            owner = (self._cached_owner_map().get(base) or "")
+        except Exception:                                # noqa: BLE001
+            return True
+        if not owner:
+            return True
+        return owner == (user or "")
+
     # ------------------------------------------------ in-nas lookup (O)
     @staticmethod
     def _innas_score(q_ar, q_ti, q_both, b_ar_c, b_ti_c, base_norm):
@@ -3202,8 +3320,10 @@ class Handler(BaseHTTPRequestHandler):
         state = self.state
         ar = (artist or "").strip()
         ti = (title or "").strip()
-        key = "innas:{}\x00{}".format(
-            self._norm_core(ar), self._norm_core(ti))
+        me = self._me() or ""
+        scope = me if self._per_user_libs() else ""
+        key = "innas:{}\x00{}\x00{}".format(
+            self._norm_core(ar), self._norm_core(ti), scope)
         got = state.db.misc_get(key, 2 * 3600)
         if got is not None:
             return got
@@ -3213,6 +3333,8 @@ class Handler(BaseHTTPRequestHandler):
         best = None
         best_score = -1
         for base, _full, url, meta in self._suggest_index():
+            if not self._lib_visible(base, me or None):
+                continue
             if " - " in base:
                 b_ar, b_ti = base.split(" - ", 1)
                 b_ar_c = self._norm_core(b_ar)
@@ -3290,6 +3412,8 @@ class Handler(BaseHTTPRequestHandler):
         best = None
         best_score = -1
         for base in self.state.local_mp3_index():
+            if not self._lib_visible(base, self._me()):
+                continue
             if " - " in base:
                 b_ar, b_ti = base.split(" - ", 1)
                 b_ar_c = self._norm_core(b_ar)
@@ -4498,6 +4622,8 @@ class Handler(BaseHTTPRequestHandler):
             return False
 
         for bn, full in idx.items():
+            if not self._lib_visible(bn, self._me()):
+                continue
             lead = bn.split(" - ", 1)[0].strip() if " - " in bn else bn
             meta = self.state.db.song_meta_get(bn)
             if not fits((meta or {}).get("artist"),
@@ -4750,6 +4876,8 @@ class Handler(BaseHTTPRequestHandler):
             seen.add(ck)
             bn = base or f"{ar} - {ti}"
             full = local_idx.get(bn)
+            if full is not None and not self._lib_visible(bn, self._me()):
+                full = None
             owned = full is not None or (
                 self._innas_lenient(ar, ti) is not None)
             if full is None and owned:
@@ -7675,23 +7803,31 @@ class Handler(BaseHTTPRequestHandler):
             cached = self._cover_cache.get(key)
         if cached:
             return self._redirect_or_body(*cached)
-        try:
-            req = urllib.request.Request(
-                f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
-                headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                body = resp.read(MAX_COVER_BYTES + 1)
-                ctype = resp.headers.get("Content-Type", "image/jpeg")
-            if len(body) < 64 or len(body) > MAX_COVER_BYTES:
-                return self.send_error(404, "no artwork")
-            with self._cover_cache_lock:
-                self._cover_cache[key] = (body, ctype)
-                while len(self._cover_cache) > MAX_COVER_CACHE:
-                    self._cover_cache.pop(next(iter(self._cover_cache)))
-            return self._redirect_or_body(body, ctype)
-        except Exception as ex:                       # noqa: BLE001
-            logger.info("cover vid failed: %s", str(ex)[:80])
-            return self.send_error(502, "cover fetch failed")
+        # Fallback chain: hq -> mq -> default (deleted/private videos 404
+        # some qualities but still serve others; never fail on first miss).
+        err = ""
+        for qual in ("hqdefault", "mqdefault", "default"):
+            try:
+                req = urllib.request.Request(
+                    f"https://i.ytimg.com/vi/{video_id}/{qual}.jpg",
+                    headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    body = resp.read(MAX_COVER_BYTES + 1)
+                    ctype = resp.headers.get("Content-Type", "image/jpeg")
+                if len(body) < 64 or len(body) > MAX_COVER_BYTES:
+                    err = f"{qual} bad size {len(body)}"
+                    continue
+                with self._cover_cache_lock:
+                    self._cover_cache[key] = (body, ctype)
+                    while len(self._cover_cache) > MAX_COVER_CACHE:
+                        self._cover_cache.pop(next(iter(self._cover_cache)))
+                return self._redirect_or_body(body, ctype)
+            except Exception as ex:                       # noqa: BLE001
+                err = str(ex)[:80]
+                continue
+        logger.warning("cover vid %s failed all qualities: %s", video_id,
+                       err)
+        return self.send_error(502, "cover fetch failed")
 
     def _save_cover_url(self, user, name, url):
         """Auto-cover on import: fetch url (SSRF-guarded) into the
@@ -7827,6 +7963,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(size))
         self.send_header("Content-Disposition",
                          'attachment; filename="gungan.fm.apk"')
+        self.send_header("Cache-Control", "no-cache")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         if self.command == "HEAD":
