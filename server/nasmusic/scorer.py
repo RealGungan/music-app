@@ -148,6 +148,7 @@ class Scorer:
                     video_id=vid, duration_s=int(dur or 0),
                     title=r.get("title", ""), channel=artists,
                     uploader="", views=0,
+                    album=((r.get("album") or {}).get("name") or ""),
                 ))
             return out
         except Exception as ex:                       # noqa: BLE001
@@ -208,6 +209,33 @@ class Scorer:
             if c["video_id"] not in seen:
                 out.append(c)
         return out
+
+    def video_album(self, video_id):
+        """Best-effort album title for a YouTube video_id (no download).
+        YTMusic meta first (fast), yt-dlp %(album)s second. Returns ""."""
+        try:
+            from ytmusicapi import YTMusic
+            s = YTMusic().get_song(video_id) or {}
+            for k in ("videoDetails", "microformat", "microFormat"):
+                d = s.get(k) or {}
+                for ak in ("album", "albumName"):
+                    a = d.get(ak)
+                    if isinstance(a, dict):
+                        a = a.get("name") or a.get("title") or ""
+                    if a:
+                        return str(a)
+        except Exception:                               # noqa: BLE001
+            pass
+        try:
+            r = self.ytdlp(
+                ["--skip-download", "--print", "%(album)s",
+                 f"https://www.youtube.com/watch?v={video_id}"],
+                timeout=30)
+            a = (r.stdout or "").strip().splitlines()
+            a = a[-1].strip() if a else ""
+            return "" if a.lower() in ("", "na", "none") else a
+        except Exception:                               # noqa: BLE001
+            return ""
 
     def resolve_url(self, video_id, timeout=120):
         """Direct streamable URL (googlevideo) for instant playback.

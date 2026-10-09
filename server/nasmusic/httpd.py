@@ -2146,7 +2146,8 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     album = (winner.get("album") or
                              self._deezer_album_cached(
-                                 f"{artist} - {title}") or "")
+                                 f"{artist} - {title}") or
+                             state.scorer.video_album(vid) or "")
                 except Exception:                       # noqa: BLE001
                     album = ""
                 out = {"video_id": vid, "url": self._play_url(vid),
