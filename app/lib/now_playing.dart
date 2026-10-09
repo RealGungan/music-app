@@ -1719,8 +1719,11 @@ class _MetaSectionState extends State<_MetaSection> {
     // Internet/autoplay rows carry album + resolved identity directly on the
     // item; metainfo only covers library files. Fall back so the album still
     // shows on the Now Playing screen.
-    if (cur != null) {
+    if (cur != null && cur.album != _itemAlbum) {
       _itemAlbum = cur.album;
+      // Late engine fill (a lazy resolveName placeholder gained its album
+      // after first build, title unchanged): rebuild so the button appears.
+      if (mounted && base == _base && _meta != null) setState(() {});
     }
     final seq = ++_seq;
     if (base == _base && _meta != null) return;

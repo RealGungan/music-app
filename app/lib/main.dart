@@ -714,7 +714,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
   /// receive warm links whenever onNewIntent fires. Each one opens the song
   /// like a tapped discovery row.
   Future<void> _wireDeepLinks() async {
-    _traceDl('BUILD=V40');
+    _traceDl('BUILD=V41');
     String? initial;
     try {
       initial = await _kDeepLinkChannel.invokeMethod<String>('getInitialLink');
@@ -827,6 +827,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
           thumbUrl: _api.thumbUrl(info.videoId),
           videoId: info.videoId,
           fromInternet: true,
+          album: info.album,
           lyricsArtist: info.artist,
           lyricsTitle: info.title,
         );
@@ -838,6 +839,11 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
         // Instant placeholder: the engine resolves NAS-first bounded,
         // then streams. No inNas/resolve await before first audio.
         qp.wireTapResolvers(_api);
+        // Carry Spotify art (open-url image, Deezer fallback server-side):
+        // without this the queue item has null art -> CoverArt gradient.
+        final dlArt = info.image.isNotEmpty
+            ? _api.imageProxy(info.image)
+            : null;
         item = QueueItem(
           '${info.artist} - ${info.title}',
           '',
@@ -845,6 +851,9 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
           fromInternet: true,
           lyricsArtist: info.artist,
           lyricsTitle: info.title,
+          thumbUrl: dlArt,
+          album: info.album,
+          albumImage: dlArt,
         );
       } else if (isSpotify &&
           'search' ==
@@ -1139,7 +1148,9 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
             r.url,
             thumbUrl: thumb,
             videoId: r.videoId,
-            album: (s.album?.isNotEmpty ?? false) ? s.album : null,
+            album: (r.album?.isNotEmpty ?? false)
+                ? r.album
+                : ((s.album?.isNotEmpty ?? false) ? s.album : null),
             albumImage: s.albumImage,
             fromInternet: true,
             lyricsArtist: r.resolvedArtist ?? s.artist,

@@ -430,6 +430,9 @@ class ResolvedName {
   final String? artist;
   final String? title;
 
+  /// Deezer album title when known (null = hide honestly, no guessing).
+  final String? album;
+
   /// The identity of the ACTUAL YouTube video chosen (resolvename) — used as
   /// the lyrics key so lyrics match what is really playing.
   final String? resolvedArtist;
@@ -440,6 +443,7 @@ class ResolvedName {
     required this.thumb,
     this.artist,
     this.title,
+    this.album,
     this.resolvedArtist,
     this.resolvedTitle,
   });
@@ -450,6 +454,7 @@ class ResolvedName {
     thumb: j['thumb'] ?? '',
     artist: j['artist'],
     title: j['title'],
+    album: (j['album'] as String?)?.isNotEmpty ?? false ? j['album'] : null,
     resolvedArtist: j['resolved_artist'],
     resolvedTitle: j['resolved_title'],
   );
@@ -462,6 +467,7 @@ class OpenLink {
   final String videoId;
   final String artist;
   final String title;
+  final String? album;
   final String image;
   final String url;
   OpenLink({
@@ -469,6 +475,7 @@ class OpenLink {
     this.videoId = '',
     this.artist = '',
     this.title = '',
+    this.album,
     this.image = '',
     this.url = '',
   });
@@ -478,6 +485,9 @@ class OpenLink {
     videoId: (j['video_id'] ?? '').toString(),
     artist: (j['artist'] ?? '').toString(),
     title: (j['title'] ?? '').toString(),
+    album: (j['album'] as String?)?.isNotEmpty ?? false
+        ? (j['album'] as String)
+        : null,
     image: (j['image'] ?? '').toString(),
     url: (j['url'] ?? '').toString(),
   );
@@ -2252,6 +2262,7 @@ class ApiClient {
           thumb: r.thumb,
           artist: r.artist,
           title: r.title,
+          album: r.album,
           resolvedArtist: r.resolvedArtist,
           resolvedTitle: r.resolvedTitle,
         );

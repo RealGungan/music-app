@@ -86,9 +86,13 @@ class QueueItem {
 /// Turns a discovery [videoId] into a direct streamable audio URL.
 typedef UrlResolver = Future<String> Function(String videoId);
 
-/// Turns an [artist]+[title] pair into a direct streamable audio URL (for
-/// online album/artist rows that have no video id yet).
-typedef NameResolver = Future<String> Function(String artist, String title);
+/// Turns an [artist]+[title] pair into a streamable URL + art (for
+/// online album/artist rows that have no video id yet). Returns url + thumb
+/// so the lazy resolve can attach the resolvename hqdefault cover instead
+/// of dropping it (null art -> gradient).
+typedef NameResolver =
+    Future<({String url, String thumb, String? videoId, String? album})>
+    Function(String artist, String title);
 
 /// Turns an [artist]+[title] pair into a NAS file URL (or null when the NAS
 /// has no exact copy). Bounded by callers — the engine caps it at 2s so a
@@ -637,8 +641,18 @@ class QueuePlayer {
   /// NAS hits require an EXACT normCore match (the tolerant server check
   /// used to hand back same-artist different songs).
   void wireTapResolvers(ApiClient api) {
-    nameResolver = (artist, title) async =>
-        (await api.resolveByName(artist: artist, title: title)).url;
+    nameResolver = (artist, title) async {
+      final r = await api.resolveByName(artist: artist, title: title);
+      return (
+        url: r.url,
+        // ponytail: proxied thumb; raw hqdefault works too but drops ?token=
+        thumb: r.thumb.isNotEmpty && r.videoId.isNotEmpty
+            ? api.thumbUrl(r.videoId)
+            : '',
+        videoId: r.videoId.isNotEmpty ? r.videoId : null,
+        album: r.album,
+      );
+    };
     nasLookup = (artist, title) async {
       try {
         final nas = await api
@@ -1683,25 +1697,27 @@ class QueuePlayer {
         var rn = item.resolveName!;
         // The tapped song is resolved by the caller, so it already has a real
         // URL; only rows further down the album need the lazy lookup.
-        url = await nameResolver!(
+        final res = await nameResolver!(
           rn.artist,
           rn.title,
         ).timeout(const Duration(seconds: 10));
+        url = res.url;
         if (gen != _playGen) return null;
         final idx = items.indexOf(item);
         if (idx < 0 || !identical(items[idx], item)) return null;
+        final hasArt = (item.thumbUrl?.isNotEmpty ?? false);
         items[idx] = QueueItem(
           item.title,
           url,
-          thumbUrl: item.thumbUrl,
+          thumbUrl: hasArt ? item.thumbUrl : (res.thumb.isNotEmpty ? res.thumb : null),
           baseName: item.baseName,
-          videoId: item.videoId,
+          videoId: item.videoId ?? res.videoId,
           // Preserve re-resolve keys (see above): replay must be able to
           // fetch a fresh URL instead of reusing a dead stored one.
           resolveName: item.resolveName,
           manuallyPlaced: item.manuallyPlaced,
           fromInternet: item.fromInternet,
-          album: item.album,
+          album: res.album ?? item.album,
           albumImage: item.albumImage,
           lyricsArtist: item.lyricsArtist,
           lyricsTitle: item.lyricsTitle,
@@ -2647,14 +2663,17 @@ class QueuePlayer {
     } else if (it.resolveName != null && nameResolver != null) {
       final rn = it.resolveName!;
       nameResolver!(rn.artist, rn.title)
-          .then((u) {
+          .then((res) {
             if (n < items.length && identical(items[n], it)) {
+              final warmArt = (it.thumbUrl?.isNotEmpty ?? false);
               items[n] = QueueItem(
                 it.title,
-                u,
-                thumbUrl: it.thumbUrl,
+                res.url,
+                thumbUrl: warmArt
+                    ? it.thumbUrl
+                    : (res.thumb.isNotEmpty ? res.thumb : null),
                 baseName: it.baseName,
-                videoId: it.videoId,
+                videoId: it.videoId ?? res.videoId,
                 // Same preservation as above: dropping these loses
                 // re-resolvability and art/album on replay.
                 resolveName: it.resolveName,
@@ -2724,10 +2743,11 @@ class QueuePlayer {
       } else if (it.resolveName != null && nameResolver != null) {
         final rn = it.resolveName!;
         try {
-          url = await nameResolver!(
+          url = (await nameResolver!(
             rn.artist,
             rn.title,
-          ).timeout(const Duration(seconds: 10));
+          ).timeout(const Duration(seconds: 10)))
+              .url;
         } catch (_) {
           return;
         }

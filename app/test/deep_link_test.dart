@@ -49,4 +49,33 @@ void main() {
     final u = OpenLink.fromJson({'kind': 'unknown', 'url': 'u'});
     expect(u.kind, 'unknown');
   });
+  test('OpenLink/ResolvedName carry album when known, null otherwise', () {
+    final a = OpenLink.fromJson({'kind': 'spotify', 'artist': 'A', 'title': 'T', 'album': 'ALB', 'url': 'u'});
+    expect(a.album, 'ALB');
+    final b = OpenLink.fromJson({'kind': 'spotify', 'artist': 'A', 'title': 'T', 'url': 'u'});
+    expect(b.album, isNull);
+    final c = OpenLink.fromJson({'kind': 'spotify', 'artist': 'A', 'title': 'T', 'album': '', 'url': 'u'});
+    expect(c.album, isNull);
+    final r = ResolvedName.fromJson({'url': 'u', 'video_id': 'v', 'album': 'ALB'});
+    expect(r.album, 'ALB');
+    final r2 = ResolvedName.fromJson({'url': 'u', 'video_id': 'v'});
+    expect(r2.album, isNull);
+  });
+  test('DiscoveryTrack/Suggestion carry album when known, null otherwise', () {
+    final d = DiscoveryTrack.fromJson({
+      'video_id': 'v', 'artist': 'A', 'title': 'T', 'channel': 'c',
+      'duration_s': 1, 'score': 1, 'tier': 1, 'album': 'ALB',
+    });
+    expect(d.album, 'ALB');
+    final d2 = DiscoveryTrack.fromJson({
+      'video_id': 'v', 'artist': 'A', 'title': 'T', 'channel': 'c',
+      'duration_s': 1, 'score': 1, 'tier': 1,
+    });
+    expect(d2.album, isNull);
+    final s = Suggestion.fromJson(
+        {'kind': 'song', 'artist': 'A', 'title': 'T', 'album': 'ALB'});
+    expect(s.album, 'ALB');
+    final s2 = Suggestion.fromJson({'kind': 'song', 'artist': 'A', 'title': 'T'});
+    expect(s2.album, isNull);
+  });
 }

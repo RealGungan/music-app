@@ -202,9 +202,13 @@ class _SearchScreenState extends State<SearchScreen> {
         for (final t in r.library) {
           widget.api.prewarmFile(widget.api.fileUrl(t.url));
         }
+        final rowsMissingAlbum = r.discovery.any(
+          (d) => (d.album?.trim().isEmpty ?? true),
+        );
         final done =
             (r.discovery.isNotEmpty || !r.discoveryPending) &&
-            !r.artistsPending;
+            !r.artistsPending &&
+            (!rowsMissingAlbum || n >= tries - 1);
         if (done) return;
       } catch (_) {
         return; // give up quietly on a transient failure
@@ -257,6 +261,7 @@ class _SearchScreenState extends State<SearchScreen> {
             widget.api.relayUrl(tj.videoId),
             thumbUrl: th.isEmpty ? null : th,
             videoId: tj.videoId,
+            album: (tj.album?.isNotEmpty ?? false) ? tj.album : null,
             lyricsArtist: tj.artist,
             lyricsTitle: tj.title,
           );
@@ -266,6 +271,7 @@ class _SearchScreenState extends State<SearchScreen> {
           '',
           thumbUrl: th.isEmpty ? null : th,
           resolveName: (artist: tj.artist, title: tj.title),
+          album: (tj.album?.isNotEmpty ?? false) ? tj.album : null,
           lyricsArtist: tj.artist,
           lyricsTitle: tj.title,
         );
@@ -451,6 +457,7 @@ class _SearchScreenState extends State<SearchScreen> {
               widget.api.relayUrl(vid),
               thumbUrl: widget.api.thumbUrl(vid),
               videoId: vid,
+              album: (s.album?.isNotEmpty ?? false) ? s.album : null,
               lyricsArtist: artist,
               lyricsTitle: title,
             )
@@ -458,6 +465,7 @@ class _SearchScreenState extends State<SearchScreen> {
               title,
               '',
               resolveName: (artist: artist, title: title),
+              album: (s.album?.isNotEmpty ?? false) ? s.album : null,
               lyricsArtist: artist,
               lyricsTitle: title,
             );
@@ -534,6 +542,7 @@ class _SearchScreenState extends State<SearchScreen> {
       '${widget.api.serverBase}/staging/resolve/${t.videoId}',
       thumbUrl: th.isEmpty ? null : th,
       videoId: t.videoId,
+      album: (t.album?.isNotEmpty ?? false) ? t.album : null,
       lyricsArtist: t.artist,
       lyricsTitle: t.title,
     );
@@ -558,6 +567,7 @@ class _SearchScreenState extends State<SearchScreen> {
       title,
       'https://placeholder',
       resolveName: (artist: artist, title: title),
+      album: (s.album?.isNotEmpty ?? false) ? s.album : null,
       lyricsArtist: artist,
       lyricsTitle: title,
     );
