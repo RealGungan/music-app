@@ -841,20 +841,13 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
         qp.wireTapResolvers(_api);
         // Carry Spotify art (open-url image, Deezer fallback server-side):
         // without this the queue item has null art -> CoverArt gradient.
+        // Album rides the same way (open-url album, Deezer fallback
+        // server-side); when the link predates it the engine backfills via
+        // resolvname and pings title listeners so the button still appears.
         final dlArt = info.image.isNotEmpty
             ? _api.imageProxy(info.image)
             : null;
-        item = QueueItem(
-          '${info.artist} - ${info.title}',
-          '',
-          resolveName: (artist: info.artist, title: info.title),
-          fromInternet: true,
-          lyricsArtist: info.artist,
-          lyricsTitle: info.title,
-          thumbUrl: dlArt,
-          album: info.album,
-          albumImage: dlArt,
-        );
+        item = spotifyDeepLinkItem(info, art: dlArt);
       } else if (isSpotify &&
           'search' ==
               (url.pathSegments.isNotEmpty

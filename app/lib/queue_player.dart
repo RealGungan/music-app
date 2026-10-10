@@ -83,6 +83,25 @@ class QueueItem {
   });
 }
 
+/// Instant placeholder for a Spotify /track/ deep-link parse ([OpenLink]
+/// from /api/open-url): plays immediately; the engine fills the stream URL
+/// (+ resolvname album) lazily via [QueueItem.resolveName]. [art] is the
+/// already-proxied cover (open-url image, null when unknown). Single
+/// construction site for deep-link rows so parse->item is unit-testable.
+QueueItem spotifyDeepLinkItem(OpenLink info, {String? art}) {
+  return QueueItem(
+    '${info.artist} - ${info.title}',
+    '',
+    resolveName: (artist: info.artist, title: info.title),
+    fromInternet: true,
+    lyricsArtist: info.artist,
+    lyricsTitle: info.title,
+    thumbUrl: art,
+    album: info.album,
+    albumImage: art,
+  );
+}
+
 /// Turns a discovery [videoId] into a direct streamable audio URL.
 typedef UrlResolver = Future<String> Function(String videoId);
 
@@ -1722,6 +1741,12 @@ class QueuePlayer {
           lyricsArtist: item.lyricsArtist,
           lyricsTitle: item.lyricsTitle,
         );
+        // Late fill (album/url art arrived after first build, same title):
+        // ping title listeners so Now Playing + lock-screen metadata pick
+        // up item.album without a track switch (same value still notifies).
+        // Without this an album-less deep-link placeholder keeps its null
+        // album forever and the album button never renders.
+        currentTitle.notifyListeners();
       }
       return url;
     } catch (_) {

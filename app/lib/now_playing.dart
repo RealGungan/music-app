@@ -41,6 +41,15 @@ int displayMs(int posMs, int? seekTargetMs, int seekAtMs, int nowMs) {
   return t;
 }
 
+/// Album line + album-chip visibility. Pure so unit tests pin it: library
+/// metainfo first, then the queue item's threaded album (deep links /
+/// internet rows carry it directly). Null = hidden, never a guessed string.
+String? nowPlayingAlbum(String? metaAlbum, String? itemAlbum) {
+  if (metaAlbum?.isNotEmpty ?? false) return metaAlbum;
+  if (itemAlbum?.isNotEmpty ?? false) return itemAlbum;
+  return null;
+}
+
 /// Transition route for the Now Playing screen: fades the player content in
 /// over a soft dim, while the album art itself flies in from the mini
 /// player's thumbnail via a shared Hero ([kPlayerArtHeroTag]) — a smooth
@@ -1953,11 +1962,7 @@ class _MetaSectionState extends State<_MetaSection> {
 
   @override
   Widget build(BuildContext context) {
-    final album = (_meta?.album?.isNotEmpty ?? false)
-        ? _meta!.album
-        : (_itemAlbum?.isNotEmpty ?? false)
-        ? _itemAlbum
-        : null;
+    final album = nowPlayingAlbum(_meta?.album, _itemAlbum);
     return ValueListenableBuilder<String>(
       valueListenable: qp.currentTitle,
       builder: (_, t, __) => ListenableBuilder(

@@ -1,6 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nasmusic/api_client.dart';
 import 'package:nasmusic/deep_link.dart';
+import 'package:nasmusic/now_playing.dart' show nowPlayingAlbum;
+import 'package:nasmusic/queue_player.dart' show spotifyDeepLinkItem;
 
 void main() {
   test('spotify track link classifies spotify', () {
@@ -61,8 +63,7 @@ void main() {
     final r2 = ResolvedName.fromJson({'url': 'u', 'video_id': 'v'});
     expect(r2.album, isNull);
   });
-  test('DiscoveryTrack/Suggestion carry album when known, null otherwise', () {
-    final d = DiscoveryTrack.fromJson({
+  test('DiscoveryTrack/Suggestion carry album when known, null otherwise', () {    final d = DiscoveryTrack.fromJson({
       'video_id': 'v', 'artist': 'A', 'title': 'T', 'channel': 'c',
       'duration_s': 1, 'score': 1, 'tier': 1, 'album': 'ALB',
     });
@@ -77,5 +78,46 @@ void main() {
     expect(s.album, 'ALB');
     final s2 = Suggestion.fromJson({'kind': 'song', 'artist': 'A', 'title': 'T'});
     expect(s2.album, isNull);
+  });
+  group('spotify deep link keeps album (La Polla Records repro)', () {
+    // open.spotify.com/track/1pQvhzRnObih9msA91xDq7 =
+    // La Polla Records - Ellos Dicen Mierda (Deezer album: En Tu Recto).
+    Map<String, dynamic> reproJson({bool withAlbum = true}) => {
+      'kind': 'spotify',
+      'artist': 'La Polla Records',
+      'title': 'Ellos Dicen Mierda',
+      if (withAlbum) 'album': 'En Tu Recto',
+      'image': 'https://i.scdn.co/image/abc',
+      'url': 'https://open.spotify.com/track/1pQvhzRnObih9msA91xDq7',
+    };
+    test('parse->item carries album, chip visible', () {
+      final info = OpenLink.fromJson(reproJson());
+      final item = spotifyDeepLinkItem(info, art: 'proxied');
+      expect(item.title, 'La Polla Records - Ellos Dicen Mierda');
+      expect(item.album, 'En Tu Recto');
+      // No library metainfo for an internet row: the chip renders iff the
+      // threaded item album is non-empty.
+      expect(nowPlayingAlbum(null, item.album), 'En Tu Recto');
+    });
+    test('album-less parse still ends visible via engine backfill', () {
+      final info = OpenLink.fromJson(reproJson(withAlbum: false));
+      final item = spotifyDeepLinkItem(info);
+      expect(item.album, isNull);
+      expect(nowPlayingAlbum(null, item.album), isNull);
+      // Engine write-back merge (queue_player _resolveItemUrl): resolvname
+      // album wins, placeholder kept otherwise.
+      String? resAlbum = 'En Tu Recto';
+      expect(nowPlayingAlbum(null, resAlbum ?? item.album), 'En Tu Recto');
+      resAlbum = null;
+      final keep = OpenLink.fromJson(reproJson());
+      final keepItem = spotifyDeepLinkItem(keep);
+      expect(nowPlayingAlbum(null, resAlbum ?? keepItem.album), 'En Tu Recto');
+    });
+    test('nowPlayingAlbum prefers metainfo, hides on empty', () {
+      expect(nowPlayingAlbum('Meta', 'Item'), 'Meta');
+      expect(nowPlayingAlbum('', 'Item'), 'Item');
+      expect(nowPlayingAlbum(null, ''), isNull);
+      expect(nowPlayingAlbum(null, null), isNull);
+    });
   });
 }
