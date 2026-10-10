@@ -68,6 +68,16 @@ void main() {
     });
   });
 
+  group('focus-gain audit (no strand at ducked 25%)', () {
+    test('gain-restores-volume: ducked gain returns USER volume', () {
+      expect(gainRestoreVolume(ducked: true, userVolume: 0.6), 0.6);
+      // Never blasts to full when the user had lowered it.
+      expect(gainRestoreVolume(ducked: true, userVolume: 1.0), isNotNull);
+    });
+    test('unducked gain touches nothing', () {
+      expect(gainRestoreVolume(ducked: false, userVolume: 0.6), isNull);
+    });
+  });
   group('media session id stability (car flicker guard)', () {
     test('strips re-resolving ?token= query', () {
       expect(
@@ -76,6 +86,19 @@ void main() {
     test('falls back when url missing/empty', () {
       expect(stableMediaId(null, 'A - T'), 'A - T');
       expect(stableMediaId('', 'A - T'), 'A - T');
+    });
+  });
+
+  group('BT transport report (AVRCP action mapping)', () {
+    test('pause/play report fold to queue intent', () {
+      expect(transportReportFor('pause'), TransportReport.paused);
+      expect(transportReportFor('play'), TransportReport.resumed);
+    });
+    test('unknown ops are ignored, never crash', () {
+      expect(transportReportFor('stop'), isNull);
+      expect(transportReportFor('next'), isNull);
+      expect(transportReportFor(null), isNull);
+      expect(transportReportFor(''), isNull);
     });
   });
 }

@@ -1,6 +1,5 @@
 import 'dart:io';
 
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
@@ -148,26 +147,22 @@ class _MiniPlayerBarState extends State<MiniPlayerBar> {
                           )
                         : ListenableBuilder(
                             listenable: qp.stateSyncing,
-                            builder: (_, __) => IconButton(
-                              visualDensity: VisualDensity.compact,
-                              onPressed: qp.stateSyncing.value
-                                  ? null
-                                  : QueuePlayerShim.instance.toggle,
-                              icon: StreamBuilder<PlayerState>(
-                                stream: QueuePlayerShim.instance.stateStream,
-                                initialData: null,
-                                builder: (_, snap) {
-                                  final playing =
-                                      snap.data == PlayerState.playing ||
-                                      (snap.data == null &&
-                                          QueuePlayerShim.instance.playing);
-                                  return Icon(
-                                    playing ? Icons.pause : Icons.play_arrow,
-                                    color: Spots.green,
-                                  );
-                                },
+                            builder: (_, __) => ValueListenableBuilder<bool>(
+                              // Sole skin truth: the ONE playingN every
+                              // button listens to — no stream snapshot here.
+                              valueListenable:
+                                  QueuePlayerShim.instance.playingN,
+                              builder: (_, playing, ___) => IconButton(
+                                visualDensity: VisualDensity.compact,
+                                onPressed: qp.stateSyncing.value
+                                    ? null
+                                    : QueuePlayerShim.instance.toggle,
+                                icon: Icon(
+                                  playing ? Icons.pause : Icons.play_arrow,
+                                  color: Spots.green,
+                                ),
+                                iconSize: 32,
                               ),
-                              iconSize: 32,
                             ),
                           ),
                   ),
@@ -412,8 +407,7 @@ class QueuePlayerShim {
   ValueListenable<double> get progress => _qp.progressFractionNotifier;
   ValueListenable<bool> get loading => _qp.loading;
   ValueListenable<String?> get lastError => _qp.lastError;
-  Stream<PlayerState> get stateStream => _qp.stateStream;
-  bool get playing => _qp.playing;
+  ValueListenable<bool> get playingN => _qp.playingN;
   ValueListenable<bool> get stateSyncing => _qp.stateSyncing;
   bool get hasQueue => _qp.items.isNotEmpty;
   bool get hasNext => _qp.hasNext;

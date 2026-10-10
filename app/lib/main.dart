@@ -17,6 +17,7 @@ import 'package:workmanager/workmanager.dart';
 
 import 'api_client.dart';
 import 'announcer.dart';
+import 'deep_link.dart';
 import 'audio_handler.dart';
 import 'audio_session_state.dart';
 import 'auth_store.dart';
@@ -31,6 +32,7 @@ import 'replace_tracker.dart';
 import 'keep_dialog.dart';
 import 'now_playing.dart' show NowPlayingRoute;
 import 'playback_engine.dart';
+import 'queue/text_norm.dart';
 import 'queue_player.dart';
 import 'screens/library_screen.dart';
 import 'screens/listen_history_screen.dart';
@@ -100,6 +102,19 @@ void _decodeAudioJson(String json) {
       }
       final e = qp.engine;
       if (e is RemoteEngine) e.feedRemoteEvent(m);
+      // Media-session transport reports (BT headset / car wheel /
+      // notification play/pause): the handler already Paused/resumed its
+      // player — fold the intent into the queue so the heal loop obeys it
+      // (pause latches, play clears), without re-sending a command back.
+      if (ev == 'transport') {
+        final rep = transportReportFor(m?['op']?.toString());
+        if (rep == TransportReport.paused) {
+          qp.onTransportPause();
+        } else if (rep == TransportReport.resumed) {
+          qp.onTransportResume();
+        }
+        return;
+      }
       // External-audio callbacks must FORCE handler truth, not just fold the
       // event in: a focus loss/regain that lands while the UI isolate sleeps
       // leaves a stale icon (events alone already missed once). Re-query via
@@ -411,6 +426,8 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
   bool? _sessionValid;
   final _messengerKey = GlobalKey<ScaffoldMessengerState>();
   final _navigatorKey = GlobalKey<NavigatorState>();
+  String? _lastDlUrl;
+  DateTime? _lastDlAt;
 
   /// Deep-link flow logging (debugPrint only; not visible in release builds
   /// without adb/logcat).
@@ -698,7 +715,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
   /// receive warm links whenever onNewIntent fires. Each one opens the song
   /// like a tapped discovery row.
   Future<void> _wireDeepLinks() async {
-    _traceDl('BUILD=V39');
+    _traceDl('BUILD=V41');
     String? initial;
     try {
       initial = await _kDeepLinkChannel.invokeMethod<String>('getInitialLink');
@@ -750,24 +767,30 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
 
   Future<void> _openDeepLink(String rawUrl) async {
     _traceDl('openDeepLink: $rawUrl');
+    // WhatsApp tacks on ?si=…/utm_source=… — strip before dedup + classify
+    // so a re-tap of the same song with different tracking still dedups
+    // and the server sees the canonical link.
+    rawUrl = stripTrackingParams(rawUrl);
+    // Cold start + warm openUrl can deliver the same URL twice (native
+    // flush + getInitialLink raced before the MainActivity fix; belt and
+    // braces against any future double delivery): play once.
+    final now = DateTime.now();
+    if (isDuplicateDeepLink(_lastDlUrl, _lastDlAt, rawUrl, now)) {
+      _traceDl('duplicate deep link ignored');
+      return;
+    }
+    _lastDlUrl = rawUrl;
+    _lastDlAt = now;
     final url = Uri.tryParse(rawUrl);
     if (url == null) {
       _traceDl('URI parse FAILED');
       _dlToast("Deep link unparseable: $rawUrl");
       return;
     }
+    final kind = classifyDeepLink(rawUrl);
     final host = (url.host.isNotEmpty ? url.host : url.path).toLowerCase();
-    final isSpotify =
-        host == 'open.spotify.com' ||
-        host == 'spotify.link' ||
-        host.endsWith('.spotify.com') ||
-        host.endsWith('.spotify.link');
-    final isYt =
-        host == 'youtu.be' ||
-        host == 'www.youtube.com' ||
-        host == 'm.youtube.com' ||
-        host == 'music.youtube.com' ||
-        host.endsWith('youtube.com');
+    final isSpotify = kind == DeepLinkKind.spotify;
+    final isYt = kind == DeepLinkKind.youtube;
     _traceDl('host=$host isSpotify=$isSpotify isYt=$isYt');
     if (!isSpotify && !isYt) {
       _dlToast("Not a music share link ($host)");
@@ -805,6 +828,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
           thumbUrl: _api.thumbUrl(info.videoId),
           videoId: info.videoId,
           fromInternet: true,
+          album: info.album,
           lyricsArtist: info.artist,
           lyricsTitle: info.title,
         );
@@ -816,14 +840,15 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
         // Instant placeholder: the engine resolves NAS-first bounded,
         // then streams. No inNas/resolve await before first audio.
         qp.wireTapResolvers(_api);
-        item = QueueItem(
-          '${info.artist} - ${info.title}',
-          '',
-          resolveName: (artist: info.artist, title: info.title),
-          fromInternet: true,
-          lyricsArtist: info.artist,
-          lyricsTitle: info.title,
-        );
+        // Carry Spotify art (open-url image, Deezer fallback server-side):
+        // without this the queue item has null art -> CoverArt gradient.
+        // Album rides the same way (open-url album, Deezer fallback
+        // server-side); when the link predates it the engine backfills via
+        // resolvname and pings title listeners so the button still appears.
+        final dlArt = info.image.isNotEmpty
+            ? _api.imageProxy(info.image)
+            : null;
+        item = spotifyDeepLinkItem(info, art: dlArt);
       } else if (isSpotify &&
           'search' ==
               (url.pathSegments.isNotEmpty
@@ -976,7 +1001,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
     // metadata can't change without a track-change push (the listeners
     // above fire regardless of lifecycle), so a bg re-push is pure
     // isolate traffic + a needless art check every few seconds.
-    _audioTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
+    _audioTimer ??= Timer.periodic(const Duration(seconds: 2), (_) {
       if (!qp.playing) return;
       if (_lastLifecycle != null &&
           _lastLifecycle != AppLifecycleState.resumed) {
@@ -997,6 +1022,12 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
   }
 
   Timer? _audioTimer;
+
+  /// Last non-empty recommend/radio batch (raw Suggestions). When BOTH live
+  /// sources fail or return 0 rows, the refill serves this warm batch minus
+  /// already-queued titles instead of parking the queue dead (the "single
+  /// recommend failure kills queue" regression).
+  List<Suggestion> _warmRel = [];
 
   /// Spotify/YT-Music autoplay: fills the queue with related internet tracks
   /// ("from internet") behind the current NAS song. Re-pointed at the live
@@ -1070,6 +1101,19 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
         debugPrint(
           '[autoplay] both recommend and radio returned empty for "$seedLabel"',
         );
+        // Heal: serve the last warm batch (fresh titles only) so one dead
+        // source never drains the queue into a permanent PAUSED.
+        final excluded = {
+          for (final t in (excludeTitles ?? const <String>[])) t,
+        };
+        rows = warmRelFallback(_warmRel, excluded, limit ?? 20);
+        if (rows.isNotEmpty) {
+          debugPrint(
+            '[autoplay] warm-cache heal: serving ${rows.length} cached rows',
+          );
+        }
+      } else {
+        _warmRel = rows;
       }
       Future<QueueItem?> resolveOne(Suggestion s) async {
         try {
@@ -1117,7 +1161,9 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
             r.url,
             thumbUrl: thumb,
             videoId: r.videoId,
-            album: (s.album?.isNotEmpty ?? false) ? s.album : null,
+            album: (r.album?.isNotEmpty ?? false)
+                ? r.album
+                : ((s.album?.isNotEmpty ?? false) ? s.album : null),
             albumImage: s.albumImage,
             fromInternet: true,
             lyricsArtist: r.resolvedArtist ?? s.artist,
@@ -1340,6 +1386,27 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
       ),
     );
   }
+}
+
+/// Warm-cache heal for autoplay refills (pure, unit-tested): when both live
+/// sources fail, serve fresh titles from the last good batch. [excluded] are
+/// title-only server norms (same shape as relatedSource's excludeTitles).
+List<Suggestion> warmRelFallback(
+  List<Suggestion> cache,
+  Set<String> excluded,
+  int limit,
+) {
+  final out = <Suggestion>[];
+  for (final s in cache) {
+    if (out.length >= limit) break;
+    if (excluded.contains(
+      excludeNorm('${s.artist ?? ''} - ${s.title ?? ''}'),
+    )) {
+      continue;
+    }
+    out.add(s);
+  }
+  return out;
 }
 
 class _HomeShell extends StatefulWidget {

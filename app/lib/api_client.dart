@@ -12,16 +12,22 @@ class LibraryTrack {
   final String baseName;
   final String folder;
   final String url;
+  final String? album;
+  final String? albumImage;
   LibraryTrack({
     required this.baseName,
     required this.folder,
     required this.url,
+    this.album,
+    this.albumImage,
   });
 
   factory LibraryTrack.fromJson(Map<String, dynamic> j) => LibraryTrack(
     baseName: j['base_name'],
     folder: j['folder'] ?? '',
     url: j['url'],
+    album: j['album']?.toString(),
+    albumImage: j['album_image']?.toString(),
   );
 }
 
@@ -430,6 +436,9 @@ class ResolvedName {
   final String? artist;
   final String? title;
 
+  /// Deezer album title when known (null = hide honestly, no guessing).
+  final String? album;
+
   /// The identity of the ACTUAL YouTube video chosen (resolvename) — used as
   /// the lyrics key so lyrics match what is really playing.
   final String? resolvedArtist;
@@ -440,6 +449,7 @@ class ResolvedName {
     required this.thumb,
     this.artist,
     this.title,
+    this.album,
     this.resolvedArtist,
     this.resolvedTitle,
   });
@@ -450,6 +460,7 @@ class ResolvedName {
     thumb: j['thumb'] ?? '',
     artist: j['artist'],
     title: j['title'],
+    album: (j['album'] as String?)?.isNotEmpty ?? false ? j['album'] : null,
     resolvedArtist: j['resolved_artist'],
     resolvedTitle: j['resolved_title'],
   );
@@ -462,6 +473,7 @@ class OpenLink {
   final String videoId;
   final String artist;
   final String title;
+  final String? album;
   final String image;
   final String url;
   OpenLink({
@@ -469,6 +481,7 @@ class OpenLink {
     this.videoId = '',
     this.artist = '',
     this.title = '',
+    this.album,
     this.image = '',
     this.url = '',
   });
@@ -478,6 +491,9 @@ class OpenLink {
     videoId: (j['video_id'] ?? '').toString(),
     artist: (j['artist'] ?? '').toString(),
     title: (j['title'] ?? '').toString(),
+    album: (j['album'] as String?)?.isNotEmpty ?? false
+        ? (j['album'] as String)
+        : null,
     image: (j['image'] ?? '').toString(),
     url: (j['url'] ?? '').toString(),
   );
@@ -1903,13 +1919,17 @@ class ApiClient {
     List<String>? exclude,
   }) async {
     final j = _decode(
-      await _client.get(_uri('/api/radio', {
-        'artist': artist,
-        'title': title,
-        if (limit != null) 'limit': '$limit',
-        if (exclude != null && exclude.isNotEmpty)
-          'exclude': exclude.join(','),
-      })),
+      await _client
+          .get(_uri('/api/radio', {
+            'artist': artist,
+            'title': title,
+            if (limit != null) 'limit': '$limit',
+            if (exclude != null && exclude.isNotEmpty)
+              'exclude': exclude.join(','),
+          }))
+          // Fail fast into the recommend→radio→cache fallback chain: the
+          // default 30s pipe limit parked the queue PAUSED on one slow source.
+          .timeout(const Duration(seconds: 15)),
     );
     return (j['results'] as List? ?? [])
         .whereType<Map<String, dynamic>>()
@@ -1927,15 +1947,19 @@ class ApiClient {
     List<String>? exclude,
   }) async {
     final j = _decode(
-      await _client.get(
-        _uri('/api/recommend', {
-          'artist': artist,
-          'title': title,
-          if (limit != null) 'limit': '$limit',
-          if (exclude != null && exclude.isNotEmpty)
-            'exclude': exclude.join(','),
-        }),
-      ),
+      await _client
+          .get(
+            _uri('/api/recommend', {
+              'artist': artist,
+              'title': title,
+              if (limit != null) 'limit': '$limit',
+              if (exclude != null && exclude.isNotEmpty)
+                'exclude': exclude.join(','),
+            }),
+          )
+          // Same fail-fast as radio() above: one hung source must not stall
+          // the refill past the 30s pipe limit into a dead PAUSED queue.
+          .timeout(const Duration(seconds: 15)),
     );
     return (j['results'] as List? ?? [])
         .whereType<Map<String, dynamic>>()
@@ -2214,7 +2238,7 @@ class ApiClient {
   Future<ResolvedName> resolveByName({
     required String artist,
     required String title,
-    int maxTries = 60,
+    int maxTries = 30,
     Duration pollWait = const Duration(milliseconds: 400),
   }) async {
     // Cold hits run a SHARED background job on the server (so taps never
@@ -2252,6 +2276,7 @@ class ApiClient {
           thumb: r.thumb,
           artist: r.artist,
           title: r.title,
+          album: r.album,
           resolvedArtist: r.resolvedArtist,
           resolvedTitle: r.resolvedTitle,
         );

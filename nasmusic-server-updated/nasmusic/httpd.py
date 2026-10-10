@@ -155,7 +155,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.290"
+APP_VERSION = "1.0.296"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -453,13 +453,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/staging/features.html":
             return self._serve_features()
 
-        # Liveness probe for container healthchecks (public by design:
-        # it reveals nothing but "the server answers"). The old
-        # `curl -fs .../staging/` probe fails with 401 since /staging
-        # was gated (2026-09-18) — point the compose healthcheck here.
-        if path == "/staging/health":
-            return self._json({"ok": True})
-
         # strip /staging prefix ('/staging' itself is gated like api:
         # it used to leak music_root/staging_dir pre-auth — 2026-09-18)
         if path == "/staging" or path == "/staging/":
@@ -505,9 +498,12 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 import time as _t
                 _av = (query.get("av") or [""])[0].strip()[:32]
-                self.state.db.misc_put(
-                    "lastav:" + str(authed),
-                    {"seen": int(_t.time()), "av": _av})
+                _now = int(_t.time())
+                if _now - type(self)._lastav_at.get(str(authed), 0) >= 60:
+                    type(self)._lastav_at[str(authed)] = _now
+                    self.state.db.misc_put(
+                        "lastav:" + str(authed),
+                        {"seen": _now, "av": _av})
             except Exception:                            # noqa: BLE001
                 pass
 
@@ -3526,6 +3522,7 @@ class Handler(BaseHTTPRequestHandler):
     _check_lock = threading.Lock()
     _check_progress = None
     _suggest_cache = None
+    _lastav_at = {}                # user -> last misc_put epoch (60s throttle)
     _playlists_cache = {}            # user -> (timestamp, signature, payload)
     # Shared background-resolution jobs for /api/resolvename cold misses:
     # key -> {"ts": started_at, "err"?: true, "bg"?: true, "tok": int}.

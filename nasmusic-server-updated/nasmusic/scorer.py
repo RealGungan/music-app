@@ -417,7 +417,8 @@ class Scorer:
             if dur and not (50 <= dur <= 700):
                 continue
             scored.append(dict(video_id=vid, title=t, channel=ch,
-                               duration_s=dur, score=sc, tier=tier, ev=ev))
+                               duration_s=dur, score=sc, tier=tier, ev=ev,
+                               album=c.get("album") or ""))
 
         if not scored:
             return [], None

@@ -185,7 +185,7 @@ class _SearchScreenState extends State<SearchScreen> {
   /// (so discovery shows the moment it lands — its visibility must NOT be held
   /// hostage to a slow/failing artists fetch), and stops only when BOTH are no
   /// longer pending, or after a few tries.
-  Future<void> _pollDiscovery(String query, {int tries = 8}) async {
+  Future<void> _pollDiscovery(String query, {int tries = 4}) async {
     for (var n = 0; n < tries; n++) {
       await Future<void>.delayed(const Duration(milliseconds: 1200));
       if (!mounted) return;
@@ -252,33 +252,32 @@ class _SearchScreenState extends State<SearchScreen> {
               : (x.videoId.isNotEmpty
                   ? 'https://i.ytimg.com/vi/${x.videoId}/hqdefault.jpg'
                   : '');
-      final q = List.generate(vis.length, (j) {
-        final tj = vis[j];
-        final th = visThumb(tj);
-        if (tj.videoId.isNotEmpty) {
-          return QueueItem(
-            '${tj.artist} - ${tj.title}',
-            widget.api.relayUrl(tj.videoId),
-            thumbUrl: th.isEmpty ? null : th,
-            videoId: tj.videoId,
-            album: (tj.album?.isNotEmpty ?? false) ? tj.album : null,
-            lyricsArtist: tj.artist,
-            lyricsTitle: tj.title,
-          );
-        }
-        return QueueItem(
-          '${tj.artist} - ${tj.title}',
-          '',
-          thumbUrl: th.isEmpty ? null : th,
-          resolveName: (artist: tj.artist, title: tj.title),
-          album: (tj.album?.isNotEmpty ?? false) ? tj.album : null,
-          lyricsArtist: tj.artist,
-          lyricsTitle: tj.title,
-        );
-      });
+      // Explicit single-play: exactly the tapped row, then STOP. Queuing the
+      // whole results page let completion/resolve-skip walk to other songs
+      // ("loads it, skips to another, again and again").
+      final th = visThumb(t);
+      final item = t.videoId.isNotEmpty
+          ? QueueItem(
+              '${t.artist} - ${t.title}',
+              widget.api.relayUrl(t.videoId),
+              thumbUrl: th.isEmpty ? null : th,
+              videoId: t.videoId,
+              album: (t.album?.isNotEmpty ?? false) ? t.album : null,
+              lyricsArtist: t.artist,
+              lyricsTitle: t.title,
+            )
+          : QueueItem(
+              '${t.artist} - ${t.title}',
+              '',
+              thumbUrl: th.isEmpty ? null : th,
+              resolveName: (artist: t.artist, title: t.title),
+              album: (t.album?.isNotEmpty ?? false) ? t.album : null,
+              lyricsArtist: t.artist,
+              lyricsTitle: t.title,
+            );
       if (tap != _tapId || !mounted) return;
-      if (q[i].url.isNotEmpty) widget.api.prewarmFile(q[i].url);
-      unawaited(QueuePlayer.instance.playList(q, startIndex: i));
+      if (item.url.isNotEmpty) widget.api.prewarmFile(item.url);
+      unawaited(QueuePlayer.instance.playList([item], single: true));
       unawaited(slowLog('${t.artist} - ${t.title}'));
     } catch (e) {
       if (mounted && tap == _tapId) {
@@ -383,13 +382,20 @@ class _SearchScreenState extends State<SearchScreen> {
     // Prewarm (no await) so the first Range GET goes out instantly.
     widget.api.prewarmFile(widget.api.fileUrl(t.url));
     try {
-      await QueuePlayer.instance.playOne(
-        QueueItem(
-          t.baseName,
-          widget.api.fileUrl(t.url),
-          thumbUrl: widget.api.coverUrl(t.url),
-          album: (t.album?.isNotEmpty ?? false) ? t.album : null,
-        ),
+      // Explicit single-play (search tap stops after the tapped song):
+      // playOne leaves explicitSingle false, so completion's force-refill
+      // tops up "up next" rows and the tap never stops (same loop the
+      // discovery rows fixed with single:true).
+      await QueuePlayer.instance.playList(
+        [
+          QueueItem(
+            t.baseName,
+            widget.api.fileUrl(t.url),
+            thumbUrl: widget.api.coverUrl(t.url),
+            album: (t.album?.isNotEmpty ?? false) ? t.album : null,
+          ),
+        ],
+        single: true,
       );
     } catch (e) {
       if (mounted) {
@@ -421,17 +427,20 @@ class _SearchScreenState extends State<SearchScreen> {
     if (s.inNas && (s.nasUrl?.isNotEmpty ?? false)) {
       widget.api.prewarmFile(widget.api.fileUrl(s.nasUrl!));
       try {
-        await QueuePlayer.instance.playOne(
-          QueueItem(
-            s.baseName.isNotEmpty
-                ? s.baseName
-                : '${s.artist ?? ''} - ${s.title ?? ''}',
-            widget.api.fileUrl(s.nasUrl!),
-            thumbUrl: s.albumImage != null
-                ? widget.api.coverUrl(s.nasUrl!)
-                : null,
-            album: (s.album?.isNotEmpty ?? false) ? s.album : null,
-          ),
+        await QueuePlayer.instance.playList(
+          [
+            QueueItem(
+              s.baseName.isNotEmpty
+                  ? s.baseName
+                  : '${s.artist ?? ''} - ${s.title ?? ''}',
+              widget.api.fileUrl(s.nasUrl!),
+              thumbUrl: s.albumImage != null
+                  ? widget.api.coverUrl(s.nasUrl!)
+                  : null,
+              album: (s.album?.isNotEmpty ?? false) ? s.album : null,
+            ),
+          ],
+          single: true,
         );
       } catch (e) {
         if (mounted && tap == _tapId) {
@@ -472,7 +481,9 @@ class _SearchScreenState extends State<SearchScreen> {
               lyricsTitle: title,
             );
       if (item.url.isNotEmpty) widget.api.prewarmFile(item.url);
-      await QueuePlayer.instance.playOne(item);
+      // Explicit single-play: stop after the tapped row (playOne leaves
+      // explicitSingle false -> completion force-refill loops "up next").
+      await QueuePlayer.instance.playList([item], single: true);
     } catch (e) {
       if (mounted && tap == _tapId) {
         toast(

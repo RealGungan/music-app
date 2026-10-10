@@ -146,9 +146,11 @@ void main() {
         const Duration(seconds: 2),
       ) as String) as Map<String, dynamic>;
       expect(cmd['cmd'], 'getState');
-      // Handler answers paused (external app owns focus now) via the same
-      // bridge main.dart feeds — stale playing must clear.
+      // Handler answers paused (external app owns focus now) + its clock via
+      // the same bridge main.dart feeds — stale playing must clear AND the
+      // position echo must land (resync returns only after both).
       e.feedRemoteEvent({'ev': 'state', 's': 'paused'});
+      e.feedRemoteEvent({'ev': 'pos', 'ms': 42000});
       await syncing;
       expect(e.isPlaying, isFalse);
     });
@@ -188,10 +190,35 @@ void main() {
       ) as String) as Map<String, dynamic>;
       expect(cmd['cmd'], 'getState');
       e.feedRemoteEvent({'ev': 'state', 's': 'paused'});
+      e.feedRemoteEvent({'ev': 'pos', 'ms': 1000});
       await syncing; // returns only AFTER the repaint event landed.
       expect(e.isPlaying, isFalse);
       await Future<void>.delayed(Duration.zero);
       expect(seen.last, PlayerState.paused);
+      await sub.cancel();
+    });
+
+    test('resync adopts the handler clock (frozen-timestamp guard)', () async {
+      final inbox = ReceivePort();
+      IsolateNameServer.removePortNameMapping(kAudioStatePort);
+      IsolateNameServer.registerPortWithName(inbox.sendPort, kAudioStatePort);
+      addTearDown(() {
+        IsolateNameServer.removePortNameMapping(kAudioStatePort);
+        inbox.close();
+      });
+      final e = RemoteEngine();
+      addTearDown(e.dispose);
+      final positions = <Duration>[];
+      final sub = e.onPositionChanged.listen(positions.add);
+      e.feedRemoteEvent({'ev': 'state', 's': 'playing'});
+      // Long background idle: the handler kept playing, its clock ran on.
+      final syncing = e.resync(timeout: const Duration(seconds: 2));
+      await inbox.first.timeout(const Duration(seconds: 2));
+      e.feedRemoteEvent({'ev': 'state', 's': 'playing'});
+      e.feedRemoteEvent({'ev': 'pos', 'ms': 180000});
+      await syncing;
+      await Future<void>.delayed(Duration.zero);
+      expect(positions.last, const Duration(seconds: 180));
       await sub.cancel();
     });
 

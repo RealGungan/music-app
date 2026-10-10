@@ -43,6 +43,7 @@
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="https" android:host="open.spotify.com"/>
+                <data android:scheme="https" android:host="*.spotify.com"/>
                 <data android:scheme="https" android:host="spotify.link"/>
                 <data android:scheme="https" android:host="*.spotify.link"/>
             </intent-filter>
@@ -51,6 +52,7 @@
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="http" android:host="open.spotify.com"/>
+                <data android:scheme="http" android:host="*.spotify.com"/>
                 <data android:scheme="http" android:host="spotify.link"/>
                 <data android:scheme="http" android:host="*.spotify.link"/>
             </intent-filter>
@@ -59,6 +61,9 @@
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="https" android:host="music.youtube.com"/>
+                <data android:scheme="https" android:host="m.youtube.com"/>
+                <data android:scheme="https" android:host="www.youtube.com"/>
+                <data android:scheme="https" android:host="youtube.com"/>
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW"/>
@@ -71,6 +76,25 @@
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="https" android:host="youtu.be"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http" android:host="music.youtube.com"/>
+                <data android:scheme="http" android:host="m.youtube.com"/>
+                <data android:scheme="http" android:host="www.youtube.com"/>
+                <data android:scheme="http" android:host="youtube.com"/>
+                <data android:scheme="http" android:host="youtu.be"/>
+            </intent-filter>
+            <!-- WhatsApp "share to app": ACTION_SEND text/plain carrying a
+                 link in EXTRA_TEXT (tap-on-chat-URL comes as VIEW above).
+                 Dart/MainActivity.extractLink pulls the first http(s) URL
+                 out of the text and plays it like any deep link. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="text/plain"/>
             </intent-filter>
         </activity>
         <!-- audio_service media session + foreground service (lock screen /

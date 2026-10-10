@@ -49,6 +49,49 @@ void shareTrace(String msg) {
     spLink: 'https://open.spotify.com/search/$q',
   );
 }
+/// Gallery-save tier contract (must match MainActivity.kt RELATIVE_PATH):
+/// the fallback writes the cover to SHARED MediaStore Pictures/ (never the
+/// app-private dir — invisible to the IG picker), copies the caption, then
+/// launches IG. Stories/direct tiers stay first (see [instagramShareTierOrder]).
+const instagramGalleryRelativePath = 'Pictures/NASMusic';
+
+/// True when BOTH IG-native tiers report unresolvable targets (Morphe/modded
+/// builds with no launchable Stories/direct handler). Caller must DEFAULT to
+/// save-cover + copy-caption + toast WITHOUT auto-launching doomed intents.
+/// Pure so unit tests pin the gate.
+bool instagramTargetsUnresolvable({
+  required String storyDetail,
+  required String directDetail,
+}) =>
+    instagramNoResolve(storyDetail) && instagramNoResolve(directDetail);
+
+/// Toast shown in the unresolvable default path (no auto-launch; retry taps
+/// launch explicitly).
+const instagramOpenToast = 'Cover saved — open Instagram';
+
+/// Platform call (no-launch tier): saves the cover to the gallery + copies
+/// the caption, WITHOUT launching any IG intent. Used when Stories/direct
+/// targets are unresolvable — auto-launching there just flashes IG open/closed.
+Future<ShareTierResult> saveCoverCopyCaptionDetailed({
+  required String caption,
+}) async {
+  shareTrace('attempt saveCoverCopyCaption');
+  try {
+    const channel = MethodChannel('com.nasmusic.nasmusic/share');
+    final sent =
+        await channel.invokeMethod<Object>('saveCoverCopyCaption', {
+      'text': caption,
+    });
+    final ok = shareTierOk(sent);
+    final r = ShareTierResult(ok, ok ? 'ok' : 'save ${sent ?? 'null'}');
+    shareTrace('result saveCoverCopyCaption ok=${r.ok} detail=${r.detail}');
+    return r;
+  } catch (e) {
+    shareTrace('result saveCoverCopyCaption ok=false exception: $e');
+    return ShareTierResult(false, 'save exception: $e');
+  }
+}
+
 /// True when BOTH IG-native tiers failed and the gallery fallback is still
 /// needed (last resort before the generic sheet).
 bool instagramFallbackNeeded({required bool storyOk, required bool directOk}) =>

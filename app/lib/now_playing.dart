@@ -1,7 +1,6 @@
 import 'dart:math' as math;
 import 'dart:async';
 
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -40,6 +39,15 @@ int displayMs(int posMs, int? seekTargetMs, int seekAtMs, int nowMs) {
   final far = (posMs < t - 2000) || (posMs > t + 2000);
   if (nowMs - seekAtMs > 3000 || !far) return posMs;
   return t;
+}
+
+/// Album line + album-chip visibility. Pure so unit tests pin it: library
+/// metainfo first, then the queue item's threaded album (deep links /
+/// internet rows carry it directly). Null = hidden, never a guessed string.
+String? nowPlayingAlbum(String? metaAlbum, String? itemAlbum) {
+  if (metaAlbum?.isNotEmpty ?? false) return metaAlbum;
+  if (itemAlbum?.isNotEmpty ?? false) return itemAlbum;
+  return null;
 }
 
 /// Transition route for the Now Playing screen: fades the player content in
@@ -203,11 +211,11 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
     qp.currentTitle.addListener(_prewarmShare);
     qp.currentTitle.addListener(_clearSeekStateOnTrackChange);
     _prewarmShare();
-    // Visible-screen truth poll (500ms): a native MediaPlayer-JNI pause on
-    // focus loss fires outside Dart while the engine still shows playing
-    // (skin lie + double-tap). pollVisibleTruth re-asks handler truth;
-    // the state-stream reply repaints the icon. Bg-gated (resumed only).
-    _truthPoll = Timer.periodic(const Duration(milliseconds: 500), (_) {
+    // Visible-screen truth poll (1s): re-asks the handler for native truth
+    // via getState; the reply feeds playingN, which rebuilds every button
+    // directly. No watchdog compare/setState needed — one notifier means
+    // the skin cannot disagree with itself. Bg-gated (resumed only).
+    _truthPoll = Timer.periodic(const Duration(seconds: 2), (_) {
       if (!mounted) return;
       if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
         return;
@@ -849,14 +857,13 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
                                 ),
                               ),
                             )
-                          : StreamBuilder<PlayerState>(
-                              stream: qp.stateStream,
-                              initialData: qp.playing
-                                  ? PlayerState.playing
-                                  : PlayerState.paused,
-                              builder: (_, snap) => ListenableBuilder(
+                          : ValueListenableBuilder<bool>(
+                              // Sole skin truth: the ONE playingN every
+                              // button listens to — no stream snapshot here.
+                              valueListenable: qp.playingN,
+                              builder: (_, playing, __) => ListenableBuilder(
                                 listenable: qp.stateSyncing,
-                                builder: (_, __) => IconButton(
+                                builder: (_, ___) => IconButton(
                                   visualDensity: VisualDensity.compact,
                                   constraints: const BoxConstraints(
                                       minWidth: 48, minHeight: 48),
@@ -866,7 +873,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
                                       ? null
                                       : () => qp.resumeOrPause(),
                                   icon: Icon(
-                                    snap.data == PlayerState.playing
+                                    playing
                                         ? Icons.pause_circle_filled
                                         : Icons.play_circle_fill,
                                     color: Colors.white,
@@ -1463,6 +1470,11 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
       shareTrace('resolve cached=true');
     }
     if (!mounted) return;
+    final payload = p;
+    if (payload == null) {
+      shareTrace('resolve null payload');
+      return;
+    }
     if (target == _ShareTarget.instagram) {
       // Tier 1 Stories (minimal background image, no sticker) → tier 2 direct
       // share (IG itself opens) → tier 3 generic sheet → clipboard. A user
@@ -1471,7 +1483,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
       // + art exists/size + authority) to User errors so one retest reveals
       // the cause.
       final api = ServerContext.of(context);
-      final story = await shareStoryDetailed(link: p.spLink);
+      final story = await shareStoryDetailed(link: payload.spLink);
       if (!story.ok) {
         unawaited(
           api.logClientError('share-ig-story', '${cur.title} ${story.detail}'),
@@ -1481,7 +1493,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
         DebugInfo.share('ig-story', '');
         return;
       }
-      final caption = storyCaption(p.subject, p.spLink);
+      final caption = storyCaption(payload.subject, payload.spLink);
       final direct = await shareDirectDetailed(text: caption);
       if (!direct.ok) {
         unawaited(
@@ -1492,6 +1504,54 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
         );
       }
       if (instagramGenericNeeded(storyOk: story.ok, directOk: direct.ok)) {
+        // Unresolvable Stories/direct targets (Morphe/modded): DEFAULT to
+        // save-cover + copy-caption + toast, WITHOUT auto-launching doomed
+        // intents (they just flash IG open/closed). Launch only on explicit
+        // retry tap below.
+        if (instagramTargetsUnresolvable(
+          storyDetail: story.detail,
+          directDetail: direct.detail,
+        )) {
+          unawaited(
+            api.logClientError(
+              'share-ig-unresolvable',
+              '${cur.title} story=${story.detail} direct=${direct.detail}',
+            ),
+          );
+          final saved = await saveCoverCopyCaptionDetailed(caption: caption);
+          if (!saved.ok) {
+            unawaited(
+              api.logClientError(
+                'share-ig-save',
+                '${cur.title} ${saved.detail}',
+              ),
+            );
+          }
+          await Clipboard.setData(ClipboardData(text: caption));
+          DebugInfo.share('ig-saved', saved.detail);
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(tr(instagramOpenToast)),
+              duration: const Duration(seconds: 4),
+              action: SnackBarAction(
+                label: tr('Retry'),
+                onPressed: () async {
+                  // Explicit retry tap ONLY: now the doomed launches may run.
+                  final fb = await shareInstagramFallbackDetailed(
+                    caption: caption,
+                  );
+                  if (fb.ok) return;
+                  await shareCopyLinkOpenInstagramDetailed(
+                    link: payload.spLink,
+                    caption: caption,
+                  );
+                },
+              ),
+            ),
+          );
+          return;
+        }
         // Final tier: save cover to gallery + copy caption + launch IG
         // (always works, no fragile API) before the generic sheet.
         final fb = await shareInstagramFallbackDetailed(caption: caption);
@@ -1507,7 +1567,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
         // Always-works tier: copy link + open Instagram (no artwork needed —
         // survives Morphe builds that reject the art intents, or no cover).
         final cp = await shareCopyLinkOpenInstagramDetailed(
-            link: p.spLink, caption: caption);
+            link: payload.spLink, caption: caption);
         if (!cp.ok) {
           unawaited(
             api.logClientError(
@@ -1553,12 +1613,12 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
           );
           return;
         }
-        await _shipShare(context, link: caption, subject: p.subject);
+        await _shipShare(context, link: caption, subject: payload.subject);
       }
       return;
     }
-    final link = target == _ShareTarget.spotify ? p.spLink : p.ytLink;
-    await _shipShare(context, link: link, subject: p.subject);
+    final link = target == _ShareTarget.spotify ? payload.spLink : payload.ytLink;
+    await _shipShare(context, link: link, subject: payload.subject);
   }
 
   Future<void> _shipShare(
@@ -1668,8 +1728,11 @@ class _MetaSectionState extends State<_MetaSection> {
     // Internet/autoplay rows carry album + resolved identity directly on the
     // item; metainfo only covers library files. Fall back so the album still
     // shows on the Now Playing screen.
-    if (cur != null) {
+    if (cur != null && cur.album != _itemAlbum) {
       _itemAlbum = cur.album;
+      // Late engine fill (a lazy resolveName placeholder gained its album
+      // after first build, title unchanged): rebuild so the button appears.
+      if (mounted && base == _base && _meta != null) setState(() {});
     }
     final seq = ++_seq;
     if (base == _base && _meta != null) return;
@@ -1899,11 +1962,7 @@ class _MetaSectionState extends State<_MetaSection> {
 
   @override
   Widget build(BuildContext context) {
-    final album = (_meta?.album?.isNotEmpty ?? false)
-        ? _meta!.album
-        : (_itemAlbum?.isNotEmpty ?? false)
-        ? _itemAlbum
-        : null;
+    final album = nowPlayingAlbum(_meta?.album, _itemAlbum);
     return ValueListenableBuilder<String>(
       valueListenable: qp.currentTitle,
       builder: (_, t, __) => ListenableBuilder(

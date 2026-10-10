@@ -34,15 +34,32 @@ class MainActivity : AudioServiceActivity() {
     // either in onCreate (cold start) or onNewIntent (warm). The URL is kept
     // so the app can pull it on first boot ("getInitialLink") or be pushed it
     // immediately ("openUrl") when it's already running.
+    // WhatsApp shares arrive TWO ways: tapping a chat URL = VIEW with
+    // tracking query (?si=…&utm_source=… — our filters carry NO pathPattern
+    // so any path+query still matches); "share to app" = ACTION_SEND
+    // text/plain with the link inside EXTRA_TEXT (intent.data is null there).
     private var pendingUrl: String? = null
     private var messenger: BinaryMessenger? = null
+
+    private fun extractLink(intent: Intent?): String? {
+        if (intent == null) return null
+        intent.data?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
+        if (intent.action == Intent.ACTION_SEND) {
+            val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+                .orEmpty() + "\n" + intent.getCharSequenceExtra(Intent.EXTRA_SUBJECT)?.toString().orEmpty()
+            Regex("""https?://\S+""").find(text)?.value
+                ?.trimEnd(')', ']', '.', ',', ';', '!')
+                ?.takeIf { it.isNotBlank() }?.let { return it }
+        }
+        return null
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         // Capture the cold-start intent data up front — configureFlutterEngine
         // runs INSIDE super.onCreate, i.e. BEFORE our onCreate body stores it,
         // so grabbing it here (plus the eager flush below) removes any race in
         // which a deep link is orphaned between activity start and first frame.
-        intent?.data?.toString()?.let { pendingUrl = it }
+        extractLink(intent)?.let { pendingUrl = it }
         super.configureFlutterEngine(flutterEngine)
         messenger = flutterEngine.dartExecutor.binaryMessenger
         audioEventChannel = MethodChannel(
@@ -82,6 +99,11 @@ class MainActivity : AudioServiceActivity() {
                     val r = copyLinkOpenInstagram(link, text)
                     Log.i(SHARE_TAG, "result copyLinkOpenInstagram $r")
                     result.success(r)
+                } else if (call.method == "saveCoverCopyCaption") {
+                    val text = call.argument<String>("text").orEmpty()
+                    val r = saveCoverCopyCaption(text)
+                    Log.i(SHARE_TAG, "result saveCoverCopyCaption $r")
+                    result.success(r)
                 } else if (call.method == "canShareToInstagram") {
                     val ok = canShareToInstagram()
                     Log.i(SHARE_TAG, "result canShareToInstagram ok=$ok")
@@ -114,20 +136,22 @@ class MainActivity : AudioServiceActivity() {
                     result.notImplemented()
                 }
             }
-        // If a deep link arrived before the engine was configured, flush it now.
-        pendingUrl?.let { forwardDeepLink(it) }
+        // Cold start goes ONLY via getInitialLink (Dart pulls it post-frame
+        // when the navigator exists). Forwarding here too would deliver the
+        // same URL twice (openUrl event + getInitialLink) → double
+        // NowPlaying push + double playOne race.
         registerNoisyReceiver()
     }
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
-        intent?.data?.toString()?.let { pendingUrl = it }
+        extractLink(intent)?.let { pendingUrl = it }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        intent.data?.toString()?.let {
+        extractLink(intent)?.let {
             pendingUrl = it
             forwardDeepLink(it)
         }
@@ -370,6 +394,45 @@ class MainActivity : AudioServiceActivity() {
                 }
             }
             "fail: launch-failed artExists=$exists artSize=$size authority=$authority err=${errs.joinToString(" | ").ifEmpty { "no IG package found" }}"
+        } catch (e: Exception) {
+            "fail: exception=$e authority=$authority"
+        }
+    }
+
+    // No-launch tier: gallery save + clipboard only (unresolvable Stories/
+    // direct targets — launching just flashes IG open/closed on Morphe builds).
+    private fun saveCoverCopyCaption(caption: String): String {
+        val authority = ArtFileProvider.AUTHORITY
+        return try {
+            val file = java.io.File(getExternalFilesDir(null), ArtFileProvider.ART_FILE_NAME)
+            val exists = file.exists()
+            val size = if (exists) file.length() else -1L
+            if (!exists || size <= 0L) {
+                return "fail: no-art artExists=$exists artSize=$size authority=$authority"
+            }
+            runCatching {
+                if (Build.VERSION.SDK_INT >= 29) {
+                    val values = android.content.ContentValues().apply {
+                        put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "nasmusic_cover_${System.currentTimeMillis()}.jpg")
+                        put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                        put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/NASMusic")
+                    }
+                    val uri = contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                    if (uri != null) contentResolver.openOutputStream(uri)?.use { out ->
+                        file.inputStream().use { it.copyTo(out) }
+                    }
+                } else {
+                    val pics = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_PICTURES)
+                    val out = java.io.File(pics, "nasmusic_cover_${System.currentTimeMillis()}.jpg")
+                    file.copyTo(out, overwrite = true)
+                    sendBroadcast(Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, Uri.fromFile(out)))
+                }
+            }
+            runCatching {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("caption", caption))
+            }
+            "ok"
         } catch (e: Exception) {
             "fail: exception=$e authority=$authority"
         }

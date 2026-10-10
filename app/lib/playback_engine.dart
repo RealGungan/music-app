@@ -9,6 +9,33 @@ import 'package:audioplayers/audioplayers.dart';
 
 import 'audio_handler.dart';
 
+/// Process-wide SINGLE engine guard: audio may only ever come from one
+/// instance — kills the leaked-old-engine-plays-while-UI-reads-new-engine
+/// class entirely. All engines are born via [buildSingleEngine]; a second
+/// birth disposes the prior engine (stopping its audio) and fails loudly
+/// in debug (assert) + logs the birth count in all modes.
+int engineBirthCount = 0;
+PlaybackEngine? soleEngine;
+
+PlaybackEngine buildSingleEngine({required bool remote}) {
+  engineBirthCount++;
+  final prior = soleEngine;
+  if (prior != null) {
+    debugPrint(
+        '[engine] birth #$engineBirthCount remote=$remote SECOND-BIRTH — disposing prior ${prior.runtimeType}');
+    try {
+      (prior as dynamic).dispose();
+    } catch (_) {}
+  } else {
+    debugPrint('[engine] birth #$engineBirthCount remote=$remote');
+  }
+  final e = remote ? RemoteEngine() : LocalEngine();
+  soleEngine = e;
+  assert(prior == null,
+      'SECOND playback-engine birth — prior disposed; use QueuePlayer.instance.engine');
+  return e;
+}
+
 /// Backend that actually produces audio. [QueuePlayer] talks only to this
 /// interface, never to a raw audioplayers player, so the app can use either:
 ///
@@ -151,8 +178,11 @@ class RemoteEngine implements PlaybackEngine {
       _sbDur.add(d);
     });
     _local.onPlayerStateChanged.listen((s) {
-      _lastState = s;
+      // Remote truth wins while engaged: the idle local player's stale
+      // events (stop/completed on teardown) must not clobber _lastState
+      // without a stream event — that split is the lying-button class.
       if (_remoteUp) return;
+      _lastState = s;
       _sbState.add(s);
     });
     // The audio_service handler (which owns the real audioplayers player and
@@ -315,7 +345,9 @@ class RemoteEngine implements PlaybackEngine {
     _lastUrl = url;
     _tryEngage();
     if (_remoteUp) {
-      _lastState = PlayerState.stopped;
+      // No optimistic state flip: buffering keeps the last skin icon until
+      // the native state-stream answers (stream is sole truth; 500ms poll
+      // is backup only).
       _send({'cmd': 'play', 'url': url});
       return;
     }
@@ -392,26 +424,40 @@ class RemoteEngine implements PlaybackEngine {
   /// the handler's state reply (via [feedRemoteEvent]) so [_lastState] is
   /// forced + listeners repainted BEFORE this returns — the UI gates taps
   /// on that (QueuePlayer.stateSyncing), so no tap lands on a stale icon.
-  /// Falls back to the local correction when the handler is gone/timeout.
+  /// Also awaits the same round-trip's pos echo so the clock is fresh on
+  /// return — a state-only resync leaves a frozen timestamp when the
+  /// position stream died in the background. Falls back to the local
+  /// correction when the handler is gone/timeout.
   Future<void> resync({
     Duration timeout = const Duration(milliseconds: 1200),
   }) async {
     _tryEngage();
     if (_remoteUp) {
+      // Subscribe BEFORE the send: a state event queued before it (stale
+      // truth from a destroyed surface) must not satisfy the wait — only
+      // the handler's fresh reply completes it.
+      final stateFut = _sbState.stream.first.timeout(timeout);
+      final posFut = _sbPos.stream.first.timeout(timeout);
       _send({'cmd': 'getState'});
       // The port can die between engage and send (_send demotes on miss):
       // fall through to the local correction below instead of leaving
       // _lastState stale.
-      // Subscribe AFTER the send: a state event queued before it (stale
-      // truth from a destroyed surface) must not satisfy the wait — only
-      // the handler's fresh reply completes it.
       if (_remoteUp) {
+        var answered = false;
         try {
-          await _sbState.stream.first.timeout(timeout);
-          return;
+          await stateFut;
+          answered = true;
         } catch (_) {
           // Timeout: handler didn't answer — fall through to correction.
         }
+        try {
+          await posFut;
+          answered = true;
+        } catch (_) {
+          // Clock echo lost: the live position stream (or the stall
+          // detector's next audit) corrects it; never block resume on it.
+        }
+        if (answered) return;
       }
     }
     // Handler unreachable (killed while backgrounded): the local player is
@@ -524,6 +570,11 @@ class RemoteEngine implements PlaybackEngine {
 
   @override
   void dispose() {
+    // Kill handler-side audio too: _local.dispose() alone leaves the
+    // handler isolate's player running = the leaked-old-engine class.
+    try {
+      _send({'cmd': 'stop'});
+    } catch (_) {}
     _engageTimer?.cancel();
     _healthTimer?.cancel();
     _local.dispose();

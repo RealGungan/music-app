@@ -174,6 +174,20 @@ void main() {
     );
   });
 
+  test('gallery-save tier writes shared Pictures/ (IG-picker visible)', () {
+    // Must match MainActivity.kt RELATIVE_PATH — app-private files are
+    // invisible to the IG picker.
+    expect(instagramGalleryRelativePath, 'Pictures/NASMusic');
+    expect(instagramGalleryRelativePath.startsWith('Pictures/'), true);
+  });
+
+  test('Stories/direct tiers stay first (gallery is fallback only)', () {
+    expect(instagramShareTierOrder[0], 'shareStory');
+    expect(instagramShareTierOrder[1], 'shareDirectInstagram');
+    expect(instagramShareTierOrder.indexOf('shareInstagramFallback'),
+        greaterThan(1));
+  });
+
   test('shareTrace never throws (dead-tap logging is total)', () {
     shareTrace('tap test');
     shareTrace('attempt shareStory');
@@ -203,9 +217,30 @@ void main() {
           link: 'https://x', caption: 'cap');
       expect(cp.ok, false);
       expect(cp.detail, contains('exception'));
+      final saved = await saveCoverCopyCaptionDetailed(caption: 'cap');
+      expect(saved.ok, false);
+      expect(saved.detail, contains('exception'));
     } finally {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(ch, null);
     }
+  });
+
+  test('unresolvable gate: both no-resolve only (Morphe/modded default)', () {
+    const noPkg =
+        'fail: launch-failed err=no IG package found artExists=true artSize=42';
+    expect(
+      instagramTargetsUnresolvable(storyDetail: noPkg, directDetail: noPkg),
+      true,
+    );
+    expect(
+      instagramTargetsUnresolvable(storyDetail: 'ok', directDetail: noPkg),
+      false,
+    );
+    expect(
+      instagramTargetsUnresolvable(storyDetail: noPkg, directDetail: 'ok'),
+      false,
+    );
+    expect(instagramOpenToast, contains('open Instagram'));
   });
 }
