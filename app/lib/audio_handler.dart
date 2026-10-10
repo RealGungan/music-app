@@ -384,7 +384,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
       // Throttle the media-session publishing so the seek bar stays live
       // without flooding the notification on every ~200ms tick.
       if (DateTime.now().difference(_lastPlaybackPublish) >
-          const Duration(milliseconds: 500)) {
+          const Duration(seconds: 1)) {
         _publishPlayback();
       }
     });

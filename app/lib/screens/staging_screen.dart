@@ -28,6 +28,11 @@ class _StagingScreenState extends State<StagingScreen> {
   bool _loading = true;
   String _error = '';
   Timer? _timer;
+  // Adaptive poll state: back off when the list is unchanged/idle, poll fast
+  // while jobs run. Single-flight so slow ticks never overlap into 2x load.
+  bool _inFlight = false;
+  int _stableTicks = 0;
+  String _lastHash = '';
   // Swipe between server/phone pages (synced with the picker above).
   final PageController _pageCtrl = PageController();
   // One-shot cover backfill for phone rows saved before thumbs existed.
@@ -37,10 +42,26 @@ class _StagingScreenState extends State<StagingScreen> {
   void initState() {
     super.initState();
     _load();
-    _timer = Timer.periodic(
-      const Duration(seconds: 3),
-      (_) => _load(silent: true),
+    _schedule();
+  }
+
+  /// Next poll delay: 3s while busy/changing, else 6→9→12→15s backoff.
+  void _schedule() {
+    _timer?.cancel();
+    final busy = _isBusy;
+    final delay = downloadsPollDelaySec(
+      busy: busy,
+      stableTicks: _stableTicks,
     );
+    _timer = Timer(Duration(seconds: delay), () {
+      // Screen off / background: IndexedStack keeps this state alive on
+      // every tab — a bg tick is pure server cost, so skip and reschedule.
+      if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+        _schedule();
+        return;
+      }
+      _load(silent: true);
+    });
   }
 
   @override
@@ -52,12 +73,24 @@ class _StagingScreenState extends State<StagingScreen> {
 
   Future<void> _load({bool silent = false}) async {
     if (!silent) setState(() => _loading = true);
+    if (_inFlight) {
+      _schedule();
+      return;
+    }
+    _inFlight = true;
     try {
       final dls = await widget.api.downloads();
       if (!mounted) return;
       // Silent polls must never clobber a good list with a transient
       // empty (that reads as "everything vanished").
       if (silent && dls.isEmpty && _downloads.isNotEmpty) return;
+      final hash = downloadsHash(dls);
+      if (hash == _lastHash) {
+        _stableTicks++;
+      } else {
+        _stableTicks = 0;
+        _lastHash = hash;
+      }
       setState(() {
         _downloads = dls;
         _loading = false;
@@ -71,6 +104,9 @@ class _StagingScreenState extends State<StagingScreen> {
           _error = e.toString();
         });
       }
+    } finally {
+      _inFlight = false;
+      if (mounted) _schedule();
     }
   }
 
@@ -665,4 +701,18 @@ class _StagingScreenState extends State<StagingScreen> {
       ),
     );
   }
+}
+
+/// Change hash for the downloads list (pure, unit-tested): ids + statuses
+/// are everything the staging UI renders per tick.
+String downloadsHash(List<DownloadRow> dls) =>
+    dls.map((d) => '${d.id}:${d.status}').join('|');
+
+/// Adaptive /api/downloads poll interval (pure, unit-tested): 3s while jobs
+/// are active or the list just changed, else 6→9→12→15s backoff. Steady idle
+/// settles at 15s (~240 req/hr vs ~1200 at a flat 3s).
+int downloadsPollDelaySec({required bool busy, required int stableTicks}) {
+  if (busy || stableTicks <= 0) return 3;
+  const steps = [6, 9, 12, 15];
+  return steps[(stableTicks - 1).clamp(0, steps.length - 1)];
 }

@@ -215,7 +215,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
     // via getState; the reply feeds playingN, which rebuilds every button
     // directly. No watchdog compare/setState needed — one notifier means
     // the skin cannot disagree with itself. Bg-gated (resumed only).
-    _truthPoll = Timer.periodic(const Duration(seconds: 1), (_) {
+    _truthPoll = Timer.periodic(const Duration(seconds: 2), (_) {
       if (!mounted) return;
       if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
         return;

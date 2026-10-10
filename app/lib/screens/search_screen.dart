@@ -185,7 +185,7 @@ class _SearchScreenState extends State<SearchScreen> {
   /// (so discovery shows the moment it lands — its visibility must NOT be held
   /// hostage to a slow/failing artists fetch), and stops only when BOTH are no
   /// longer pending, or after a few tries.
-  Future<void> _pollDiscovery(String query, {int tries = 8}) async {
+  Future<void> _pollDiscovery(String query, {int tries = 4}) async {
     for (var n = 0; n < tries; n++) {
       await Future<void>.delayed(const Duration(milliseconds: 1200));
       if (!mounted) return;
@@ -388,6 +388,7 @@ class _SearchScreenState extends State<SearchScreen> {
           t.baseName,
           widget.api.fileUrl(t.url),
           thumbUrl: widget.api.coverUrl(t.url),
+          album: (t.album?.isNotEmpty ?? false) ? t.album : null,
         ),
       );
     } catch (e) {
@@ -429,6 +430,7 @@ class _SearchScreenState extends State<SearchScreen> {
             thumbUrl: s.albumImage != null
                 ? widget.api.coverUrl(s.nasUrl!)
                 : null,
+            album: (s.album?.isNotEmpty ?? false) ? s.album : null,
           ),
         );
       } catch (e) {
@@ -524,6 +526,7 @@ class _SearchScreenState extends State<SearchScreen> {
     t.baseName,
     widget.api.fileUrl(t.url),
     thumbUrl: widget.api.coverUrl(t.url),
+    album: (t.album?.isNotEmpty ?? false) ? t.album : null,
   );
 
   /// Build a QueueItem for a discovery track using the placeholder URL
@@ -556,6 +559,7 @@ class _SearchScreenState extends State<SearchScreen> {
         s.baseName,
         widget.api.fileUrl(s.url),
         thumbUrl: s.albumImage != null ? widget.api.coverUrl(s.url) : null,
+        album: (s.album?.isNotEmpty ?? false) ? s.album : null,
       );
     }
     final artist = s.artist?.isNotEmpty == true ? s.artist! : '';

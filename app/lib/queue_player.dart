@@ -235,6 +235,32 @@ StallFix stallAudit({
   return StallFix.none;
 }
 
+/// Headless-advance pre-push selector (pure, unit-tested): index of the track
+/// the handler must auto-start on natural completion while the UI isolate
+/// sleeps (screen off / Doze — no Dart timers run there). Repeat-one replays
+/// the current row, otherwise the next row with end-of-queue wrap (mirrors
+/// next()). -1 when the queue cannot advance.
+int prePushIndex({
+  required int len,
+  required int index,
+  required bool repeat,
+}) {
+  if (len <= 0 || index < 0 || index >= len) return -1;
+  if (repeat) return index;
+  if (index + 1 < len) return index + 1;
+  return 0;
+}
+
+/// True when [it] has no directly playable URL (empty, resolve placeholder,
+/// or lazy artist+title row): the pre-push must RESOLVE it before handing it
+/// to the handler — pushing nothing (the old early-return) left the handler
+/// with no next track, so screen-off completion stalled forever with the UI
+/// asleep and no timer left to advance it.
+bool needsPushResolve(QueueItem it) =>
+    it.url.isEmpty ||
+    it.url.contains('/staging/resolve/') ||
+    it.resolveName != null;
+
 /// App-wide playback queue with shuffle — the "streaming engine".
 class QueuePlayer {
   QueuePlayer._() {
@@ -422,8 +448,12 @@ class QueuePlayer {
     // skin's sole source, so the lie corrects itself within one tick.
     // Repaint-only: the handler keeps actual audio state, so a false
     // positive self-reverses on the next tick instead of killing sound.
-    _auditTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+    _auditTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+        _auditPos = position.value;
+        return;
+      }
+      if (!_player.isPlaying) {
         _auditPos = position.value;
         return;
       }
@@ -2510,30 +2540,180 @@ class QueuePlayer {
       await _refreshEngineNextOffline();
       return;
     }
-    final QueueItem it;
-    if (repeatEnabled.value) {
-      it = items[index];
-    } else if (index + 1 < items.length) {
-      it = items[index + 1];
-    } else {
-      it = items[0];
-    }
-    final u = it.url;
-    if (u.isEmpty ||
-        u.contains('/staging/resolve/') ||
-        it.resolveName != null) {
+    final nextIdx = prePushIndex(
+      len: items.length,
+      index: index,
+      repeat: repeatEnabled.value,
+    );
+    if (nextIdx < 0) {
+      _player.queueNext();
       return;
     }
-    final t = it.lyricsTitle?.isNotEmpty == true
-        ? '${it.lyricsArtist ?? ''} - ${it.lyricsTitle}'
-        : it.title;
+    final QueueItem it = items[nextIdx];
+    var u = it.url;
+    if (needsPushResolve(it)) {
+      // Screen-off completion self-starts ONLY from a pushed URL: resolve
+      // the placeholder NOW (bounded) and write it back so the handler's
+      // 'advanced' adoption matches the queue row by url. Unresolvable =
+      // clear the stale push (a wrong song autostarting unattended is worse
+      // than the legacy complete path advancing on wake).
+      try {
+        final r = await _resolvePushUrl(it);
+        if (r == null || r.url.isEmpty) {
+          _player.queueNext();
+          return;
+        }
+        final at = items.indexWhere((e) => identical(e, it));
+        if (at >= 0) items[at] = r;
+        u = r.url;
+      } catch (_) {
+        // Disk/store lookups can throw outside the app sandbox (tests) —
+        // never let the fire-and-forget push die unhandled; clear instead.
+        try {
+          _player.queueNext();
+        } catch (_) {}
+        return;
+      }
+    }
+    // Read the (possibly just written-back) row: the push metadata must
+    // describe the resolved URL the handler will actually autostart.
+    final pushed = items[nextIdx];
+    final t = pushed.lyricsTitle?.isNotEmpty == true
+        ? '${pushed.lyricsArtist ?? ''} - ${pushed.lyricsTitle}'
+        : pushed.title;
     final split = t.indexOf(' - ');
     _player.queueNext(
       url: u,
       title: split > 0 ? t.substring(split + 3).trim() : t,
       artist: split > 0 ? t.substring(0, split).trim() : '',
-      album: it.album,
+      album: pushed.album,
     );
+  }
+
+  /// Resolve [it] to a directly playable URL for the handler pre-push
+  /// (screen-off self-start). Cheap-first (download/cache/NAS, no network
+  /// waits when avoidable), then bounded online resolves. Returns a queue
+  /// row carrying the resolved URL (all other fields preserved so adoption
+  /// matches), or null when nothing is playable right now.
+  Future<QueueItem?> _resolvePushUrl(QueueItem it) async {
+    final local = OfflineStore.localUriFor(it.title, it.baseName);
+    if (local != null) {
+      return QueueItem(
+        it.title,
+        local,
+        thumbUrl: it.thumbUrl,
+        baseName: it.baseName,
+        videoId: it.videoId,
+        resolveName: it.resolveName,
+        manuallyPlaced: it.manuallyPlaced,
+        fromInternet: it.fromInternet,
+        album: it.album,
+        albumImage: it.albumImage,
+        lyricsArtist: it.lyricsArtist,
+        lyricsTitle: it.lyricsTitle,
+        liked: it.liked,
+      );
+    }
+    final cached = await _cachedUriFor(it);
+    if (cached != null) {
+      return QueueItem(
+        it.title,
+        cached,
+        thumbUrl: it.thumbUrl,
+        baseName: it.baseName,
+        videoId: it.videoId,
+        resolveName: it.resolveName,
+        manuallyPlaced: it.manuallyPlaced,
+        fromInternet: it.fromInternet,
+        album: it.album,
+        albumImage: it.albumImage,
+        lyricsArtist: it.lyricsArtist,
+        lyricsTitle: it.lyricsTitle,
+        liked: it.liked,
+      );
+    }
+    if (nasLookup != null) {
+      final id = _nasIdentity(it);
+      if (id != null && (id.artist.isNotEmpty || id.title.isNotEmpty)) {
+        try {
+          final nasUrl = await nasLookup!(
+            id.artist,
+            id.title,
+          ).timeout(const Duration(seconds: 2));
+          if (nasUrl != null && nasUrl.isNotEmpty) {
+            return QueueItem(
+              it.title,
+              nasUrl,
+              thumbUrl: it.thumbUrl,
+              baseName: it.baseName,
+              videoId: it.videoId,
+              resolveName: it.resolveName,
+              manuallyPlaced: it.manuallyPlaced,
+              fromInternet: it.fromInternet,
+              album: it.album,
+              albumImage: it.albumImage,
+              lyricsArtist: it.lyricsArtist,
+              lyricsTitle: it.lyricsTitle,
+              liked: it.liked,
+            );
+          }
+        } catch (_) {}
+      }
+    }
+    if (!isOffline.value && await _nasDown()) isOffline.value = true;
+    if (isOffline.value) return null;
+    try {
+      if (it.videoId != null && resolver != null) {
+        final url = await resolver!(
+          it.videoId!,
+        ).timeout(const Duration(seconds: 8));
+        if (url.isEmpty) return null;
+        return QueueItem(
+          it.title,
+          url,
+          thumbUrl: it.thumbUrl,
+          baseName: it.baseName,
+          videoId: it.videoId,
+          resolveName: it.resolveName,
+          manuallyPlaced: it.manuallyPlaced,
+          fromInternet: it.fromInternet,
+          album: it.album,
+          albumImage: it.albumImage,
+          lyricsArtist: it.lyricsArtist,
+          lyricsTitle: it.lyricsTitle,
+          liked: it.liked,
+        );
+      }
+      if (it.resolveName != null && nameResolver != null) {
+        final rn = it.resolveName!;
+        final res = await nameResolver!(
+          rn.artist,
+          rn.title,
+        ).timeout(const Duration(seconds: 8));
+        if (res.url.isEmpty) return null;
+        final hasArt = it.thumbUrl?.isNotEmpty ?? false;
+        return QueueItem(
+          it.title,
+          res.url,
+          thumbUrl: hasArt
+              ? it.thumbUrl
+              : (res.thumb.isNotEmpty ? res.thumb : null),
+          baseName: it.baseName,
+          videoId: it.videoId ?? res.videoId,
+          resolveName: it.resolveName,
+          manuallyPlaced: it.manuallyPlaced,
+          fromInternet: it.fromInternet,
+          album: res.album ?? it.album,
+          albumImage: it.albumImage,
+          lyricsArtist: it.lyricsArtist,
+          lyricsTitle: it.lyricsTitle,
+          liked: it.liked,
+        );
+      }
+    } catch (_) {
+      return null;
+    }
+    return null;
   }
 
   /// Offline half of [_refreshEngineNext]: push a cached file:// URL the
@@ -2700,11 +2880,12 @@ class QueuePlayer {
                 baseName: it.baseName,
                 videoId: it.videoId ?? res.videoId,
                 // Same preservation as above: dropping these loses
-                // re-resolvability and art/album on replay.
+                // re-resolvability and art/album on replay. Backfilled
+                // resolvname album wins; never overwrite with null.
                 resolveName: it.resolveName,
                 manuallyPlaced: it.manuallyPlaced,
                 fromInternet: it.fromInternet,
-                album: it.album,
+                album: res.album ?? it.album,
                 albumImage: it.albumImage,
                 lyricsArtist: it.lyricsArtist,
                 lyricsTitle: it.lyricsTitle,

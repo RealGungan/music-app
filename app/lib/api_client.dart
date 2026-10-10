@@ -1919,13 +1919,17 @@ class ApiClient {
     List<String>? exclude,
   }) async {
     final j = _decode(
-      await _client.get(_uri('/api/radio', {
-        'artist': artist,
-        'title': title,
-        if (limit != null) 'limit': '$limit',
-        if (exclude != null && exclude.isNotEmpty)
-          'exclude': exclude.join(','),
-      })),
+      await _client
+          .get(_uri('/api/radio', {
+            'artist': artist,
+            'title': title,
+            if (limit != null) 'limit': '$limit',
+            if (exclude != null && exclude.isNotEmpty)
+              'exclude': exclude.join(','),
+          }))
+          // Fail fast into the recommend→radio→cache fallback chain: the
+          // default 30s pipe limit parked the queue PAUSED on one slow source.
+          .timeout(const Duration(seconds: 15)),
     );
     return (j['results'] as List? ?? [])
         .whereType<Map<String, dynamic>>()
@@ -1943,15 +1947,19 @@ class ApiClient {
     List<String>? exclude,
   }) async {
     final j = _decode(
-      await _client.get(
-        _uri('/api/recommend', {
-          'artist': artist,
-          'title': title,
-          if (limit != null) 'limit': '$limit',
-          if (exclude != null && exclude.isNotEmpty)
-            'exclude': exclude.join(','),
-        }),
-      ),
+      await _client
+          .get(
+            _uri('/api/recommend', {
+              'artist': artist,
+              'title': title,
+              if (limit != null) 'limit': '$limit',
+              if (exclude != null && exclude.isNotEmpty)
+                'exclude': exclude.join(','),
+            }),
+          )
+          // Same fail-fast as radio() above: one hung source must not stall
+          // the refill past the 30s pipe limit into a dead PAUSED queue.
+          .timeout(const Duration(seconds: 15)),
     );
     return (j['results'] as List? ?? [])
         .whereType<Map<String, dynamic>>()
@@ -2230,7 +2238,7 @@ class ApiClient {
   Future<ResolvedName> resolveByName({
     required String artist,
     required String title,
-    int maxTries = 60,
+    int maxTries = 30,
     Duration pollWait = const Duration(milliseconds: 400),
   }) async {
     // Cold hits run a SHARED background job on the server (so taps never

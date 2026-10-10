@@ -32,6 +32,7 @@ import 'replace_tracker.dart';
 import 'keep_dialog.dart';
 import 'now_playing.dart' show NowPlayingRoute;
 import 'playback_engine.dart';
+import 'queue/text_norm.dart';
 import 'queue_player.dart';
 import 'screens/library_screen.dart';
 import 'screens/listen_history_screen.dart';
@@ -1000,7 +1001,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
     // metadata can't change without a track-change push (the listeners
     // above fire regardless of lifecycle), so a bg re-push is pure
     // isolate traffic + a needless art check every few seconds.
-    _audioTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
+    _audioTimer ??= Timer.periodic(const Duration(seconds: 2), (_) {
       if (!qp.playing) return;
       if (_lastLifecycle != null &&
           _lastLifecycle != AppLifecycleState.resumed) {
@@ -1021,6 +1022,12 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
   }
 
   Timer? _audioTimer;
+
+  /// Last non-empty recommend/radio batch (raw Suggestions). When BOTH live
+  /// sources fail or return 0 rows, the refill serves this warm batch minus
+  /// already-queued titles instead of parking the queue dead (the "single
+  /// recommend failure kills queue" regression).
+  List<Suggestion> _warmRel = [];
 
   /// Spotify/YT-Music autoplay: fills the queue with related internet tracks
   /// ("from internet") behind the current NAS song. Re-pointed at the live
@@ -1094,6 +1101,19 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
         debugPrint(
           '[autoplay] both recommend and radio returned empty for "$seedLabel"',
         );
+        // Heal: serve the last warm batch (fresh titles only) so one dead
+        // source never drains the queue into a permanent PAUSED.
+        final excluded = {
+          for (final t in (excludeTitles ?? const <String>[])) t,
+        };
+        rows = warmRelFallback(_warmRel, excluded, limit ?? 20);
+        if (rows.isNotEmpty) {
+          debugPrint(
+            '[autoplay] warm-cache heal: serving ${rows.length} cached rows',
+          );
+        }
+      } else {
+        _warmRel = rows;
       }
       Future<QueueItem?> resolveOne(Suggestion s) async {
         try {
@@ -1366,6 +1386,27 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
       ),
     );
   }
+}
+
+/// Warm-cache heal for autoplay refills (pure, unit-tested): when both live
+/// sources fail, serve fresh titles from the last good batch. [excluded] are
+/// title-only server norms (same shape as relatedSource's excludeTitles).
+List<Suggestion> warmRelFallback(
+  List<Suggestion> cache,
+  Set<String> excluded,
+  int limit,
+) {
+  final out = <Suggestion>[];
+  for (final s in cache) {
+    if (out.length >= limit) break;
+    if (excluded.contains(
+      excludeNorm('${s.artist ?? ''} - ${s.title ?? ''}'),
+    )) {
+      continue;
+    }
+    out.add(s);
+  }
+  return out;
 }
 
 class _HomeShell extends StatefulWidget {

@@ -100,7 +100,7 @@ class Announcer {
   static Future<void> check(ApiClient api) async {
     if (_checking ||
         DateTime.now().difference(_lastCheck) <
-            const Duration(minutes: 5)) {
+            const Duration(minutes: 15)) {
       return;
     }
     _checking = true;

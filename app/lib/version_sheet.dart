@@ -135,6 +135,10 @@ Future<void> _confirmAndReplace(
   var failures = 0;
   var stable = 0;
   var lastPhase = '';
+  // /api/jobs is the primary source; the /api/downloads fallback below runs
+  // at most every 3rd tick — unthrottled it doubled downloads traffic for
+  // the whole watch whenever the job left the jobs list early.
+  var emptyTicks = 0;
   bool _finished = false;
   try {
     for (var i = 0; i < 450; i++) {
@@ -151,6 +155,7 @@ Future<void> _confirmAndReplace(
         }
       }
       if (phase.isEmpty) {
+        if (++emptyTicks % 3 != 0) continue;
         final rows = await api.downloads();
         for (final d in rows) {
           if (d.id == jobId) {
@@ -158,6 +163,8 @@ Future<void> _confirmAndReplace(
             break;
           }
         }
+      } else {
+        emptyTicks = 0;
       }
       failures = 0;
     } catch (_) {
