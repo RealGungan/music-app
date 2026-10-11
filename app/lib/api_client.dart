@@ -1717,9 +1717,11 @@ class ApiClient {
 
   /// Fire-and-forget NAS prewarm: warms TCP/TLS + file open so playOne's
   /// first Range GET answers progressively (206) instead of after full open.
+  /// Persistent client (not a fresh http.get): reuses the keep-alive
+  /// TCP/TLS session (~20ms saved per prewarm on funnel) + 30s cap.
   void prewarmFile(String url) {
     unawaited(
-      http
+      _client
           .get(Uri.parse(url), headers: const {'Range': 'bytes=0-65535'})
           .then<void>((_) {})
           .catchError((_, __) {}),
@@ -1759,13 +1761,29 @@ class ApiClient {
     return e.url != null ? coverUrl(e.url!) : '';
   }
 
+  /// YouTube video-id allowlist (mirrors server VID_RE): direct-CDN
+  /// thumbs skip the NAS proxy only for well-formed ids.
+  static final _vidRe = RegExp(r'^[A-Za-z0-9_-]{11}$');
+
+  /// Direct YouTube thumbnail (no NAS proxy, no token): the proxy doubles
+  /// the funnel uplink and adds a NAS→ytimg fetch per tile.
+  static String _ytThumbDirect(String videoId) =>
+      'https://i.ytimg.com/vi/$videoId/hqdefault.jpg';
+
   /// User-set playlist cover image URL (404 if none set).
   String playlistCoverUrl(String name) => _tok(
       '$_base/staging/api/cover?pl=${Uri.encodeComponent(name)}');
 
   /// Video thumbnail URL (YouTube art for a download row that has no
-  /// staged file yet). 404 until the video id is known.
-  String coverVidUrl(String videoId) => _tok(
+  /// staged file yet). Direct CDN by default; malformed ids fall back to
+  /// the proxied endpoint (404 until the video id is known). Use
+  /// [coverVidUrlProxied] on networks that block i.ytimg.com.
+  String coverVidUrl(String videoId) => _vidRe.hasMatch(videoId)
+      ? _ytThumbDirect(videoId)
+      : coverVidUrlProxied(videoId);
+
+  /// Proxied variant: server fetches + caches (token-attached).
+  String coverVidUrlProxied(String videoId) => _tok(
       '$_base/staging/api/cover?vid=${Uri.encodeComponent(videoId)}');
 
   /// Fetch the cover image bytes for a library/playlist file (null if none).
@@ -2125,7 +2143,7 @@ class ApiClient {
   }
 
   /// Direct download URL for the latest APK (tap-to-update target).
-  String get apkUrl => '$serverBase/staging/app.apk';
+  String get apkUrl => '$funnelBase/staging/app.apk';
 
   /// Owner-only: flip the automatic app-update notices kill switch.
   Future<bool> setAppUpdates(bool enabled) async {
@@ -2335,9 +2353,11 @@ class ApiClient {
   String relayUrl(String videoId) =>
       _tok('$serverBase/staging/api/stream?vid=$videoId');
 
-  /// YouTube thumbnail proxied through the server (for discovery tracks).
-  String thumbUrl(String videoId) =>
-      _tok('$_base/staging/api/cover?vid=$videoId');
+  /// YouTube thumbnail for discovery tracks: direct CDN by default
+  /// (see coverVidUrl); malformed ids fall back to the server proxy.
+  String thumbUrl(String videoId) => _vidRe.hasMatch(videoId)
+      ? _ytThumbDirect(videoId)
+      : _tok('$_base/staging/api/cover?vid=$videoId');
 
   /// Any external image proxied through the server (Wrapped artist
   /// photos). Direct CDN bytes often fail on the phone; the server

@@ -430,4 +430,4 @@ class Database:
         self.execute(
             """INSERT OR REPLACE INTO webcache(key, value, seen_at)
                VALUES(?,?,?)""", (key, json.dumps(value, ensure_ascii=False),
-                                  ts))
+                                    ts))

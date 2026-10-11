@@ -694,7 +694,7 @@ class QueuePlayer {
       final r = await api.resolveByName(artist: artist, title: title);
       return (
         url: r.url,
-        // ponytail: proxied thumb; raw hqdefault works too but drops ?token=
+        // ponytail: direct-CDN thumb (no NAS proxy, no token needed).
         thumb: r.thumb.isNotEmpty && r.videoId.isNotEmpty
             ? api.thumbUrl(r.videoId)
             : '',
@@ -740,6 +740,14 @@ class QueuePlayer {
   bool _autoplaying = false;
   int _autoplayForIndex = -1;
   DateTime? _lastAddMoreAt;
+
+  /// Explicit single-song play (search tap): the queue must STOP at the
+  /// tapped song — no autoplay refill, no advance. Set only via
+  /// playList(single: true); any multi-row playList clears it, and addMore()
+  /// (explicit "continue") clears it before filling. playOne() stays a plain
+  /// single-row play (artist taps rely on the refill) — search uses
+  /// playList([item], single: true). Public so tests can pin the contract.
+  bool explicitSingle = false;
 
   /// The keep-ahead engine (spotify/yt-music style "up next").
   ///
@@ -892,12 +900,14 @@ class QueuePlayer {
     bool startShuffled = false,
     bool playFromPlaylist = false,
     String? playlistName,
+    bool single = false,
   }) async {
     if (q.isEmpty) return;
     items = List.of(q);
     queueLength.value = items.length;
     fromPlaylist.value = playFromPlaylist;
     this.playlistName = playlistName;
+    explicitSingle = single && q.length == 1;
     _shuffle = startShuffled;
     shuffleEnabled.value = _shuffle;
     index = startIndex.clamp(0, items.length - 1);
@@ -2224,6 +2234,13 @@ class QueuePlayer {
       debugPrint('[autoplay] empty queue');
       return;
     }
+    // Explicit single-play (search tap) stops at the tapped song: no refill
+    // (which would queue the "skips to another, again and again" tail), even
+    // on the completion force-path. addMore()/multi-playList clear the flag.
+    if (explicitSingle) {
+      DiagLog.restart.log('fill skip: explicit single-play stops here');
+      return;
+    }
     if (relatedSource == null) {
       debugPrint('[autoplay] relatedSource is NULL — _wireAutoplay not run?');
       return;
@@ -2301,6 +2318,8 @@ class QueuePlayer {
       return;
     }
     _lastAddMoreAt = DateTime.now();
+    // Explicit user ask for more ends the single-play stop.
+    explicitSingle = false;
     // Explicit user ask → top up a full keep-ahead batch (never a "+6" trickle).
     await _fillRelated(maxRows: planner.keepAhead);
   }
