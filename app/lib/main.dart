@@ -471,7 +471,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
     // Fast offline notice (fresh probe, capped) — display only, gates on
     // nothing.
     try {
-      if (await QueuePlayer.probeOffline()) {
+      if (await QueuePlayer.probeOffline(api: _api)) {
         if (!mounted) return;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           final ctx = _messengerKey.currentContext;

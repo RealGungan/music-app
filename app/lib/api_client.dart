@@ -1222,9 +1222,25 @@ class ApiClient {
   /// Fast TCP reachability probe to the NAS (1.5s cap). Used for instant
   /// offline decisions instead of relying on connectivity_plus which only
   /// reports interface state (WiFi up ≠ NAS reachable).
+  /// Reachable-base ping: tries the current base, and on failure re-probes
+  /// (tailnet ↔ funnel) and tries the winner once. Every offline verdict
+  /// must go through here (or [pingCurrent] + explicit re-probe) — never
+  /// declare offline while the funnel answers.
   Future<bool> ping() async {
+    if (await pingCurrent()) return true;
     try {
-      final uri = Uri.parse(_base);
+      await selectBestBase().timeout(const Duration(seconds: 6));
+    } catch (_) {}
+    return pingCurrent();
+  }
+
+  /// Fast single-base ping (no re-probe): for clearing a stale offline flag
+  /// on hot paths where a full re-probe would stall every tap.
+  Future<bool> pingCurrent() => _pingBase(_base);
+
+  Future<bool> _pingBase(String base) async {
+    try {
+      final uri = Uri.parse(base);
       final host = uri.host;
       final port = uri.hasPort ? uri.port : (uri.scheme == 'https' ? 443 : 80);
       await Socket.connect(host, port, timeout: const Duration(milliseconds: 1500));
@@ -1232,6 +1248,25 @@ class ApiClient {
     } catch (_) {
       return false;
     }
+  }
+
+  /// True when [url] points at this server on ANY known base (tailnet or
+  /// funnel) — catches rows minted before a base flip. file:// never matches.
+  static bool isNasUrl(String url) {
+    if (url.startsWith('file://')) return false;
+    return url.startsWith(_norm(lanBase)) || url.startsWith(_norm(funnelBase));
+  }
+
+  /// Rewrite a stale-base server URL onto the current reachable base so old
+  /// queue rows follow a tailnet↔funnel flip instead of hanging to timeout.
+  /// Non-server URLs pass through untouched.
+  String rebaseUrl(String url) {
+    for (final b in [_norm(lanBase), _norm(funnelBase)]) {
+      if (url.startsWith(b) && b != serverBase) {
+        return '$serverBase${url.substring(b.length)}';
+      }
+    }
+    return url;
   }
 
   /// Append the session token to a hand-built absolute URL (file, stream,

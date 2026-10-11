@@ -81,6 +81,23 @@ class QueueItem {
     this.lyricsTitle,
     this.liked,
   });
+
+  /// Copy with a new url (base-flip rebase): identity/display untouched.
+  QueueItem withUrl(String u) => QueueItem(
+        title,
+        u,
+        thumbUrl: thumbUrl,
+        baseName: baseName,
+        videoId: videoId,
+        resolveName: resolveName,
+        manuallyPlaced: manuallyPlaced,
+        fromInternet: fromInternet,
+        album: album,
+        albumImage: albumImage,
+        lyricsArtist: lyricsArtist,
+        lyricsTitle: lyricsTitle,
+        liked: liked,
+      );
 }
 
 /// Instant placeholder for a Spotify /track/ deep-link parse ([OpenLink]
@@ -649,11 +666,38 @@ class QueuePlayer {
     }
   }
 
-  /// Single choke point for the "radio up, NAS dead?" question: pings when
-  /// the flag still says online and flips it when the NAS doesn't answer.
-  /// Offline-confirmed = wrap to cached, never blind +1.
+  /// Single choke point for the "radio up, NAS dead?" question. Online:
+  /// pings and flips the flag when the NAS doesn't answer. Offline: one
+  /// cheap current-base ping clears a stale-true latch the moment the
+  /// server answers (no full re-probe on every tap — heal + the network
+  /// listener own the tailnet↔funnel flip). Offline-confirmed = wrap to
+  /// cached, never blind +1.
   Future<void> _ensureOfflineFlag() async {
-    if (!isOffline.value && await _nasDown()) isOffline.value = true;
+    if (!isOffline.value) {
+      if (await _nasDown()) isOffline.value = true;
+    } else if (_api != null) {
+      try {
+        if (await _api!.pingCurrent().timeout(const Duration(seconds: 3))) {
+          isOffline.value = false;
+        }
+      } catch (_) {}
+    }
+  }
+
+  /// Re-probe-then-verdict before heal: re-runs base selection (tailnet ↔
+  /// funnel) so a stale offline flag clears when the reachable base answers.
+  /// Never declares offline while the funnel answers.
+  Future<void> _reprobeOfflineFlag() async {
+    // Fast path: the reachable base answers one ping, flag settles in ms.
+    if (!await _nasDown()) {
+      isOffline.value = false;
+      return;
+    }
+    // Slow path: full re-probe of both bases, verdict follows the winner.
+    try {
+      await _api?.selectBestBase().timeout(const Duration(seconds: 6));
+    } catch (_) {}
+    isOffline.value = await _nasDown();
   }
 
   /// Stall watchdog baseline (a dead socket doesn't always complete or
@@ -1503,12 +1547,25 @@ class QueuePlayer {
         return;
       }
       var url = resolved;
+      // Base flip (tailnet ↔ funnel) orphans stored server URLs: follow the
+      // reachable base instead of hanging to timeout. Written back so the
+      // pre-push + handler adoption (exact-url match) stay in sync.
+      if (_api != null && ApiClient.isNasUrl(url)) {
+        final live = _api!.rebaseUrl(url);
+        if (live != url) {
+          url = live;
+          final at = items.indexOf(item);
+          if (at >= 0 && identical(items[at], item)) {
+            items[at] = item.withUrl(live);
+          }
+        }
+      }
       // Dead-but-returned NAS URL (resolved with no timeout, NAS died
       // since): never play a doomed NAS http — cached file now, else the
       // nearest cached row (same redirect as the null branch above).
       if (!url.startsWith('file://') &&
           _api != null &&
-          url.startsWith(_api!.serverBase)) {
+          ApiClient.isNasUrl(url)) {
         if (!isOffline.value && await _nasDown()) isOffline.value = true;
         if (isOffline.value && gen == _playGen) {
           if (await _failoverCached(
@@ -1956,10 +2013,10 @@ class QueuePlayer {
       'state=${_lastPlayerState.name}',
     );
     _setLoading(true);
-    // Radio-up ≠ reachable: a stall/VPN/funnel drop reads online but the
-    // NAS is gone — ping first so we read cache instead of burning
-    // resolve attempts on dead network URLs.
-    if (!isOffline.value && await _nasDown()) isOffline.value = true;
+    // Re-probe before heal: a stale offline flag (base flipped to funnel
+    // since) must clear when the reachable base answers, not heal into the
+    // cache path forever.
+    await _reprobeOfflineFlag();
     const waits = [0, 1, 2, 4, 8, 15];
     for (var attempt = 0; attempt < waits.length; attempt++) {
       if (hid != _healGen || gen != _playGen) return;
@@ -2596,6 +2653,17 @@ class QueuePlayer {
     }
     // Read the (possibly just written-back) row: the push metadata must
     // describe the resolved URL the handler will actually autostart.
+    // Base flip: stored server URLs go stale — push the reachable base and
+    // write it back so the handler's 'advanced' adoption (exact-url match)
+    // finds this row.
+    if (_api != null && ApiClient.isNasUrl(u)) {
+      final live = _api!.rebaseUrl(u);
+      if (live != u) {
+        u = live;
+        final at = items.indexWhere((e) => identical(e, it));
+        if (at >= 0) items[at] = it.withUrl(live);
+      }
+    }
     final pushed = items[nextIdx];
     final t = pushed.lyricsTitle?.isNotEmpty == true
         ? '${pushed.lyricsArtist ?? ''} - ${pushed.lyricsTitle}'

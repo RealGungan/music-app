@@ -138,8 +138,18 @@ class _SearchScreenState extends State<SearchScreen> {
     } catch (e) {
       if (!mounted) return;
       // A dead route just proved offline: show cached rows + badge instead
-      // of a spinner/error, and flag it so later taps go cache-first.
+      // of a spinner/error, and flag it so later taps go cache-first. The
+      // ping follows the reachable base — never declare offline while the
+      // funnel answers (a slow tailnet timeout is not offline).
       if (e is TimeoutException) {
+        if (await widget.api.ping()) {
+          if (!mounted) return;
+          setState(() {
+            _loading = false;
+            _error = e.toString();
+          });
+          return;
+        }
         QueuePlayer.instance.isOffline.value = true;
         await _searchOffline(query);
         return;
