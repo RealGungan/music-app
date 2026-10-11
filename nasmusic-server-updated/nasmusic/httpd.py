@@ -155,7 +155,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.296"
+APP_VERSION = "1.0.298"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -354,7 +354,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self, obj, status=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-        self._send(status, body, "application/json; charset=utf-8")
+        # Funnel uplink is the bottleneck for remote users (playlist detail
+        # is ~300KB of JSON): gzip it with stdlib only when the client
+        # accepts it and it's worth it. Dart's HttpClient auto-decompresses.
+        extra = None
+        if len(body) > 1024 and "gzip" in (
+                self.headers.get("Accept-Encoding") or "").lower():
+            import gzip as _gzip
+            try:
+                body = _gzip.compress(body, compresslevel=6)
+                extra = {"Content-Encoding": "gzip",
+                         "Vary": "Accept-Encoding"}
+            except Exception:                            # noqa: BLE001
+                pass
+        self._send(status, body, "application/json; charset=utf-8",
+                   extra_headers=extra)
 
     def _error(self, status, msg):
         self._json({"error": str(msg)}, status=status)
@@ -3685,6 +3699,10 @@ class Handler(BaseHTTPRequestHandler):
             p = urllib.parse.urlparse(url)
             if p.scheme not in ("http", "https") or not p.hostname:
                 return self._error(400, "bad url")
+            if p.path.rstrip("/").endswith("/app.apk"):
+                # ponytail: announcer dedups on the exact funnel apk URL;
+                # a LAN-host apk link would double-ping every device.
+                url = "https://naboo.taildfeb4f.ts.net/staging/app.apk"
         import time as _time
         import random as _random
         item = {"id": "b%d-%d" % (int(_time.time() * 1000),
@@ -7513,7 +7531,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if rest == []:
             if self.command == "GET":
-                return self._json(self._playlist_detail(user, name))
+                return self._json(self._playlist_detail_cached(user, name))
             if self.command == "DELETE":
                 m3u = self._user_m3u_path(user, name)
                 if m3u is not None and os.path.exists(m3u):
@@ -7524,6 +7542,49 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(404, "no such playlist")
 
         self.send_error(404, "no such endpoint")
+
+    _playlist_detail_cache = {}  # (user, name) -> (ts, sig, payload)
+
+    def _playlist_detail_cached(self, user, name):
+        """mTime-keyed detail cache: a 704-track open costs ~110ms of
+        SQLite stats (per-row exists/meta/duration lookups + a full
+        liked-tree scan). Reopens within 30s with unchanged m3us skip
+        all of it (one ~10-stat sig check). Sig = own m3u mtime/size +
+        max mtime over the user's m3u set (liked flags read every m3u,
+        so a like-toggle busts the cache). Mutations that rewrite the
+        m3u (keep/delete/reorder) bust it instantly; DB-only meta
+        imports can lag art timestamps by <=TTL. ponytail: drop this
+        if detail ever needs per-request freshness."""
+        import time as _t
+        m3u = self._user_m3u_path(user, name)
+        own = None
+        if m3u:
+            try:
+                _st = os.stat(m3u)
+                own = (_st.st_mtime, _st.st_size)
+            except OSError:
+                own = None
+        peak = 0.0
+        try:
+            for _, _p in (self._user_m3us(user) or []):
+                try:
+                    _m = os.path.getmtime(_p)
+                    if _m > peak:
+                        peak = _m
+                except OSError:
+                    continue
+        except Exception:                                # noqa: BLE001
+            pass
+        sig = (own, peak)
+        now = _t.time()
+        hit = type(self)._playlist_detail_cache.get((user, name))
+        if hit and now - hit[0] < 30 and hit[1] == sig:
+            return hit[2]
+        payload = self._playlist_detail(user, name)
+        if len(type(self)._playlist_detail_cache) > 200:
+            type(self)._playlist_detail_cache.clear()
+        type(self)._playlist_detail_cache[(user, name)] = (now, sig, payload)
+        return payload
 
     def _playlist_detail(self, user, name):
         state = self.state

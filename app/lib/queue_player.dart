@@ -694,7 +694,7 @@ class QueuePlayer {
       final r = await api.resolveByName(artist: artist, title: title);
       return (
         url: r.url,
-        // ponytail: proxied thumb; raw hqdefault works too but drops ?token=
+        // ponytail: direct-CDN thumb (no NAS proxy, no token needed).
         thumb: r.thumb.isNotEmpty && r.videoId.isNotEmpty
             ? api.thumbUrl(r.videoId)
             : '',

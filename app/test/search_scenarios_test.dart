@@ -116,8 +116,10 @@ void main() {
     final r = await api.search('bb trickz bullshit');
     final row = r.discovery.firstWhere((d) => d.title == _title);
     expect(row.albumImage, startsWith('http')); // provider hi-res art kept
-    expect(api.thumbUrl(row.videoId), contains(row.videoId));
-    expect(api.coverVidUrl(row.videoId), contains('cover?vid='));
+    expect(api.thumbUrl(row.videoId), contains('i.ytimg.com'));
+    expect(api.coverVidUrl(row.videoId), contains('i.ytimg.com'));
+    expect(api.coverVidUrlProxied(row.videoId), contains('cover?vid='));
+    expect(api.coverVidUrl('bad id!!'), contains('cover?vid='));
   });
 
   test('artist disco includes non-owned rows', () async {

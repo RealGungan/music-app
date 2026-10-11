@@ -177,6 +177,10 @@ All routes are listed in `httpd.py:158-402`. Table (current line refs):
 ### Autoplay (spotify/yt-music "up next")
 - App `queue_player.dart`: `_autoplay` ~:383-454 → `/api/radio` (`deezer_radio_tracks` `scorer.py:388`) / `/api/recommend` (`deezer_recommendations` :464).
 
+### Screen-off auto-advance (2026-10-09, v1.0.291)
+- Symptom: screen OFF → current ends → next never plays. Root: `_refreshEngineNext` early-returned on placeholder next (empty/`/staging/resolve/`/`resolveName`) so the handler had no pre-pushed URL; completion's `'complete'` event needs the UI isolate, asleep under Doze.
+- Fix: `_refreshEngineNext` now RESOLVES the placeholder via `_resolvePushUrl` (download/cache → NAS 2s → resolver/nameResolver 8s), writes it back (adoption matches by url), pushes it; unresolvable clears the stale push. Verified: completion listener + `_startPrePushed` already live in the handler isolate (no UI timers, no wakelock — foreground service holds it). Pure helpers `prePushIndex`/`needsPushResolve` + headless `advanced`-channel test in `test/headless_advance_test.dart` (258/258 green).
+
 ### Car head-unit / AVRCP now-playing (2026-09-15)
 - Symptom class (Opel Astra): car shows BLANK title/artist, steering-wheel controls dead, car says "Audio Bluetooth not provided" — while the phone's own notification shows the song fine AND Spotify/YT-Music work on the same car.
 - Root cause: AVRCP head units read `PlaybackStateCompat.getActiveQueueItemId()`; audio_handler.dart published `PlaybackState` WITHOUT `queueIndex` → native `setActiveQueueItemId()` never ran → session had no active queue item → head unit refused to render metadata/accept transport. It is NOT an A2DP problem (audio can still stream).
