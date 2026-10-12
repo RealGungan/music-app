@@ -65,8 +65,10 @@ void main() {
             await PrefetchStore.fileFor('Test Artist - Test Title'), path);
         // The index MUST be persisted (survives app restart) — this is
         // the regression: fetch used to only save on prune-over-cap.
+        // Per-user key (no login in tests → 'shared'); the legacy global
+        // key is never written (it leaked rows across users).
         final prefs = await SharedPreferences.getInstance();
-        final raw = prefs.getString('prefetch.index.v1');
+        final raw = prefs.getString('prefetch.index.v1.shared');
         expect(raw, isNotNull);
         expect(raw!, contains('Test Artist - Test Title'));
       } finally {

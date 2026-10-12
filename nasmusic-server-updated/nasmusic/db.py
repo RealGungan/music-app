@@ -164,6 +164,14 @@ class Database:
             "SELECT * FROM downloads WHERE base_name=?", (base_name,))
         return rows[0] if rows else None
 
+    def owned_download(self, base_name, owner):
+        """True when [owner] explicitly staged this base (per-user badge gate).
+        Legacy owner='' rows count for NOBODY (hidden from non-owners)."""
+        rows = self.query(
+            "SELECT owner FROM downloads WHERE base_name=?", (base_name,))
+        return any((r["owner"] or "") == (owner or "") and (owner or "")
+                   for r in rows)
+
     def update_download(self, did, **fields):
         fields["updated_at"] = now()
         cols = ", ".join(f"{k}=?" for k in fields)

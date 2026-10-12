@@ -115,6 +115,13 @@ void _decodeAudioJson(String json) {
         }
         return;
       }
+      // Car voice / queue-id play ("play X", tap on HU queue row): the
+      // handler can't resolve text (no queue/search there), so it forwards
+      // here. Logged to the car diary; full voice-play needs app search.
+      if (ev == 'voice') {
+        DiagLog.car.log('voice query from car: ${m?['q']}');
+        return;
+      }
       // External-audio callbacks must FORCE handler truth, not just fold the
       // event in: a focus loss/regain that lands while the UI isolate sleeps
       // leaves a stale icon (events alone already missed once). Re-query via
@@ -372,6 +379,10 @@ Future<void> _initAudioService() async {
         // every pause kills bg playback on Android 12+. Idle stops stay
         // explicit (AudioService.stop on paused-empty / 10min timer in
         // didChangeAppLifecycleState), never via this auto flag.
+        // Deliberately NOT ongoing: ongoing:true asserts stopForegroundOnPause
+        // (no effect otherwise), and stopping fg on every pause kills bg
+        // playback on Android 12+. Swipe-teardown recovers via the handler's
+        // _stoppedUrl replay on the next car PLAY instead.
         androidNotificationOngoing: false,
         androidStopForegroundOnPause: false,
         // PNG glyph (white note, drawable-nodpi): vectors crashed
@@ -449,6 +460,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
     // stale cross-user liked cache never renders.
     _api.authToken = AuthStore.instance.token;
     await PrefetchStore.reloadForUserSwitch();
+    await OfflineStore.reloadForUserSwitch();
     if (!AuthStore.instance.loggedIn && mounted) {
       setState(() => _sessionValid = false);
     }

@@ -101,4 +101,80 @@ void main() {
       expect(transportReportFor(''), isNull);
     });
   });
+
+  group('session art uri (metadata art vs notification art)', () {
+    test('file art publishes the exported content:// uri', () {
+      final u = artUriFor(
+        isFile: true,
+        filePath: '/sdcard/Android/data/x/nasmusic_art.jpg',
+        remote: 'https://img/a.jpg',
+        bust: 42,
+      );
+      expect(
+        u.toString(),
+        'content://com.nasmusic.nasmusic.art/nasmusic_art.jpg?v=42',
+      );
+    });
+    test('no file falls back to the remote http url, never null', () {
+      final u = artUriFor(
+        isFile: false,
+        filePath: null,
+        remote: 'https://img/a.jpg',
+        bust: 7,
+      );
+      expect(u.toString(), 'https://img/a.jpg');
+    });
+    test('nothing known publishes null (never a placeholder)', () {
+      expect(
+        artUriFor(isFile: false, filePath: null, remote: null, bust: 0),
+        isNull,
+      );
+      expect(
+        artUriFor(isFile: false, filePath: null, remote: '', bust: 0),
+        isNull,
+      );
+      expect(
+        artUriFor(
+          isFile: false,
+          filePath: null,
+          remote: 'ftp://x/a.jpg',
+          bust: 0,
+        ),
+        isNull,
+      );
+    });
+  });
+
+  group('car queue-tap routing (skipToQueueItem)', () {
+    test('index 0 replays the current item', () {
+      expect(
+        queueTapAction(index: 0, hasPrePushed: false),
+        QueueTapAction.replayCurrent,
+      );
+      expect(
+        queueTapAction(index: 0, hasPrePushed: true),
+        QueueTapAction.replayCurrent,
+      );
+    });
+    test('index 1 starts the warm pre-push, ignores a cold one', () {
+      expect(
+        queueTapAction(index: 1, hasPrePushed: true),
+        QueueTapAction.startPrePushed,
+      );
+      expect(
+        queueTapAction(index: 1, hasPrePushed: false),
+        QueueTapAction.ignore,
+      );
+    });
+    test('out-of-range indices are ignored, never crash', () {
+      expect(
+        queueTapAction(index: 2, hasPrePushed: true),
+        QueueTapAction.ignore,
+      );
+      expect(
+        queueTapAction(index: -1, hasPrePushed: false),
+        QueueTapAction.ignore,
+      );
+    });
+  });
 }

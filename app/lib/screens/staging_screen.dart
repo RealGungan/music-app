@@ -28,6 +28,9 @@ class _StagingScreenState extends State<StagingScreen> {
   bool _loading = true;
   String _error = '';
   Timer? _timer;
+  // Owner of the list on screen: a user switch must force a full refresh,
+  // never a silent poll that keeps (or merges into) the previous user's rows.
+  String _user = '';
   // Adaptive poll state: back off when the list is unchanged/idle, poll fast
   // while jobs run. Single-flight so slow ticks never overlap into 2x load.
   bool _inFlight = false;
@@ -72,6 +75,15 @@ class _StagingScreenState extends State<StagingScreen> {
   }
 
   Future<void> _load({bool silent = false}) async {
+    // User switch: drop the previous user's rows + hash and reload loud.
+    final u = AuthStore.instance.username ?? '';
+    if (u != _user) {
+      _user = u;
+      _downloads = [];
+      _lastHash = '';
+      _stableTicks = 0;
+      silent = false;
+    }
     if (!silent) setState(() => _loading = true);
     if (_inFlight) {
       _schedule();
@@ -81,9 +93,10 @@ class _StagingScreenState extends State<StagingScreen> {
     try {
       final dls = await widget.api.downloads();
       if (!mounted) return;
-      // Silent polls must never clobber a good list with a transient
-      // empty (that reads as "everything vanished").
-      if (silent && dls.isEmpty && _downloads.isNotEmpty) return;
+      // No empty-guard here: downloads() throws on failure (caught below,
+      // silent polls keep the old list), so an empty reply is REAL — e.g.
+      // the server now scopes other users' rows away. Clobbering it kept
+      // ghost rows listed forever on background polls.
       final hash = downloadsHash(dls);
       if (hash == _lastHash) {
         _stableTicks++;

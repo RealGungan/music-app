@@ -96,10 +96,15 @@ class StagingHiddenTest(unittest.TestCase):
         self.assertFalse(self.h._staging_hidden(
             "Bob - Bob Song", "/stg/Bob - Bob Song.mp3", "bob"))
 
-    def test_legacy_staged_file_visible(self):
-        self.assertFalse(self.h._staging_hidden(
+    def test_legacy_staged_file_hidden_from_non_owners(self):
+        # Explicit-download legacy rows are per-user: hidden from everyone
+        # except the owner account (library legacy stays shared elsewhere).
+        self.assertTrue(self.h._staging_hidden(
             "Legacy Artist - Legacy Song",
             "/stg/Legacy Artist - Legacy Song.mp3", "alice"))
+        self.assertFalse(self.h._staging_hidden(
+            "Legacy Artist - Legacy Song",
+            "/stg/Legacy Artist - Legacy Song.mp3", "RealGungan"))
 
     def test_shared_library_unaffected_by_owner(self):
         # A kept (music_root) file stays visible even when another user
@@ -112,7 +117,6 @@ class StagingHiddenTest(unittest.TestCase):
     def test_unknown_base_fail_open(self):
         self.assertFalse(self.h._staging_hidden(
             "Nobody - Nope", "/stg/Nobody - Nope.mp3", "alice"))
-
     def test_scoped_map_drops_only_other_users_staged(self):
         st = self.h.server.state
         st.local_mp3_index = lambda: {
@@ -126,8 +130,50 @@ class StagingHiddenTest(unittest.TestCase):
         scoped = self.h._scoped_local_map()
         self.assertNotIn("Bob - Bob Song", scoped)
         self.assertIn("Alice - Alice Song", scoped)
-        self.assertIn("Legacy Artist - Legacy Song", scoped)
+        self.assertNotIn("Legacy Artist - Legacy Song", scoped)
         self.assertIn("Bob - Kept Song", scoped)
+
+
+class OwnedBadgeTest(unittest.TestCase):
+    """The /api/liked `downloaded` badge is per-user (explicit downloads).
+
+    Legacy owner='' rows count for NOBODY here — another user's (or an
+    ownerless) staged file must never badge my row. The shared music_root
+    library stays visible to all elsewhere (_lib_visible).
+    Run: python3 -m unittest nasmusic.test_per_user_libs -v
+    """
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.db = Database(os.path.join(self.td.name, "t.db"))
+        self.db.create_download("Legacy Artist", "Legacy Song")  # owner ''
+        self.db.create_download("Alice", "Alice Song", owner="alice")
+        self.db.create_download("Bob", "Bob Song", owner="bob")
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def test_owned_download_is_strict(self):
+        self.assertTrue(
+            self.db.owned_download("Alice - Alice Song", "alice"))
+        self.assertFalse(
+            self.db.owned_download("Alice - Alice Song", "bob"))
+        self.assertFalse(self.db.owned_download(
+            "Legacy Artist - Legacy Song", "alice"))
+        self.assertFalse(self.db.owned_download(
+            "Legacy Artist - Legacy Song", "bob"))
+        self.assertFalse(
+            self.db.owned_download("Nobody - Nope", "alice"))
+
+    def test_list_downloads_hides_ownerless_from_non_owners(self):
+        alice = self.db.list_downloads(owner="alice")
+        self.assertEqual(
+            [r["base_name"] for r in alice], ["Alice - Alice Song"])
+        staged = self.db.list_downloads(status="pending", owner="bob")
+        self.assertEqual(
+            [r["base_name"] for r in staged], ["Bob - Bob Song"])
+        owner_view = self.db.list_downloads()
+        self.assertEqual(len(owner_view), 3)
 
 
 if __name__ == "__main__":

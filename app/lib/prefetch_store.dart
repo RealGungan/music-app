@@ -19,8 +19,8 @@ import 'diag_log.dart';
 /// except for the settings switches + size readout.
 class PrefetchStore {
   PrefetchStore._();
-  static const _kIndex = 'prefetch.index.v1';
   static const _kEnabled = 'prefetch.enabled';
+  static const _kIndex = 'prefetch.index.v1';
   // v2 key: the v1 default (WiFi-only) silently disabled the whole feature
   // for mobile-data listeners, and the stored value can't be told apart
   // from an explicit choice — so everyone gets the new default (fetch on
@@ -182,9 +182,9 @@ class PrefetchStore {
       }
     } catch (_) {}
     if (!loaded) {
-      // 2. Per-user prefs, then 3. legacy global index (adopt on first run
-      // after upgrade / user switch so the 4.8MB on disk isn't forgotten).
-      final raw = prefs.getString('$_kIndex.$safe') ?? prefs.getString(_kIndex);
+      // 2. Per-user prefs only — never the legacy global index (it carried
+      // the previous user's liked/downloaded rows into a fresh user's view).
+      final raw = prefs.getString('$_kIndex.$safe');
       _entries.clear();
       if (raw != null && raw.isNotEmpty) {
         try {
@@ -549,8 +549,8 @@ class PrefetchStore {
     final raw = jsonEncode(
         {for (final kv in _entries.entries) kv.key: kv.value.toJson()});
     await prefs.setString('$_kIndex.$safe', raw);
-    // Legacy global key: one-release read fallback for old builds/tests.
-    await prefs.setString(_kIndex, raw);
+    // No legacy global write: one shared key leaked liked/downloaded
+    // state across users on the same phone.
     await prefs.setBool('$_kEnabled.$safe', enabled);
     await prefs.setBool('$_kWifiOnly.$safe', wifiOnly);
     // Authoritative copy: per-user JSON in the app dir.

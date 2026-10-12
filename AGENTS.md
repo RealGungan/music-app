@@ -40,7 +40,7 @@ All routes are listed in `httpd.py:158-402`. Table (current line refs):
 | Endpoint | Method | Handler (line) | Purpose |
 |---|---|---|---|
 | `/api/search` | GET | `_search` :416 | Local + internet discovery + artists. |
-| `/api/suggest` | GET | `_suggest` :892 | Live typeahead (NAS-first + Deezer online). |
+| `/api/suggest` | GET | `_suggest` :1821 | Live typeahead (NAS-first + Deezer/YTM online; full payload cached 60s `_suggest_resp_cache` per (user,q), YTM cached 60s, YTM skipped <3 chars, `q` echo + `cached` flag). |
 | `/api/radio` | GET | deezer radio in-dispatch :180 | Related songs for autoplay (up next). |
 | `/api/recommend` | GET | deezer recs in-dispatch :194 | Spotify-style multi-source recs. |
 | `/api/artist-photo` | GET | `_artist_photo` :2795 | Just the photo for a name. |
@@ -221,6 +221,7 @@ All routes are listed in `httpd.py:158-402`. Table (current line refs):
 | `resolved_urls` | `resolved_cache_put` | `RESOLVE_TTL` (86400, `state.py:50`) | vid → direct stream URL (expires faster than key! hence relay re-resolve). |
 | `song_meta` | `db.song_meta_put` | — | file → {artist,album,album_artist,image}. |
 | suggest index | `_suggest_cache` (in `_suggest` :892) | 60s in-memory | `(base,full,url,meta)` rows. |
+| suggest payload | `_suggest_resp_cache` (`_suggest` :1821) | 60s in-memory | full `{q,results,cached}` per (user,norm_q), cap 200. YTM part cached 60s `_ytm_cache_local` (scorer.py); YTM skipped when len(q)<3; Deezer timeout 2s. |
 | `lastav:<user>` | `_dispatch` auth gate | persistent | Last-seen taps per user (`{seen: epoch}`, username-keyed, tokens never stored/logged — proves a phone tap reached the server). |
 | album-count memo | `_preview_album_count` :716 | 10min (None: 15s retry) | in-process background computed. |
 
