@@ -155,7 +155,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.302"
+APP_VERSION = "1.0.303"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -617,6 +617,8 @@ class Handler(BaseHTTPRequestHandler):
                 payload = []
                 for base, _full, url, meta in self._suggest_index():
                     if not self._lib_visible(base, self._me()):
+                        continue
+                    if self._staging_hidden(base, _full, self._me()):
                         continue
                     payload.append({
                         "base_name": base,
@@ -1360,6 +1362,21 @@ class Handler(BaseHTTPRequestHandler):
                     ttl = q
             pending = cached is None
             virtual = (cached or {}).get("discovery") or []
+
+        # Per-user badge: sr4: rows baked in_nas for the BUILDING user, so
+        # re-mark every served row against THIS requester's scoped map —
+        # another user's staged files must never badge my results.
+        for r in virtual:
+            try:
+                _rk = (self._norm_core(r.get("artist") or "") + " - " +
+                       self._norm_core(r.get("title") or ""))
+                _in = (_rk in local_core) or (
+                    self._innas_lenient(r.get("artist") or "",
+                                        r.get("title") or "") is not None)
+            except Exception:                           # noqa: BLE001
+                _in = bool(r.get("in_nas"))
+            r["in_nas"] = _in
+            r["library"] = "nas" if _in else None
 
         # Whatever warm rows we serve, re-warm their direct URLs (the just-built
         # cold path already prewarms in its own worker thread, so only refresh
@@ -3423,16 +3440,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def _staging_hidden(self, base, full, user):
         """Another user's staged (not yet kept) file must never mark in_nas
-        for me — regardless of the per_user_libs flag. Shared library
-        (music_root/playlist_dir) + legacy owner='' + own files are
-        unaffected. Fail-open on any error."""
+        for me — regardless of the per_user_libs flag. Legacy owner=''
+        staged rows are hidden from non-owners too (explicit downloads are
+        per-user); the shared music_root library is unaffected (fail-open
+        on any error, unknown bases stay visible)."""
         try:
             staging = os.path.normpath(self.state.config.staging_dir)
             norm = os.path.normpath(full or "")
             if norm != staging and not norm.startswith(staging + os.sep):
                 return False
-            owner = (self._cached_owner_map().get(base) or "")
-            return bool(owner) and owner != (user or "")
+            owner = self._cached_owner_map().get(base)
+            if owner is None:
+                return False
+            if not owner:
+                return (user or "") != self.LEGACY_USER
+            return owner != (user or "")
         except Exception:                                # noqa: BLE001
             return False
 
@@ -3512,7 +3534,7 @@ class Handler(BaseHTTPRequestHandler):
         ar = (artist or "").strip()
         ti = (title or "").strip()
         me = self._me() or ""
-        scope = me if self._per_user_libs() else ""
+        scope = me  # always per-user: scope="" served A's staged hits to B
         key = "innas:{}\x00{}\x00{}".format(
             self._norm_core(ar), self._norm_core(ti), scope)
         got = state.db.misc_get(key, 2 * 3600)
@@ -3602,7 +3624,7 @@ class Handler(BaseHTTPRequestHandler):
         # scan ran on EVERY resolve poll; scope key mirrors _innas).
         state = self.state
         me = self._me() or ""
-        scope = me if self._per_user_libs() else ""
+        scope = me  # always per-user: scope="" served A's staged hits to B
         _lkey = "inlen:{}\x00{}\x00{}".format(
             self._norm_core(artist or ""), self._norm_core(title or ""),
             scope)
@@ -5791,11 +5813,25 @@ class Handler(BaseHTTPRequestHandler):
         names = self._liked_names(user)
         liked = base in names or (base + ".mp3") in names
         downloaded = False
-        for full in state._walk_mp3(state.config.music_root):
-            if os.path.basename(full) == base + ".mp3":
-                downloaded = True
-                break
+        if user == self.LEGACY_USER:
+            # Owner library IS the shared tree: global existence is theirs.
+            for full in state._walk_mp3(state.config.music_root):
+                if os.path.basename(full) == base + ".mp3":
+                    downloaded = True
+                    break
+        else:
+            # Per-user badge: someone else's (or legacy '') download must
+            # never mark MY row. Fail-closed on DB error.
+            try:
+                downloaded = self._owned_badge(base, user or "")
+            except Exception:                           # noqa: BLE001
+                downloaded = False
         return self._json({"liked": liked, "downloaded": downloaded})
+
+    def _owned_badge(self, base, user):
+        """Did [user] explicitly download [base]? Legacy '' rows count for
+        nobody. Factored out for unit tests (test_per_user_libs)."""
+        return bool(self.state.db.owned_download(base, user or ""))
 
     # -------------------------------------------------------- multi-user
     # Every login name owns a private home; the pre-existing single-user
