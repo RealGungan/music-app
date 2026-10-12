@@ -127,10 +127,25 @@ class Scorer:
                                   "returncode": -1})()
 
     def search_ytmusic(self, query):
-        """Structured YouTube Music candidates (no safe-search filter)."""
+        """Structured YouTube Music candidates (no safe-search filter).
+
+        Results are cached in-memory 60s by normalized query: the suggest
+        path calls this per keystroke, and a live YTMusic round-trip is
+        ~0.7s (the dominant cost of typeahead)."""
+        try:
+            key = "ytm:" + norm(query)
+            now = time.time()
+            cache = getattr(self, "_ytm_cache_local", None)
+            if cache is None:
+                cache = self._ytm_cache_local = {}
+            hit = cache.get(key)
+            if hit and (now - hit[0]) < 60:
+                return hit[1]
+        except Exception:                               # noqa: BLE001
+            key, cache = None, None
+        out = []
         try:
             from ytmusicapi import YTMusic
-            out = []
             for r in (YTMusic().search(query, filter="songs", limit=15) or []):
                 vid = r.get("videoId")
                 if not vid:
@@ -154,6 +169,15 @@ class Scorer:
         except Exception as ex:                       # noqa: BLE001
             self._log(f"ytmusic search failed: {str(ex)[:60]}")
             return []
+        finally:
+            try:
+                if key and cache is not None:
+                    cache[key] = (time.time(), out)
+                    if len(cache) > 200:
+                        old = min(cache, key=lambda k: cache[k][0])
+                        cache.pop(old, None)
+            except Exception:                           # noqa: BLE001
+                pass
 
     def search(self, artist, title, quoted=True):
         """Merge YouTube + YouTube Music candidates for the query.
