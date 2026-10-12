@@ -200,12 +200,14 @@ class MetaInfo {
   final String? album;
   final String? albumArtist;
   final String? albumImage;
+  final int? durationS;
   MetaInfo({
     required this.baseName,
     this.artist,
     this.album,
     this.albumArtist,
     this.albumImage,
+    this.durationS,
   });
 
   factory MetaInfo.fromJson(Map<String, dynamic> j) => MetaInfo(
@@ -214,6 +216,7 @@ class MetaInfo {
     album: j['album'],
     albumArtist: j['album_artist'],
     albumImage: j['album_image'],
+    durationS: (j['duration_s'] as num?)?.toInt(),
   );
 }
 
@@ -439,6 +442,10 @@ class ResolvedName {
   /// Deezer album title when known (null = hide honestly, no guessing).
   final String? album;
 
+  /// Studio total (seconds) from the resolve worker's picked candidate —
+  /// seeds the duration readout when the stream omits its own metadata.
+  final int? durationS;
+
   /// The identity of the ACTUAL YouTube video chosen (resolvename) — used as
   /// the lyrics key so lyrics match what is really playing.
   final String? resolvedArtist;
@@ -450,6 +457,7 @@ class ResolvedName {
     this.artist,
     this.title,
     this.album,
+    this.durationS,
     this.resolvedArtist,
     this.resolvedTitle,
   });
@@ -461,6 +469,7 @@ class ResolvedName {
     artist: j['artist'],
     title: j['title'],
     album: (j['album'] as String?)?.isNotEmpty ?? false ? j['album'] : null,
+    durationS: (j['duration_s'] as num?)?.toInt(),
     resolvedArtist: j['resolved_artist'],
     resolvedTitle: j['resolved_title'],
   );
@@ -2338,6 +2347,7 @@ class ApiClient {
           artist: r.artist,
           title: r.title,
           album: r.album,
+          durationS: r.durationS,
           resolvedArtist: r.resolvedArtist,
           resolvedTitle: r.resolvedTitle,
         );

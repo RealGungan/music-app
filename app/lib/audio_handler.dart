@@ -76,6 +76,22 @@ String stableMediaId(String? url, String fallback) {
 /// track's dur_ms until measured (timestamp flash on the car). Pure for tests.
 Duration durationForNewTrackPub() => Duration.zero;
 
+/// Published total when the stream omits its own duration (a chunked relay
+/// never emits onDurationChanged, so the total would read –:–– forever):
+/// prefer the measured stream value, fall back to the server/Deezer hint,
+/// else zero. Pure so unit tests pin it.
+int publishedDurationMs({required int streamMs, int? hintMs}) {
+  if (streamMs > 0) return streamMs;
+  if (hintMs != null && hintMs > 0) return hintMs;
+  return 0;
+}
+
+/// True when the clock ran past the published total: the published value is
+/// stale (e.g. a hint for a different cut) — re-read from the player.
+/// Pure so unit tests pin it.
+bool durationNeedsReread({required int posMs, required int durMs}) =>
+    durMs > 0 && posMs > durMs;
+
 /// AVRCP/media-button transport report (pure, unit-tested). The media-session
 /// transport callbacks (BT headset, car wheel, notification) act on the
 /// HANDLER's player directly, bypassing the queue — so each one also reports
@@ -153,6 +169,8 @@ class NASMusicAudioHandler extends BaseAudioHandler {
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   String? _currentUrl;
+  // Throttle for player re-reads when the stream omits its duration.
+  DateTime _lastDurReread = DateTime.fromMillisecondsSinceEpoch(0);
   // Last published metadata signature (dedupe; head units choke on
   // identical metadata pushed several times a second).
   String _lastPubSig = '';
@@ -163,6 +181,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
   String? _nextTitle;
   String? _nextArtist;
   String? _nextAlbum;
+  int? _nextDurMs;
   // Serializes incoming engine commands: _onIncoming fires them without
   // awaiting, so two rapid taps ran overlapping stop/play sequences and
   // one's stop() killed the other's prepare (instant player-error, dur 0).
@@ -363,6 +382,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
       if (_userPaused) {
         _nextUrl = null;
         _nextTitle = _nextArtist = _nextAlbum = null;
+        _nextDurMs = null;
       }
       if (await _startPrePushed()) return;
       _sendEvent({'ev': 'complete'});
@@ -381,6 +401,15 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         return;
       }
       _sendEvent({'ev': 'pos', 'ms': d.inMilliseconds});
+      // Stream omitted its duration (chunked relay) or published a stale
+      // one (clock past total): re-read from the player, throttled.
+      if (_duration == Duration.zero ||
+          durationNeedsReread(
+            posMs: d.inMilliseconds,
+            durMs: _duration.inMilliseconds,
+          )) {
+        unawaited(_rereadDuration());
+      }
       // Throttle the media-session publishing so the seek bar stays live
       // without flooding the notification on every ~200ms tick.
       if (DateTime.now().difference(_lastPlaybackPublish) >
@@ -415,6 +444,28 @@ class NASMusicAudioHandler extends BaseAudioHandler {
     IsolateNameServer.lookupPortByName(kAudioBridgePort)?.send(msg);
   }
 
+  /// Re-read the total from the player when the stream omitted it (or the
+  /// published value went stale). Throttled to one native query per 10s
+  /// unless forced. Publishes on change only (dedupe via _publishMedia sig).
+  Future<void> _rereadDuration({bool force = false}) async {
+    final now = DateTime.now();
+    if (!force &&
+        now.difference(_lastDurReread) < const Duration(seconds: 10)) {
+      return;
+    }
+    _lastDurReread = now;
+    try {
+      final gd = await _player
+          .getDuration()
+          .timeout(const Duration(seconds: 3));
+      if (gd == null || gd <= Duration.zero || gd == _duration) return;
+      _duration = gd;
+      _sendEvent({'ev': 'dur', 'ms': gd.inMilliseconds});
+      _publishMedia();
+      _publishPlayback();
+    } catch (_) {}
+  }
+
   /// Starts the pre-pushed next track (gapless handoff). The main isolate
   /// pushes the upcoming track ahead of time; whoever fires first — natural
   /// completion with the UI asleep, or a screen-off BT/car NEXT — starts it
@@ -433,7 +484,12 @@ class NASMusicAudioHandler extends BaseAudioHandler {
     // The item id is the stream URL: adopt it BEFORE publishing so the
     // car never sees the new title under the previous track's id.
     _currentUrl = nu;
-    _duration = durationForNewTrackPub();
+    // Known-total seed rides the pre-push (measured wins when it arrives).
+    final nd = _nextDurMs;
+    _nextDurMs = null;
+    _duration = (nd != null && nd > 0)
+        ? Duration(milliseconds: nd)
+        : durationForNewTrackPub();
     _position = Duration.zero;
     _publishMedia();
     try {
@@ -447,6 +503,8 @@ class NASMusicAudioHandler extends BaseAudioHandler {
     }
     _sendEvent({'ev': 'advanced', 'url': nu});
     _publishPlayback();
+    // Prepared: the stream may still omit its duration event — read it now.
+    unawaited(_rereadDuration(force: true));
     return true;
   }
 
@@ -473,7 +531,9 @@ class NASMusicAudioHandler extends BaseAudioHandler {
       // null/content publishes that choke head units.)
       final nt = m['title'];
       final na = m['artist'];
-      if ((nt is String && nt != _title) || (na is String && na != _artist)) {
+      final trackChanged =
+          (nt is String && nt != _title) || (na is String && na != _artist);
+      if (trackChanged) {
         _art = null;
         _artRemote = null;
         _artIsFile = false;
@@ -482,6 +542,16 @@ class NASMusicAudioHandler extends BaseAudioHandler {
       _artist = m['artist'] ?? _artist;
       _album = m['album'] ?? _album;
       _loading = m['loading'] ?? _loading;
+      // Server/Deezer duration hint: on a TRACK CHANGE adopt it outright
+      // (it replaces the previous song's stale total); on same-track ticks
+      // only when nothing measured yet. A measured stream value always wins
+      // (see onDurationChanged + _rereadDuration).
+      final hint = m['dur_ms'];
+      if (hint is num && hint.toInt() > 0) {
+        if (trackChanged || _duration == Duration.zero) {
+          _duration = Duration(milliseconds: hint.toInt());
+        }
+      }
       _applyArt(m).then((changed) {
         if (changed) {
           // Force SystemUI to drop its cached bitmap: same-URI publishes
@@ -612,12 +682,18 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         // A user/main-initiated play wins over any pre-pushed next track.
         _nextUrl = null;
         _nextTitle = _nextArtist = _nextAlbum = null;
+        _nextDurMs = null;
         _currentUrl = url;
         _loading = true;
         _playing = false;
-        // New-track pub carries ZERO duration until measured: _duration still
-        // holds the previous track's value here (timestamp flash on the car).
-        _duration = durationForNewTrackPub();
+        // New-track total: the play command carries the known-metadata seed
+        // (row/Deezer/resolve duration); zero only when nothing is known.
+        // The old unconditional zero wiped a seed the metadata push had just
+        // adopted on the same port (chunked relay never re-emits it).
+        final phint = m['dur_ms'];
+        _duration = (phint is num && phint.toInt() > 0)
+            ? Duration(milliseconds: phint.toInt())
+            : durationForNewTrackPub();
         _position = Duration.zero;
         // Publish the NEW track's metadata BEFORE the loading/playback state:
         // cars (AVRCP) latch onto the first MediaItem they see for a URL.
@@ -636,6 +712,9 @@ class NASMusicAudioHandler extends BaseAudioHandler {
           debugPrint('[handler] playing <$url>');
           await _player.play(sourceForUrl(url));
           debugPrint('[handler] play() returned OK');
+          // Prepared/metadata known: the stream may still omit its duration
+          // event — read the total now so it publishes instead of –:––.
+          unawaited(_rereadDuration(force: true));
         } catch (e, st) {
           debugPrint('[handler] play FAILED: $e\n$st');
           _loading = false;
@@ -666,6 +745,9 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         // stale _lastState / frozen position without touching audio.
         // Derived from tracked flags (never query the player: its getter
         // may suspend and serialize behind a play command).
+        // Fire-and-forget duration re-read first: a stale/omitted total
+        // corrects itself via the following dur event.
+        unawaited(_rereadDuration(force: true));
         _sendEvent({
           'ev': 'state',
           's': _playing
@@ -707,11 +789,14 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         if (nurl == null || nurl.isEmpty) {
           _nextUrl = null;
           _nextTitle = _nextArtist = _nextAlbum = null;
+          _nextDurMs = null;
         } else {
           _nextUrl = nurl;
           _nextTitle = m['title']?.toString();
           _nextArtist = m['artist']?.toString();
           _nextAlbum = m['album']?.toString();
+          final nd = m['dur_ms'];
+          _nextDurMs = (nd is num && nd.toInt() > 0) ? nd.toInt() : null;
         }
         break;
     }

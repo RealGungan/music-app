@@ -117,6 +117,7 @@ Future<void> showSongLongPressMenu(
             // resolvable + lyric-matched exactly like the tapped row.
             lyricsArtist: queueItem.lyricsArtist,
             lyricsTitle: queueItem.lyricsTitle,
+            durationMs: queueItem.durationMs,
           );
         }
       } catch (_) {

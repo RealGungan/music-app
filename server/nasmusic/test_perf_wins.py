@@ -3,6 +3,9 @@
 - _json gzips bodies >1KB when the client sends Accept-Encoding: gzip.
 - _playlist_detail_cached skips the ~110ms per-row SQLite rebuild when
   no m3u changed (sig = own mtime/size + max mtime of the user's set).
+- _resolvename returns pending from the job map BEFORE the NAS scans
+  (polls were re-scanning the library every 400ms).
+- _innas_lenient caches 2h like _innas (same full-library scan).
 Run: python3 -m unittest nasmusic.test_perf_wins -v
 """
 import gzip
@@ -10,6 +13,7 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 
 
@@ -119,6 +123,85 @@ class PlaylistDetailCacheTest(unittest.TestCase):
             ("Heavy", self.m3u), ("Liked", liked)]
         self.h._playlist_detail_cached("tuser", "Heavy")
         self.assertEqual(len(self.calls), 2)
+
+
+class _FakeDb:
+    def __init__(self):
+        self.store = {}
+
+    def misc_get(self, key, max_age):
+        return self.store.get(key)
+
+    def misc_put(self, key, value):
+        self.store[key] = value
+
+
+class _FakeState:
+    def __init__(self, index):
+        self.db = _FakeDb()
+        self._index = index
+        self.calls = 0
+
+    def local_mp3_index(self):
+        self.calls += 1
+        return self._index
+
+
+def _resolve_handler(index):
+    import types
+    h = _handler({})
+    # Handler.state is a read-only property over self.server.state.
+    h.server = types.SimpleNamespace(state=_FakeState(index))
+    h._me = lambda: ""  # noqa: E731
+    h._per_user_libs = lambda: False  # noqa: E731
+    h._lib_visible = lambda b, u: True  # noqa: E731
+    return h
+
+
+class ResolvePendingFastPathTest(unittest.TestCase):
+    def test_fresh_job_returns_pending_without_scans(self):
+        from . import httpd as _h
+        h = _resolve_handler([])
+        key = _h.Handler._rn_key("Some Artist", "Some Title")
+        _h.Handler._rn_jobs[key] = {"ts": time.time(), "tok": 4242}
+        self.addCleanup(_h.Handler._rn_jobs.pop, key, None)
+        for name in ("_innas", "_innas_lenient"):
+            setattr(h, name,
+                    lambda a, t: (_ for _ in ()).throw(
+                        AssertionError(name + " ran on poll path")))
+        h._resolvename("Some Artist", "Some Title")
+        body = json.loads(h._body.getvalue().decode("utf-8"))
+        self.assertEqual(body, {"status": "pending", "key": key})
+
+    def test_err_job_returns_502_without_scans(self):
+        from . import httpd as _h
+        h = _resolve_handler([])
+        key = _h.Handler._rn_key("Some Artist", "Some Title")
+        _h.Handler._rn_jobs[key] = {"ts": time.time(), "err": True,
+                                    "tok": 4243}
+        self.addCleanup(_h.Handler._rn_jobs.pop, key, None)
+        h._innas = lambda a, t: (_ for _ in ()).throw(  # noqa: E731
+            AssertionError("_innas ran on err path"))
+        h._resolvename("Some Artist", "Some Title")
+        self.assertEqual(h._resp["status"], 502)
+
+
+class InnasLenientCacheTest(unittest.TestCase):
+    def test_hit_scans_once_then_served_from_cache(self):
+        h = _resolve_handler(["Artist A - Wanted Song", "Other - Else"])
+        first = h._innas_lenient("artist a", "wanted song")
+        self.assertEqual(first, "Artist A - Wanted Song")
+        self.assertEqual(h.state.calls, 1)
+        second = h._innas_lenient("artist a", "wanted song")
+        self.assertEqual(second, first)
+        self.assertEqual(h.state.calls, 1)
+
+    def test_miss_cached_as_negative(self):
+        h = _resolve_handler(["Artist A - Wanted Song"])
+        self.assertIsNone(h._innas_lenient("nobody", "nosong"))
+        self.assertEqual(h.state.calls, 1)
+        self.assertIsNone(h._innas_lenient("nobody", "nosong"))
+        self.assertEqual(h.state.calls, 1)
 
 
 if __name__ == "__main__":

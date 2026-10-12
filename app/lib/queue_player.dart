@@ -66,6 +66,12 @@ class QueueItem {
   /// Liked flag threaded from the single playlist payload (no per-row
   /// likedStatus roundtrip in the prefetch wave).
   final bool? liked;
+
+  /// Known total in ms (server metainfo / Deezer duration_s): pre-seeds the
+  /// readout when the stream itself omits its duration (chunked relay never
+  /// emits onDurationChanged → total stuck at –:––). A measured stream value
+  /// always wins — this is only the fallback.
+  final int? durationMs;
   QueueItem(
     this.title,
     this.url, {
@@ -80,6 +86,7 @@ class QueueItem {
     this.lyricsArtist,
     this.lyricsTitle,
     this.liked,
+    this.durationMs,
   });
 
   /// Copy with a new url (base-flip rebase): identity/display untouched.
@@ -97,6 +104,7 @@ class QueueItem {
         lyricsArtist: lyricsArtist,
         lyricsTitle: lyricsTitle,
         liked: liked,
+        durationMs: durationMs,
       );
 }
 
@@ -127,7 +135,14 @@ typedef UrlResolver = Future<String> Function(String videoId);
 /// so the lazy resolve can attach the resolvename hqdefault cover instead
 /// of dropping it (null art -> gradient).
 typedef NameResolver =
-    Future<({String url, String thumb, String? videoId, String? album})>
+    Future<
+        ({
+          String url,
+          String thumb,
+          String? videoId,
+          String? album,
+          int? durationS,
+        })>
     Function(String artist, String title);
 
 /// Turns an [artist]+[title] pair into a NAS file URL (or null when the NAS
@@ -174,6 +189,12 @@ bool dropStalePositionTick({
 /// so no stale or zero stamp can flash on a track switch.
 bool stampHidden({required int posGen, required int playGen}) =>
     posGen != playGen;
+
+/// Known-duration seed (pure, unit-tested): row duration_s / Deezer duration
+/// (seconds) → QueueItem.durationMs. Null/zero/negative = unknown (null —
+/// never seed a bogus 0:00; the readout shows –:–– until measured).
+int? durationMsFor(int? durationS) =>
+    (durationS != null && durationS > 0) ? durationS * 1000 : null;
 
 /// Pause-token gate for EVERY deferred resume (nudge/heal/autoplay refill/
 /// completion advance/_boundLoading/RemoteEngine toggle): a delayed resume
@@ -356,6 +377,10 @@ class QueuePlayer {
       _onTick();
     });
     _player.onDurationChanged.listen((d) {
+      // Measured wins — but a zero event must never wipe the known-metadata
+      // seed (chunked relay + some codecs emit 0:00 first, real total late
+      // or never). The seed holds until a positive value arrives.
+      if (d <= Duration.zero) return;
       trackDuration.value = d;
       _onTick();
     });
@@ -744,6 +769,7 @@ class QueuePlayer {
             : '',
         videoId: r.videoId.isNotEmpty ? r.videoId : null,
         album: r.album,
+        durationS: r.durationS,
       );
     };
     nasLookup = (artist, title) async {
@@ -1434,7 +1460,14 @@ class QueuePlayer {
     position.value = Duration.zero;
     _posMax = Duration.zero;
     _userSeekTarget = null;
-    trackDuration.value = Duration.zero;
+    // Seed the total from KNOWN metadata (row duration_s / Deezer duration
+    // carried on the item): chunked relays never emit onDurationChanged, so
+    // without this the readout sits at –:–– while position advances.
+    // Measured player duration replaces it when it arrives (see listener).
+    final seed = items[index].durationMs;
+    trackDuration.value = (seed != null && seed > 0)
+        ? Duration(milliseconds: seed)
+        : Duration.zero;
     currentTitle.value = items[index].title;
     PlayLog.switched(prevTitle, prevSec, items[index].title);
     currentThumb.value = items[index].thumbUrl ?? '';
@@ -1612,7 +1645,9 @@ class QueuePlayer {
       _boundLoading(gen, playHeal);
       if (gen != _playGen) return;
       unawaited(
-        _player.play(url).catchError((Object e) async {
+        _player
+            .play(url, durMs: items[index].durationMs)
+            .catchError((Object e) async {
           // Only surface errors for the winning operation. Fire-time
           // pause-intent check: play+instant-pause must NOT resume via
           // the cached fallback.
@@ -1625,7 +1660,7 @@ class QueuePlayer {
               gen == _playGen &&
               playHeal == _healGen) {
             try {
-              await _player.play(fb);
+              await _player.play(fb, durMs: items[index].durationMs);
               _loadedUrl = fb;
               return;
             } catch (_) {}
@@ -1808,6 +1843,7 @@ class QueuePlayer {
           albumImage: item.albumImage,
           lyricsArtist: item.lyricsArtist,
           lyricsTitle: item.lyricsTitle,
+          durationMs: item.durationMs,
         );
       } else if (item.resolveName != null && nameResolver != null) {
         var rn = item.resolveName!;
@@ -1837,6 +1873,7 @@ class QueuePlayer {
           albumImage: item.albumImage,
           lyricsArtist: item.lyricsArtist,
           lyricsTitle: item.lyricsTitle,
+          durationMs: durationMsFor(res.durationS) ?? item.durationMs,
         );
         // Late fill (album/url art arrived after first build, same title):
         // ping title listeners so Now Playing + lock-screen metadata pick
@@ -2674,6 +2711,7 @@ class QueuePlayer {
       title: split > 0 ? t.substring(split + 3).trim() : t,
       artist: split > 0 ? t.substring(0, split).trim() : '',
       album: pushed.album,
+      durMs: pushed.durationMs,
     );
   }
 
@@ -2698,6 +2736,7 @@ class QueuePlayer {
         albumImage: it.albumImage,
         lyricsArtist: it.lyricsArtist,
         lyricsTitle: it.lyricsTitle,
+        durationMs: it.durationMs,
         liked: it.liked,
       );
     }
@@ -2716,6 +2755,7 @@ class QueuePlayer {
         albumImage: it.albumImage,
         lyricsArtist: it.lyricsArtist,
         lyricsTitle: it.lyricsTitle,
+        durationMs: it.durationMs,
         liked: it.liked,
       );
     }
@@ -2741,6 +2781,7 @@ class QueuePlayer {
               albumImage: it.albumImage,
               lyricsArtist: it.lyricsArtist,
               lyricsTitle: it.lyricsTitle,
+              durationMs: it.durationMs,
               liked: it.liked,
             );
           }
@@ -2768,6 +2809,7 @@ class QueuePlayer {
           albumImage: it.albumImage,
           lyricsArtist: it.lyricsArtist,
           lyricsTitle: it.lyricsTitle,
+          durationMs: it.durationMs,
           liked: it.liked,
         );
       }
@@ -2794,6 +2836,7 @@ class QueuePlayer {
           albumImage: it.albumImage,
           lyricsArtist: it.lyricsArtist,
           lyricsTitle: it.lyricsTitle,
+          durationMs: durationMsFor(res.durationS) ?? it.durationMs,
           liked: it.liked,
         );
       }
@@ -2834,6 +2877,7 @@ class QueuePlayer {
       title: split > 0 ? t.substring(split + 3).trim() : t,
       artist: split > 0 ? t.substring(0, split).trim() : '',
       album: it.album,
+      durMs: it.durationMs,
     );
   }
 
@@ -2895,7 +2939,12 @@ class QueuePlayer {
     _healStrikes = 0;
     _healTrackId = it;
     _lastPlayStartAt = DateTime.now();
-    trackDuration.value = Duration.zero;
+    // Same known-metadata seed as _playCurrent (handler advanced on its
+    // own while the UI slept — no duration event will backfill it).
+    final aseed = it.durationMs;
+    trackDuration.value = (aseed != null && aseed > 0)
+        ? Duration(milliseconds: aseed)
+        : Duration.zero;
     currentTitle.value = it.title;
     PlayLog.switched(prevTitle, prevSec, it.title);
     currentThumb.value = it.thumbUrl ?? '';
@@ -2946,6 +2995,7 @@ class QueuePlayer {
                 albumImage: it.albumImage,
                 lyricsArtist: it.lyricsArtist,
                 lyricsTitle: it.lyricsTitle,
+                durationMs: it.durationMs,
               );
               _refreshEngineNext();
             }
@@ -2976,6 +3026,7 @@ class QueuePlayer {
                 albumImage: it.albumImage,
                 lyricsArtist: it.lyricsArtist,
                 lyricsTitle: it.lyricsTitle,
+                durationMs: durationMsFor(res.durationS) ?? it.durationMs,
               );
               _refreshEngineNext();
             }

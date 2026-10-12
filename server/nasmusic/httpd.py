@@ -155,7 +155,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.299"
+APP_VERSION = "1.0.301"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -571,7 +571,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._error(400, "missing q")
                 return self._json(self._search(q))
 
-        # ---- /api/suggest (live NAS-only, fast)
+        # ---- /api/suggest (live typeahead: NAS-first + online, resp-cached)
         if seg == "suggest" and parts[1:] == []:
             if self.command == "GET":
                 q = (query.get("q") or [""])[0].strip()
@@ -1823,10 +1823,27 @@ class Handler(BaseHTTPRequestHandler):
         first (guaranteed, offline, so typing "puta" instantly surfaces the
         Extremoduro file) PLUS online Deezer suggestions (Spotify/YouTube-Music
         style). Rows are provider-tagged; NAS rows play the local file, online
-        rows stream."""
+        rows stream.
+
+        Per-keystroke cost profile (2026-10-12: ~0.9s = Deezer ~0.17s +
+        YTMusic ~0.74s, sequential, uncached per prefix): the full payload
+        is cached in-memory 60s keyed by (user, norm(query)) so repeats,
+        backspaces and app re-requests are instant; YTMusic is skipped for
+        <3-char prefixes (NAS+Deezer suffice). The `q` echo lets the app
+        drop stale out-of-order responses while debouncing."""
         if not q or not q.strip():
-            return {"results": []}
+            return {"q": q or "", "results": [], "cached": False}
         qq = q.strip()
+        try:
+            _sg_key = (self._me() or "") + "\x00" + self._norm(qq)
+            _sg_hit = type(self)._suggest_resp_cache.get(_sg_key)
+            if _sg_hit and (time.time() - _sg_hit[0]) < 60:
+                _cached = dict(_sg_hit[1])
+                _cached["q"] = qq
+                _cached["cached"] = True
+                return _cached
+        except Exception:                               # noqa: BLE001
+            _sg_key = None
         declared = []
         token_norms = [self._norm(w) for w in qq.split()
                        if len(self._norm(w)) >= 2]
@@ -1911,13 +1928,17 @@ class Handler(BaseHTTPRequestHandler):
         online = []
         try:
             online = self.state.scorer.deezer_autocomplete(qq, limit=6,
-                                                           timeout=4.0)
+                                                           timeout=2.0)
         except Exception as ex:                       # noqa: BLE001
             self._log(f"suggest online failed: {str(ex)[:60]}")
         # YT/pick flavor alongside Deezer autocomplete: fast YTMusic-only
         # lookup, ranked by pick, so online rows aren't Deezer-only.
+        # Skipped for <3-char prefixes (NAS+Deezer suffice; a live YTM
+        # round-trip is ~0.7s and 1-2 chars are noise) and cached 60s in
+        # search_ytmusic, so repeats/backspaces never re-pay it.
         try:
-            _yt = self.state.scorer.search_ytmusic(qq) or []
+            _yt = self.state.scorer.search_ytmusic(qq) \
+                if len(qq) >= 3 else []
             _scored, _ = self.state.scorer.pick(_yt, [qq], qq)
             for c in (_scored or [])[:3]:
                 _t = (c.get("title") or "").strip()
@@ -1948,7 +1969,19 @@ class Handler(BaseHTTPRequestHandler):
                        args=([(o.get("artist"), o.get("title"))
                               for o in online[:5]],),
                        daemon=True).start()
-        return {"results": declared + online}
+        payload = {"q": qq, "results": declared + online, "cached": False}
+        try:
+            if _sg_key:
+                type(self)._suggest_resp_cache[_sg_key] = (
+                    time.time(), dict(payload))
+                if len(type(self)._suggest_resp_cache) > 200:
+                    _old = min(type(self)._suggest_resp_cache,
+                               key=lambda k: type(self)
+                               ._suggest_resp_cache[k][0])
+                    type(self)._suggest_resp_cache.pop(_old, None)
+        except Exception:                               # noqa: BLE001
+            pass
+        return payload
 
     def _prewarm_resolvename(self, pairs):
         """Resolve + cache a handful of (artist, title) pairs in the background
@@ -2021,6 +2054,25 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:                   # noqa: BLE001
                         pass
             return self._json(got)
+        # Poll fast-path (funnel audit 2026-10-11: every 400ms poll re-ran
+        # the full NAS scans below, ~25ms server-side each x ~7 polls per
+        # cold tap). A fresh job means an earlier request already did the
+        # NAS-first checks and spawned the worker: join it without rescanning.
+        with type(self)._rn_jobs_lock:
+            _job = type(self)._rn_jobs.get(key)
+            if _job is not None and _job["ts"] >= time.time() - 300:
+                if _job.get("err"):
+                    return self._error(502, "resolve failed")
+                if _job.get("bg"):
+                    type(self)._rn_tok += 1
+                    _tok = type(self)._rn_tok
+                    type(self)._rn_jobs[key] = {
+                        "ts": time.time(), "tok": _tok}
+                    threading.Thread(target=self._rn_worker,
+                                     args=(key, artist, title),
+                                     kwargs={"tok": _tok},
+                                     daemon=True).start()
+                return self._json({"status": "pending", "key": key})
         # NAS-first on the tap path (exact _innas + lenient fallback):
         # owned songs play the local file instantly, relay only when
         # truly absent.
@@ -2167,6 +2219,9 @@ class Handler(BaseHTTPRequestHandler):
                         "thumb": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
                         "artist": artist, "title": title,
                         "album": album,
+                        # Picked candidate's studio total: seeds the app's
+                        # duration readout when the stream omits its own.
+                        "duration_s": winner.get("duration_s"),
                        # The ACTUAL resolved media identity (what will play), so
                        # the app can key lyrics/album by the real video instead of
                        # the discovery identity (metadata fix for internet items).
@@ -3222,16 +3277,30 @@ class Handler(BaseHTTPRequestHandler):
     def _entry_meta(self, base):
         meta = self.state.db.song_meta_get(base)
         if meta:
-            return {
+            d = {
                 "base_name": base,
                 "artist": meta.get("artist"),
                 "album": meta.get("album"),
                 "album_artist": meta.get("album_artist"),
                 "album_image": meta.get("album_image"),
             }
-        lead = base.split(" - ", 1)[0].strip() if " - " in base else ""
-        return {"base_name": base, "artist": lead or None,
-                "album": None, "album_artist": None, "album_image": None}
+            artist = meta.get("artist")
+        else:
+            lead = base.split(" - ", 1)[0].strip() if " - " in base else ""
+            artist = lead or None
+            d = {"base_name": base, "artist": artist,
+                 "album": None, "album_artist": None, "album_image": None}
+        # Total-duration backfill for streams that omit it (chunked relay
+        # never emits a duration): Deezer studio duration, cached 90d.
+        # Best-effort — never breaks the payload.
+        try:
+            title = base.split(" - ", 1)[1].strip() if " - " in base else ""
+            dur = self._studio_duration(artist or "", title) if title else None
+            if isinstance(dur, (int, float)) and dur > 0:
+                d["duration_s"] = int(dur)
+        except Exception:                                # noqa: BLE001
+            pass
+        return d
 
     def _metainfo(self, base):
         if not base or len(base) > 300:
@@ -3497,6 +3566,17 @@ class Handler(BaseHTTPRequestHandler):
         is contained in it (catches "In Da Club" vs "In da club (feat.)" and
         similar). Used to set the search-result "in NAS" cloud marker even when
         the exact spelling differs."""
+        # Cached 2h like _innas (funnel audit 2026-10-11: this full-library
+        # scan ran on EVERY resolve poll; scope key mirrors _innas).
+        state = self.state
+        me = self._me() or ""
+        scope = me if self._per_user_libs() else ""
+        _lkey = "inlen:{}\x00{}\x00{}".format(
+            self._norm_core(artist or ""), self._norm_core(title or ""),
+            scope)
+        _got = state.db.misc_get(_lkey, 2 * 3600)
+        if _got is not None:
+            return _got.get("base") or None
         q_ar = self._norm_core(artist or "")
         q_ti = self._norm_core(title or "")
         if not q_ar or not q_ti:
@@ -3524,6 +3604,10 @@ class Handler(BaseHTTPRequestHandler):
             if s > best_score:
                 best_score = s
                 best = base
+        try:
+            state.db.misc_put(_lkey, {"base": best or ""})
+        except Exception:                               # noqa: BLE001
+            pass
         return best
 
     # -------------------------------------------------- check songs
@@ -3536,6 +3620,7 @@ class Handler(BaseHTTPRequestHandler):
     _check_lock = threading.Lock()
     _check_progress = None
     _suggest_cache = None
+    _suggest_resp_cache = {}  # (user \x00 norm_q) -> (ts, payload), 60s TTL
     _lastav_at = {}                # user -> last misc_put epoch (60s throttle)
     _playlists_cache = {}            # user -> (timestamp, signature, payload)
     # Shared background-resolution jobs for /api/resolvename cold misses:

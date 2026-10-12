@@ -45,6 +45,7 @@ class _ArtistScreenState extends State<ArtistScreen> {
         s.baseName,
         widget.api.fileUrl(s.url!),
         thumbUrl: widget.api.coverUrl(s.url!),
+        durationMs: durationMsFor(s.durationS),
       );
     }
     final title = _titleOf(s.baseName);
@@ -55,6 +56,7 @@ class _ArtistScreenState extends State<ArtistScreen> {
       resolveName: (artist: widget.name, title: title),
       lyricsArtist: widget.name,
       lyricsTitle: title,
+      durationMs: durationMsFor(s.durationS),
     );
   }
 
@@ -164,6 +166,7 @@ class _ArtistScreenState extends State<ArtistScreen> {
         s.baseName,
         widget.api.fileUrl(s.url!),
         thumbUrl: widget.api.coverUrl(s.url!),
+        durationMs: durationMsFor(s.durationS),
       );
     }
     final title = _titleOf(s.baseName);
@@ -174,6 +177,7 @@ class _ArtistScreenState extends State<ArtistScreen> {
       resolveName: (artist: widget.name, title: title),
       lyricsArtist: widget.name,
       lyricsTitle: title,
+      durationMs: durationMsFor(s.durationS),
     );
   }
 

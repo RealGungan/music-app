@@ -275,6 +275,7 @@ class _SearchScreenState extends State<SearchScreen> {
               album: (t.album?.isNotEmpty ?? false) ? t.album : null,
               lyricsArtist: t.artist,
               lyricsTitle: t.title,
+              durationMs: durationMsFor(t.durationS),
             )
           : QueueItem(
               '${t.artist} - ${t.title}',
@@ -284,6 +285,7 @@ class _SearchScreenState extends State<SearchScreen> {
               album: (t.album?.isNotEmpty ?? false) ? t.album : null,
               lyricsArtist: t.artist,
               lyricsTitle: t.title,
+              durationMs: durationMsFor(t.durationS),
             );
       if (tap != _tapId || !mounted) return;
       if (item.url.isNotEmpty) widget.api.prewarmFile(item.url);
@@ -481,6 +483,7 @@ class _SearchScreenState extends State<SearchScreen> {
               album: (s.album?.isNotEmpty ?? false) ? s.album : null,
               lyricsArtist: artist,
               lyricsTitle: title,
+              durationMs: durationMsFor(s.durationS),
             )
           : QueueItem(
               title,
@@ -489,6 +492,7 @@ class _SearchScreenState extends State<SearchScreen> {
               album: (s.album?.isNotEmpty ?? false) ? s.album : null,
               lyricsArtist: artist,
               lyricsTitle: title,
+              durationMs: durationMsFor(s.durationS),
             );
       if (item.url.isNotEmpty) widget.api.prewarmFile(item.url);
       // Explicit single-play: stop after the tapped row (playOne leaves
@@ -569,6 +573,7 @@ class _SearchScreenState extends State<SearchScreen> {
       album: (t.album?.isNotEmpty ?? false) ? t.album : null,
       lyricsArtist: t.artist,
       lyricsTitle: t.title,
+      durationMs: durationMsFor(t.durationS),
     );
   }
 
@@ -595,6 +600,7 @@ class _SearchScreenState extends State<SearchScreen> {
       album: (s.album?.isNotEmpty ?? false) ? s.album : null,
       lyricsArtist: artist,
       lyricsTitle: title,
+      durationMs: durationMsFor(s.durationS),
     );
   }
 
