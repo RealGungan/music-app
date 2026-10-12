@@ -278,6 +278,8 @@ class ImportProgressCard extends StatefulWidget {
 class _ImportProgressCardState extends State<ImportProgressCard> {
   Map<String, dynamic>? _snap;
   Timer? _hideTimer;
+  // Import the missing-popup already fired for (playlist|done|count).
+  String _missingShownFor = '';
 
   @override
   void dispose() {
@@ -307,13 +309,81 @@ class _ImportProgressCardState extends State<ImportProgressCard> {
         setState(() => _snap = s);
         if (s['running'] != true) {
           _armHide();
+          _maybeMissingPopup(s);
           return;
         }
+        _missingShownFor = '';
       } catch (_) {
         return;
       }
       await Future.delayed(const Duration(seconds: 10));
     }
+  }
+
+  /// Once an import finishes with missing songs, pop a dialog listing
+  /// them (Retry-missing + Dismiss) — once per import, not just the card.
+  void _maybeMissingPopup(Map<String, dynamic> s) {
+    final missing =
+        ((s['missing'] as List?) ?? []).map((e) => '$e').toList();
+    if (missing.isEmpty) return;
+    final key = "${s['playlist']}|${s['done']}|${missing.length}";
+    if (_missingShownFor == key) return;
+    _missingShownFor = key;
+    final playlist = "${s['playlist'] ?? ''}";
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _showMissingDialog(playlist, missing);
+    });
+  }
+
+  Future<void> _showMissingDialog(
+      String playlist, List<String> missing) async {
+    final retry = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('${missing.length} ${tr('missing')}'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final m in missing)
+                  Text('• $m',
+                      style: const TextStyle(
+                          fontSize: 13, color: Colors.orangeAccent)),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(tr('Dismiss')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(tr('Retry in same playlist')),
+          ),
+        ],
+      ),
+    );
+    if (retry != true || !mounted) return;
+    String src = '';
+    try {
+      src = await widget.api.playlistSource(playlist);
+    } catch (_) {}
+    if (!mounted) return;
+    if (src.isEmpty) {
+      toast(context, tr('Could not read playlist'),
+          icon: Icons.error_outline);
+      return;
+    }
+    await openImportSheet(context,
+        api: widget.api,
+        initialLink: src,
+        initialName: playlist,
+        onlyTracks: missing);
   }
 
   @override

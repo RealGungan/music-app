@@ -155,7 +155,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.300"
+APP_VERSION = "1.0.302"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1278,7 +1278,7 @@ class Handler(BaseHTTPRequestHandler):
         if ttl is None:
             ttl = q
 
-        local_idx = self._local_files_map()
+        local_idx = self._scoped_local_map()
         local_core = {self._norm_core(b) for b in local_idx}
 
         token_norms = [self._norm(w) for w in q.split()
@@ -1460,7 +1460,7 @@ class Handler(BaseHTTPRequestHandler):
                 meta_thread = threading.Thread(target=_meta)
                 meta_thread.start()
 
-            local_idx = self._local_files_map()
+            local_idx = self._scoped_local_map()
             local_core = {self._norm_core(b) for b in local_idx}
 
             cands = state.scorer.search(
@@ -1855,6 +1855,8 @@ class Handler(BaseHTTPRequestHandler):
             for base, full, url, meta in self._suggest_index():
                 if not self._lib_visible(base, self._me()):
                     continue
+                if self._staging_hidden(base, full, self._me()):
+                    continue
                 hay = self._norm(base)
                 hits = sum(1 for t in token_norms if t in hay)
                 if not hits:
@@ -1893,6 +1895,8 @@ class Handler(BaseHTTPRequestHandler):
             seen_bases = {s[1] for s in scored}
             for base, full, url, meta in self._suggest_index():
                 if not self._lib_visible(base, self._me()):
+                    continue
+                if self._staging_hidden(base, full, self._me()):
                     continue
                 if base in seen_bases:
                     continue
@@ -2219,6 +2223,9 @@ class Handler(BaseHTTPRequestHandler):
                         "thumb": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
                         "artist": artist, "title": title,
                         "album": album,
+                        # Picked candidate's studio total: seeds the app's
+                        # duration readout when the stream omits its own.
+                        "duration_s": winner.get("duration_s"),
                        # The ACTUAL resolved media identity (what will play), so
                        # the app can key lyrics/album by the real video instead of
                        # the discovery identity (metadata fix for internet items).
@@ -3274,16 +3281,30 @@ class Handler(BaseHTTPRequestHandler):
     def _entry_meta(self, base):
         meta = self.state.db.song_meta_get(base)
         if meta:
-            return {
+            d = {
                 "base_name": base,
                 "artist": meta.get("artist"),
                 "album": meta.get("album"),
                 "album_artist": meta.get("album_artist"),
                 "album_image": meta.get("album_image"),
             }
-        lead = base.split(" - ", 1)[0].strip() if " - " in base else ""
-        return {"base_name": base, "artist": lead or None,
-                "album": None, "album_artist": None, "album_image": None}
+            artist = meta.get("artist")
+        else:
+            lead = base.split(" - ", 1)[0].strip() if " - " in base else ""
+            artist = lead or None
+            d = {"base_name": base, "artist": artist,
+                 "album": None, "album_artist": None, "album_image": None}
+        # Total-duration backfill for streams that omit it (chunked relay
+        # never emits a duration): Deezer studio duration, cached 90d.
+        # Best-effort — never breaks the payload.
+        try:
+            title = base.split(" - ", 1)[1].strip() if " - " in base else ""
+            dur = self._studio_duration(artist or "", title) if title else None
+            if isinstance(dur, (int, float)) and dur > 0:
+                d["duration_s"] = int(dur)
+        except Exception:                                # noqa: BLE001
+            pass
+        return d
 
     def _metainfo(self, base):
         if not base or len(base) > 300:
@@ -3400,6 +3421,32 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return owner == (user or "")
 
+    def _staging_hidden(self, base, full, user):
+        """Another user's staged (not yet kept) file must never mark in_nas
+        for me — regardless of the per_user_libs flag. Shared library
+        (music_root/playlist_dir) + legacy owner='' + own files are
+        unaffected. Fail-open on any error."""
+        try:
+            staging = os.path.normpath(self.state.config.staging_dir)
+            norm = os.path.normpath(full or "")
+            if norm != staging and not norm.startswith(staging + os.sep):
+                return False
+            owner = (self._cached_owner_map().get(base) or "")
+            return bool(owner) and owner != (user or "")
+        except Exception:                                # noqa: BLE001
+            return False
+
+    def _scoped_local_map(self):
+        """Global index minus other users' staged files (in_nas marking).
+        Cheap dict filter over the cached global index (no re-walk)."""
+        idx = self._local_files_map()
+        try:
+            me = self._me()
+            return {b: f for b, f in idx.items()
+                    if not self._staging_hidden(b, f, me)}
+        except Exception:                                # noqa: BLE001
+            return idx
+
     # ------------------------------------------------ in-nas lookup (O)
     @staticmethod
     def _innas_score(q_ar, q_ti, q_both, b_ar_c, b_ti_c, base_norm):
@@ -3478,6 +3525,8 @@ class Handler(BaseHTTPRequestHandler):
         best_score = -1
         for base, _full, url, meta in self._suggest_index():
             if not self._lib_visible(base, me or None):
+                continue
+            if self._staging_hidden(base, _full, me):
                 continue
             if " - " in base:
                 b_ar, b_ti = base.split(" - ", 1)
@@ -3566,8 +3615,10 @@ class Handler(BaseHTTPRequestHandler):
             return None
         best = None
         best_score = -1
-        for base in self.state.local_mp3_index():
+        for base, _full in self.state.local_mp3_index().items():
             if not self._lib_visible(base, self._me()):
+                continue
+            if self._staging_hidden(base, _full, self._me()):
                 continue
             if " - " in base:
                 b_ar, b_ti = base.split(" - ", 1)
@@ -5627,7 +5678,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, "bad album")
         norm = self._norm
         art_targets = {norm(a) for a in self._split_artists(artist)} if artist else set()
-        idx = self._local_files_map()
+        idx = self._scoped_local_map()
         rows = self.state.db.query("SELECT * FROM song_meta")
         bundled = {}
         for m in rows:

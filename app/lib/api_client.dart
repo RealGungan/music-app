@@ -200,12 +200,14 @@ class MetaInfo {
   final String? album;
   final String? albumArtist;
   final String? albumImage;
+  final int? durationS;
   MetaInfo({
     required this.baseName,
     this.artist,
     this.album,
     this.albumArtist,
     this.albumImage,
+    this.durationS,
   });
 
   factory MetaInfo.fromJson(Map<String, dynamic> j) => MetaInfo(
@@ -214,6 +216,7 @@ class MetaInfo {
     album: j['album'],
     albumArtist: j['album_artist'],
     albumImage: j['album_image'],
+    durationS: (j['duration_s'] as num?)?.toInt(),
   );
 }
 
@@ -439,6 +442,10 @@ class ResolvedName {
   /// Deezer album title when known (null = hide honestly, no guessing).
   final String? album;
 
+  /// Studio total (seconds) from the resolve worker's picked candidate —
+  /// seeds the duration readout when the stream omits its own metadata.
+  final int? durationS;
+
   /// The identity of the ACTUAL YouTube video chosen (resolvename) — used as
   /// the lyrics key so lyrics match what is really playing.
   final String? resolvedArtist;
@@ -450,6 +457,7 @@ class ResolvedName {
     this.artist,
     this.title,
     this.album,
+    this.durationS,
     this.resolvedArtist,
     this.resolvedTitle,
   });
@@ -461,6 +469,7 @@ class ResolvedName {
     artist: j['artist'],
     title: j['title'],
     album: (j['album'] as String?)?.isNotEmpty ?? false ? j['album'] : null,
+    durationS: (j['duration_s'] as num?)?.toInt(),
     resolvedArtist: j['resolved_artist'],
     resolvedTitle: j['resolved_title'],
   );
@@ -810,6 +819,7 @@ class DownloadRow {
   final String? channel;
   final int? durationS;
   final String? path;
+  final String owner;
   DownloadRow({
     required this.id,
     required this.baseName,
@@ -818,6 +828,7 @@ class DownloadRow {
     this.channel,
     this.durationS,
     this.path,
+    this.owner = '',
   });
 
   factory DownloadRow.fromJson(Map<String, dynamic> j) => DownloadRow(
@@ -828,6 +839,7 @@ class DownloadRow {
     channel: j['channel'],
     durationS: j['duration_s'],
     path: j['path'],
+    owner: (j['owner'] ?? '').toString(),
   );
 }
 
@@ -840,11 +852,13 @@ class JobStatus {
   final String baseName;
   final String status;
   final String? error;
+  final String owner;
   JobStatus({
     required this.id,
     required this.baseName,
     required this.status,
     this.error,
+    this.owner = '',
   });
 
   factory JobStatus.fromJson(Map<String, dynamic> j) => JobStatus(
@@ -852,6 +866,7 @@ class JobStatus {
     baseName: (j['base_name'] ?? '').toString(),
     status: (j['status'] ?? '').toString(),
     error: j['error']?.toString(),
+    owner: (j['owner'] ?? '').toString(),
   );
 }
 
@@ -1118,8 +1133,8 @@ class ApiClient {
     return v;
   }
 
-  static Future<bool> _probe(String base) async {
-    final c = http.Client();
+  static Future<bool> _probe(String base, [http.Client? client]) async {
+    final c = client ?? http.Client();
     try {
       final r = await c
           .head(Uri.parse('${_norm(base)}/staging'))
@@ -1128,7 +1143,7 @@ class ApiClient {
     } catch (_) {
       return false;
     } finally {
-      c.close();
+      if (client == null) c.close();
     }
   }
 
@@ -1143,20 +1158,28 @@ class ApiClient {
         if (cached != null && cached.isNotEmpty) _activeBase = _norm(cached);
       } catch (_) {}
     }
-    final results = await Future.wait([_probe(lanBase), _probe(funnelBase)]);
-    final best = results[0]
-        ? _norm(lanBase)
-        : results[1]
-            ? _norm(funnelBase)
-            : null;
-    if (best != null && best != _activeBase) {
-      _activeBase = best;
-      try {
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString(_kActiveBase, best);
-      } catch (_) {}
+    // One shared client for both probes: reuses the TLS session instead of
+    // two fresh handshakes (~15ms saved on funnel cold starts).
+    final pc = http.Client();
+    try {
+      final results = await Future.wait(
+          [_probe(lanBase, pc), _probe(funnelBase, pc)]);
+      final best = results[0]
+          ? _norm(lanBase)
+          : results[1]
+              ? _norm(funnelBase)
+              : null;
+      if (best != null && best != _activeBase) {
+        _activeBase = best;
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString(_kActiveBase, best);
+        } catch (_) {}
+      }
+      return serverBase;
+    } finally {
+      pc.close();
     }
-    return serverBase;
   }
 
   /// Current base just failed: flip to the other one immediately (fast
@@ -1222,9 +1245,25 @@ class ApiClient {
   /// Fast TCP reachability probe to the NAS (1.5s cap). Used for instant
   /// offline decisions instead of relying on connectivity_plus which only
   /// reports interface state (WiFi up ≠ NAS reachable).
+  /// Reachable-base ping: tries the current base, and on failure re-probes
+  /// (tailnet ↔ funnel) and tries the winner once. Every offline verdict
+  /// must go through here (or [pingCurrent] + explicit re-probe) — never
+  /// declare offline while the funnel answers.
   Future<bool> ping() async {
+    if (await pingCurrent()) return true;
     try {
-      final uri = Uri.parse(_base);
+      await selectBestBase().timeout(const Duration(seconds: 6));
+    } catch (_) {}
+    return pingCurrent();
+  }
+
+  /// Fast single-base ping (no re-probe): for clearing a stale offline flag
+  /// on hot paths where a full re-probe would stall every tap.
+  Future<bool> pingCurrent() => _pingBase(_base);
+
+  Future<bool> _pingBase(String base) async {
+    try {
+      final uri = Uri.parse(base);
       final host = uri.host;
       final port = uri.hasPort ? uri.port : (uri.scheme == 'https' ? 443 : 80);
       await Socket.connect(host, port, timeout: const Duration(milliseconds: 1500));
@@ -1232,6 +1271,25 @@ class ApiClient {
     } catch (_) {
       return false;
     }
+  }
+
+  /// True when [url] points at this server on ANY known base (tailnet or
+  /// funnel) — catches rows minted before a base flip. file:// never matches.
+  static bool isNasUrl(String url) {
+    if (url.startsWith('file://')) return false;
+    return url.startsWith(_norm(lanBase)) || url.startsWith(_norm(funnelBase));
+  }
+
+  /// Rewrite a stale-base server URL onto the current reachable base so old
+  /// queue rows follow a tailnet↔funnel flip instead of hanging to timeout.
+  /// Non-server URLs pass through untouched.
+  String rebaseUrl(String url) {
+    for (final b in [_norm(lanBase), _norm(funnelBase)]) {
+      if (url.startsWith(b) && b != serverBase) {
+        return '$serverBase${url.substring(b.length)}';
+      }
+    }
+    return url;
   }
 
   /// Append the session token to a hand-built absolute URL (file, stream,
@@ -2295,6 +2353,7 @@ class ApiClient {
           artist: r.artist,
           title: r.title,
           album: r.album,
+          durationS: r.durationS,
           resolvedArtist: r.resolvedArtist,
           resolvedTitle: r.resolvedTitle,
         );

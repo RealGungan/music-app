@@ -1,10 +1,17 @@
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nasmusic/api_client.dart' show ResolvedName;
+import 'package:nasmusic/audio_handler.dart' show publishedDurationMs;
 import 'package:nasmusic/now_playing.dart' show durationLabel;
 import 'package:nasmusic/playback_engine.dart';
 import 'package:nasmusic/queue_player.dart'
-    show QueuePlayer, skinMismatch, skinMismatchMessage, skinShowsPlaying;
+    show
+        QueuePlayer,
+        durationMsFor,
+        skinMismatch,
+        skinMismatchMessage,
+        skinShowsPlaying;
 
 String _fmt(Duration d) {
   final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
@@ -33,6 +40,37 @@ void main() {
           '03:07');
       expect(
           durationLabel(const Duration(seconds: 1), _fmt), '00:01');
+    });
+  });
+
+  group('known-duration seed (never blank while pos advances)', () {
+    test('durationMsFor: positive seconds -> ms, else null', () {
+      expect(durationMsFor(215), 215000);
+      expect(durationMsFor(null), isNull);
+      expect(durationMsFor(0), isNull);
+      expect(durationMsFor(-5), isNull);
+    });
+    test('seeded total formats, never –:––', () {
+      final seed = durationMsFor(215)!;
+      expect(durationLabel(Duration(milliseconds: seed), _fmt), '03:35');
+    });
+    test('publishedDurationMs: measured wins, hint fills zero, else zero',
+        () {
+      expect(publishedDurationMs(streamMs: 214000, hintMs: 215000), 214000);
+      expect(publishedDurationMs(streamMs: 0, hintMs: 215000), 215000);
+      expect(publishedDurationMs(streamMs: 0, hintMs: null), 0);
+      expect(publishedDurationMs(streamMs: 0, hintMs: 0), 0);
+    });
+    test('ResolvedName carries duration_s from the resolve response', () {
+      final r = ResolvedName.fromJson({
+        'url': 'u',
+        'video_id': 'v',
+        'duration_s': 215,
+      });
+      expect(r.durationS, 215);
+      expect(durationMsFor(r.durationS), 215000);
+      final missing = ResolvedName.fromJson({'url': 'u', 'video_id': 'v'});
+      expect(missing.durationS, isNull);
     });
   });
 

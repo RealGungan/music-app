@@ -66,6 +66,12 @@ class QueueItem {
   /// Liked flag threaded from the single playlist payload (no per-row
   /// likedStatus roundtrip in the prefetch wave).
   final bool? liked;
+
+  /// Known total in ms (server metainfo / Deezer duration_s): pre-seeds the
+  /// readout when the stream itself omits its duration (chunked relay never
+  /// emits onDurationChanged → total stuck at –:––). A measured stream value
+  /// always wins — this is only the fallback.
+  final int? durationMs;
   QueueItem(
     this.title,
     this.url, {
@@ -80,7 +86,26 @@ class QueueItem {
     this.lyricsArtist,
     this.lyricsTitle,
     this.liked,
+    this.durationMs,
   });
+
+  /// Copy with a new url (base-flip rebase): identity/display untouched.
+  QueueItem withUrl(String u) => QueueItem(
+        title,
+        u,
+        thumbUrl: thumbUrl,
+        baseName: baseName,
+        videoId: videoId,
+        resolveName: resolveName,
+        manuallyPlaced: manuallyPlaced,
+        fromInternet: fromInternet,
+        album: album,
+        albumImage: albumImage,
+        lyricsArtist: lyricsArtist,
+        lyricsTitle: lyricsTitle,
+        liked: liked,
+        durationMs: durationMs,
+      );
 }
 
 /// Instant placeholder for a Spotify /track/ deep-link parse ([OpenLink]
@@ -110,7 +135,14 @@ typedef UrlResolver = Future<String> Function(String videoId);
 /// so the lazy resolve can attach the resolvename hqdefault cover instead
 /// of dropping it (null art -> gradient).
 typedef NameResolver =
-    Future<({String url, String thumb, String? videoId, String? album})>
+    Future<
+        ({
+          String url,
+          String thumb,
+          String? videoId,
+          String? album,
+          int? durationS,
+        })>
     Function(String artist, String title);
 
 /// Turns an [artist]+[title] pair into a NAS file URL (or null when the NAS
@@ -157,6 +189,12 @@ bool dropStalePositionTick({
 /// so no stale or zero stamp can flash on a track switch.
 bool stampHidden({required int posGen, required int playGen}) =>
     posGen != playGen;
+
+/// Known-duration seed (pure, unit-tested): row duration_s / Deezer duration
+/// (seconds) → QueueItem.durationMs. Null/zero/negative = unknown (null —
+/// never seed a bogus 0:00; the readout shows –:–– until measured).
+int? durationMsFor(int? durationS) =>
+    (durationS != null && durationS > 0) ? durationS * 1000 : null;
 
 /// Pause-token gate for EVERY deferred resume (nudge/heal/autoplay refill/
 /// completion advance/_boundLoading/RemoteEngine toggle): a delayed resume
@@ -339,6 +377,10 @@ class QueuePlayer {
       _onTick();
     });
     _player.onDurationChanged.listen((d) {
+      // Measured wins — but a zero event must never wipe the known-metadata
+      // seed (chunked relay + some codecs emit 0:00 first, real total late
+      // or never). The seed holds until a positive value arrives.
+      if (d <= Duration.zero) return;
       trackDuration.value = d;
       _onTick();
     });
@@ -649,11 +691,38 @@ class QueuePlayer {
     }
   }
 
-  /// Single choke point for the "radio up, NAS dead?" question: pings when
-  /// the flag still says online and flips it when the NAS doesn't answer.
-  /// Offline-confirmed = wrap to cached, never blind +1.
+  /// Single choke point for the "radio up, NAS dead?" question. Online:
+  /// pings and flips the flag when the NAS doesn't answer. Offline: one
+  /// cheap current-base ping clears a stale-true latch the moment the
+  /// server answers (no full re-probe on every tap — heal + the network
+  /// listener own the tailnet↔funnel flip). Offline-confirmed = wrap to
+  /// cached, never blind +1.
   Future<void> _ensureOfflineFlag() async {
-    if (!isOffline.value && await _nasDown()) isOffline.value = true;
+    if (!isOffline.value) {
+      if (await _nasDown()) isOffline.value = true;
+    } else if (_api != null) {
+      try {
+        if (await _api!.pingCurrent().timeout(const Duration(seconds: 3))) {
+          isOffline.value = false;
+        }
+      } catch (_) {}
+    }
+  }
+
+  /// Re-probe-then-verdict before heal: re-runs base selection (tailnet ↔
+  /// funnel) so a stale offline flag clears when the reachable base answers.
+  /// Never declares offline while the funnel answers.
+  Future<void> _reprobeOfflineFlag() async {
+    // Fast path: the reachable base answers one ping, flag settles in ms.
+    if (!await _nasDown()) {
+      isOffline.value = false;
+      return;
+    }
+    // Slow path: full re-probe of both bases, verdict follows the winner.
+    try {
+      await _api?.selectBestBase().timeout(const Duration(seconds: 6));
+    } catch (_) {}
+    isOffline.value = await _nasDown();
   }
 
   /// Stall watchdog baseline (a dead socket doesn't always complete or
@@ -700,6 +769,7 @@ class QueuePlayer {
             : '',
         videoId: r.videoId.isNotEmpty ? r.videoId : null,
         album: r.album,
+        durationS: r.durationS,
       );
     };
     nasLookup = (artist, title) async {
@@ -1390,7 +1460,14 @@ class QueuePlayer {
     position.value = Duration.zero;
     _posMax = Duration.zero;
     _userSeekTarget = null;
-    trackDuration.value = Duration.zero;
+    // Seed the total from KNOWN metadata (row duration_s / Deezer duration
+    // carried on the item): chunked relays never emit onDurationChanged, so
+    // without this the readout sits at –:–– while position advances.
+    // Measured player duration replaces it when it arrives (see listener).
+    final seed = items[index].durationMs;
+    trackDuration.value = (seed != null && seed > 0)
+        ? Duration(milliseconds: seed)
+        : Duration.zero;
     currentTitle.value = items[index].title;
     PlayLog.switched(prevTitle, prevSec, items[index].title);
     currentThumb.value = items[index].thumbUrl ?? '';
@@ -1503,12 +1580,25 @@ class QueuePlayer {
         return;
       }
       var url = resolved;
+      // Base flip (tailnet ↔ funnel) orphans stored server URLs: follow the
+      // reachable base instead of hanging to timeout. Written back so the
+      // pre-push + handler adoption (exact-url match) stay in sync.
+      if (_api != null && ApiClient.isNasUrl(url)) {
+        final live = _api!.rebaseUrl(url);
+        if (live != url) {
+          url = live;
+          final at = items.indexOf(item);
+          if (at >= 0 && identical(items[at], item)) {
+            items[at] = item.withUrl(live);
+          }
+        }
+      }
       // Dead-but-returned NAS URL (resolved with no timeout, NAS died
       // since): never play a doomed NAS http — cached file now, else the
       // nearest cached row (same redirect as the null branch above).
       if (!url.startsWith('file://') &&
           _api != null &&
-          url.startsWith(_api!.serverBase)) {
+          ApiClient.isNasUrl(url)) {
         if (!isOffline.value && await _nasDown()) isOffline.value = true;
         if (isOffline.value && gen == _playGen) {
           if (await _failoverCached(
@@ -1555,7 +1645,9 @@ class QueuePlayer {
       _boundLoading(gen, playHeal);
       if (gen != _playGen) return;
       unawaited(
-        _player.play(url).catchError((Object e) async {
+        _player
+            .play(url, durMs: items[index].durationMs)
+            .catchError((Object e) async {
           // Only surface errors for the winning operation. Fire-time
           // pause-intent check: play+instant-pause must NOT resume via
           // the cached fallback.
@@ -1568,7 +1660,7 @@ class QueuePlayer {
               gen == _playGen &&
               playHeal == _healGen) {
             try {
-              await _player.play(fb);
+              await _player.play(fb, durMs: items[index].durationMs);
               _loadedUrl = fb;
               return;
             } catch (_) {}
@@ -1751,6 +1843,7 @@ class QueuePlayer {
           albumImage: item.albumImage,
           lyricsArtist: item.lyricsArtist,
           lyricsTitle: item.lyricsTitle,
+          durationMs: item.durationMs,
         );
       } else if (item.resolveName != null && nameResolver != null) {
         var rn = item.resolveName!;
@@ -1780,6 +1873,7 @@ class QueuePlayer {
           albumImage: item.albumImage,
           lyricsArtist: item.lyricsArtist,
           lyricsTitle: item.lyricsTitle,
+          durationMs: durationMsFor(res.durationS) ?? item.durationMs,
         );
         // Late fill (album/url art arrived after first build, same title):
         // ping title listeners so Now Playing + lock-screen metadata pick
@@ -1956,10 +2050,10 @@ class QueuePlayer {
       'state=${_lastPlayerState.name}',
     );
     _setLoading(true);
-    // Radio-up ≠ reachable: a stall/VPN/funnel drop reads online but the
-    // NAS is gone — ping first so we read cache instead of burning
-    // resolve attempts on dead network URLs.
-    if (!isOffline.value && await _nasDown()) isOffline.value = true;
+    // Re-probe before heal: a stale offline flag (base flipped to funnel
+    // since) must clear when the reachable base answers, not heal into the
+    // cache path forever.
+    await _reprobeOfflineFlag();
     const waits = [0, 1, 2, 4, 8, 15];
     for (var attempt = 0; attempt < waits.length; attempt++) {
       if (hid != _healGen || gen != _playGen) return;
@@ -2596,6 +2690,17 @@ class QueuePlayer {
     }
     // Read the (possibly just written-back) row: the push metadata must
     // describe the resolved URL the handler will actually autostart.
+    // Base flip: stored server URLs go stale — push the reachable base and
+    // write it back so the handler's 'advanced' adoption (exact-url match)
+    // finds this row.
+    if (_api != null && ApiClient.isNasUrl(u)) {
+      final live = _api!.rebaseUrl(u);
+      if (live != u) {
+        u = live;
+        final at = items.indexWhere((e) => identical(e, it));
+        if (at >= 0) items[at] = it.withUrl(live);
+      }
+    }
     final pushed = items[nextIdx];
     final t = pushed.lyricsTitle?.isNotEmpty == true
         ? '${pushed.lyricsArtist ?? ''} - ${pushed.lyricsTitle}'
@@ -2606,6 +2711,7 @@ class QueuePlayer {
       title: split > 0 ? t.substring(split + 3).trim() : t,
       artist: split > 0 ? t.substring(0, split).trim() : '',
       album: pushed.album,
+      durMs: pushed.durationMs,
     );
   }
 
@@ -2630,6 +2736,7 @@ class QueuePlayer {
         albumImage: it.albumImage,
         lyricsArtist: it.lyricsArtist,
         lyricsTitle: it.lyricsTitle,
+        durationMs: it.durationMs,
         liked: it.liked,
       );
     }
@@ -2648,6 +2755,7 @@ class QueuePlayer {
         albumImage: it.albumImage,
         lyricsArtist: it.lyricsArtist,
         lyricsTitle: it.lyricsTitle,
+        durationMs: it.durationMs,
         liked: it.liked,
       );
     }
@@ -2673,6 +2781,7 @@ class QueuePlayer {
               albumImage: it.albumImage,
               lyricsArtist: it.lyricsArtist,
               lyricsTitle: it.lyricsTitle,
+              durationMs: it.durationMs,
               liked: it.liked,
             );
           }
@@ -2700,6 +2809,7 @@ class QueuePlayer {
           albumImage: it.albumImage,
           lyricsArtist: it.lyricsArtist,
           lyricsTitle: it.lyricsTitle,
+          durationMs: it.durationMs,
           liked: it.liked,
         );
       }
@@ -2726,6 +2836,7 @@ class QueuePlayer {
           albumImage: it.albumImage,
           lyricsArtist: it.lyricsArtist,
           lyricsTitle: it.lyricsTitle,
+          durationMs: durationMsFor(res.durationS) ?? it.durationMs,
           liked: it.liked,
         );
       }
@@ -2766,6 +2877,7 @@ class QueuePlayer {
       title: split > 0 ? t.substring(split + 3).trim() : t,
       artist: split > 0 ? t.substring(0, split).trim() : '',
       album: it.album,
+      durMs: it.durationMs,
     );
   }
 
@@ -2827,7 +2939,12 @@ class QueuePlayer {
     _healStrikes = 0;
     _healTrackId = it;
     _lastPlayStartAt = DateTime.now();
-    trackDuration.value = Duration.zero;
+    // Same known-metadata seed as _playCurrent (handler advanced on its
+    // own while the UI slept — no duration event will backfill it).
+    final aseed = it.durationMs;
+    trackDuration.value = (aseed != null && aseed > 0)
+        ? Duration(milliseconds: aseed)
+        : Duration.zero;
     currentTitle.value = it.title;
     PlayLog.switched(prevTitle, prevSec, it.title);
     currentThumb.value = it.thumbUrl ?? '';
@@ -2878,6 +2995,7 @@ class QueuePlayer {
                 albumImage: it.albumImage,
                 lyricsArtist: it.lyricsArtist,
                 lyricsTitle: it.lyricsTitle,
+                durationMs: it.durationMs,
               );
               _refreshEngineNext();
             }
@@ -2908,6 +3026,7 @@ class QueuePlayer {
                 albumImage: it.albumImage,
                 lyricsArtist: it.lyricsArtist,
                 lyricsTitle: it.lyricsTitle,
+                durationMs: durationMsFor(res.durationS) ?? it.durationMs,
               );
               _refreshEngineNext();
             }

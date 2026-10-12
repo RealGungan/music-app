@@ -138,8 +138,18 @@ class _SearchScreenState extends State<SearchScreen> {
     } catch (e) {
       if (!mounted) return;
       // A dead route just proved offline: show cached rows + badge instead
-      // of a spinner/error, and flag it so later taps go cache-first.
+      // of a spinner/error, and flag it so later taps go cache-first. The
+      // ping follows the reachable base — never declare offline while the
+      // funnel answers (a slow tailnet timeout is not offline).
       if (e is TimeoutException) {
+        if (await widget.api.ping()) {
+          if (!mounted) return;
+          setState(() {
+            _loading = false;
+            _error = e.toString();
+          });
+          return;
+        }
         QueuePlayer.instance.isOffline.value = true;
         await _searchOffline(query);
         return;
@@ -265,6 +275,7 @@ class _SearchScreenState extends State<SearchScreen> {
               album: (t.album?.isNotEmpty ?? false) ? t.album : null,
               lyricsArtist: t.artist,
               lyricsTitle: t.title,
+              durationMs: durationMsFor(t.durationS),
             )
           : QueueItem(
               '${t.artist} - ${t.title}',
@@ -274,6 +285,7 @@ class _SearchScreenState extends State<SearchScreen> {
               album: (t.album?.isNotEmpty ?? false) ? t.album : null,
               lyricsArtist: t.artist,
               lyricsTitle: t.title,
+              durationMs: durationMsFor(t.durationS),
             );
       if (tap != _tapId || !mounted) return;
       if (item.url.isNotEmpty) widget.api.prewarmFile(item.url);
@@ -471,6 +483,7 @@ class _SearchScreenState extends State<SearchScreen> {
               album: (s.album?.isNotEmpty ?? false) ? s.album : null,
               lyricsArtist: artist,
               lyricsTitle: title,
+              durationMs: durationMsFor(s.durationS),
             )
           : QueueItem(
               title,
@@ -479,6 +492,7 @@ class _SearchScreenState extends State<SearchScreen> {
               album: (s.album?.isNotEmpty ?? false) ? s.album : null,
               lyricsArtist: artist,
               lyricsTitle: title,
+              durationMs: durationMsFor(s.durationS),
             );
       if (item.url.isNotEmpty) widget.api.prewarmFile(item.url);
       // Explicit single-play: stop after the tapped row (playOne leaves
@@ -559,6 +573,7 @@ class _SearchScreenState extends State<SearchScreen> {
       album: (t.album?.isNotEmpty ?? false) ? t.album : null,
       lyricsArtist: t.artist,
       lyricsTitle: t.title,
+      durationMs: durationMsFor(t.durationS),
     );
   }
 
@@ -585,6 +600,7 @@ class _SearchScreenState extends State<SearchScreen> {
       album: (s.album?.isNotEmpty ?? false) ? s.album : null,
       lyricsArtist: artist,
       lyricsTitle: title,
+      durationMs: durationMsFor(s.durationS),
     );
   }
 

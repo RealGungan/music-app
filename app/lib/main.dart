@@ -188,6 +188,9 @@ Future<void> _pushAudioState() async {
     'album': (item?.album?.isNotEmpty ?? false) ? item!.album! : '',
     'art': art,
     'loading': qp.loading.value,
+    // Known-total seed for the handler/car readout: chunked relays never
+    // emit a duration, so without this the car/notification sits blank.
+    'dur_ms': item?.durationMs,
   };
   DiagLog.car.log(
     'push has_media=$hasMedia title="$song" artist="$artist" '
@@ -471,7 +474,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
     // Fast offline notice (fresh probe, capped) — display only, gates on
     // nothing.
     try {
-      if (await QueuePlayer.probeOffline()) {
+      if (await QueuePlayer.probeOffline(api: _api)) {
         if (!mounted) return;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           final ctx = _messengerKey.currentContext;
@@ -1130,6 +1133,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
                   : null,
               album: s.album,
               fromInternet: false,
+              durationMs: durationMsFor(s.durationS),
             );
           }
           // Fallback: query /api/innas if annotation missing (older server).
@@ -1168,6 +1172,8 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
             fromInternet: true,
             lyricsArtist: r.resolvedArtist ?? s.artist,
             lyricsTitle: r.resolvedTitle ?? s.title,
+            durationMs:
+                durationMsFor(r.durationS) ?? durationMsFor(s.durationS),
           );
         } catch (_) {
           return null;

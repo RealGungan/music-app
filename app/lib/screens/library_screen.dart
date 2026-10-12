@@ -54,16 +54,19 @@ Widget offlineBanner() => Container(
     );
 
 /// A dead route learned the hard way: transport probes can't see a
-/// WiFi-without-internet, but a failed server call proves it. Flip the
-/// shared flag so banners, popups and the downloaded-only filter engage
-/// correctly from here on (a reconnect flips it back via the listener).
-/// File-level so both the library list and the playlist detail states
-/// share it.
-void _learnOffline(Object e) {
+/// WiFi-without-internet, but a failed server call proves it. Re-ping the
+/// reachable base first (tailnet ↔ funnel failover inside) — never declare
+/// offline while the funnel answers. File-level so both the library list
+/// and the playlist detail states share it.
+Future<void> _learnOffline(ApiClient api, Object e) async {
   if (e is SocketException ||
       e is TimeoutException ||
       e is HttpException) {
-    QueuePlayer.instance.isOffline.value = true;
+    try {
+      if (!await api.ping()) QueuePlayer.instance.isOffline.value = true;
+    } catch (_) {
+      QueuePlayer.instance.isOffline.value = true;
+    }
   }
 }
 
@@ -357,7 +360,7 @@ Future<void> _load({bool forceOnline = false}) async {
           AuthStore.instance.username ?? '', pls);
     } catch (e) {
       if (!mounted) return;
-      _learnOffline(e);
+      unawaited(_learnOffline(widget.api, e));
       setState(() {
         _loading = false;
         if (_playlists.isEmpty) {
@@ -1449,7 +1452,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen>
       unawaited(_backfillLiked(detail));
     } catch (e) {
       if (!mounted) return;
-      _learnOffline(e);
+      unawaited(_learnOffline(widget.api, e));
       setState(() {
         _loading = false;
         if (_detail == null) {
@@ -1492,7 +1495,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen>
         }));
       } catch (e) {
         if (!mounted) return;
-        _learnOffline(e);
+        unawaited(_learnOffline(widget.api, e));
       }
     }
   }

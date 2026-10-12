@@ -64,7 +64,7 @@ abstract class PlaybackEngine {
 
   bool get isPlaying;
 
-  Future<void> play(String url);
+  Future<void> play(String url, {int? durMs});
   Future<void> pause();
   Future<void> resume();
   Future<void> stop();
@@ -86,6 +86,7 @@ abstract class PlaybackEngine {
     String? title,
     String? artist,
     String? album,
+    int? durMs,
   });
 }
 
@@ -113,7 +114,7 @@ class LocalEngine implements PlaybackEngine {
   bool get isPlaying => _player.state == PlayerState.playing;
 
   @override
-  Future<void> play(String url) => _player.play(sourceForUrl(url));
+  Future<void> play(String url, {int? durMs}) => _player.play(sourceForUrl(url));
   @override
   Future<void> pause() => _player.pause();
   @override
@@ -130,6 +131,7 @@ class LocalEngine implements PlaybackEngine {
     String? title,
     String? artist,
     String? album,
+    int? durMs,
   }) async {
     // Local playback runs in the UI isolate, which never sleeps — the
     // normal completion path handles advancement. Nothing to pre-push.
@@ -341,14 +343,14 @@ class RemoteEngine implements PlaybackEngine {
   bool get remoteUp => _remoteUp;
 
   @override
-  Future<void> play(String url) async {
+  Future<void> play(String url, {int? durMs}) async {
     _lastUrl = url;
     _tryEngage();
     if (_remoteUp) {
       // No optimistic state flip: buffering keeps the last skin icon until
       // the native state-stream answers (stream is sole truth; 500ms poll
       // is backup only).
-      _send({'cmd': 'play', 'url': url});
+      _send({'cmd': 'play', 'url': url, 'dur_ms': durMs});
       return;
     }
     return _local.play(url);
@@ -532,6 +534,7 @@ class RemoteEngine implements PlaybackEngine {
     String? title,
     String? artist,
     String? album,
+    int? durMs,
   }) async {
     _tryEngage();
     if (!_remoteUp) return;
@@ -545,6 +548,7 @@ class RemoteEngine implements PlaybackEngine {
       'title': title ?? '',
       'artist': artist ?? '',
       'album': album ?? '',
+      'dur_ms': durMs,
     });
   }
 

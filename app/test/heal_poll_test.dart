@@ -2,10 +2,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nasmusic/api_client.dart';
 import 'package:nasmusic/main.dart' show warmRelFallback;
 import 'package:nasmusic/screens/staging_screen.dart'
-    show downloadsHash, downloadsPollDelaySec;
+    show downloadsHash, downloadsPollDelaySec, filterDownloadsByUser, downloadOwners;
 
-DownloadRow _dl(String id, String status) =>
-    DownloadRow(id: id, baseName: 'b-$id', status: status);
+DownloadRow _dl(String id, String status, [String owner = '']) =>
+    DownloadRow(id: id, baseName: 'b-$id', status: status, owner: owner);
 
 Suggestion _s(String artist, String title) =>
     Suggestion(artist: artist, title: title);
@@ -43,8 +43,7 @@ void main() {
     });
   });
 
-  group('warmRelFallback', () {
-    test('serves cached rows minus excluded, capped at limit', () {
+  group('warmRelFallback', () {    test('serves cached rows minus excluded, capped at limit', () {
       final cache = [_s('A', 'One'), _s('B', 'Two'), _s('C', 'Three')];
       final out = warmRelFallback(cache, {'two'}, 10);
       expect(out.map((s) => s.title), ['One', 'Three']);
@@ -56,6 +55,52 @@ void main() {
     test('all-excluded yields empty', () {
       final cache = [_s('A', 'One')];
       expect(warmRelFallback(cache, {'one'}, 10), isEmpty);
+    });
+  });
+
+  group('filterDownloadsByUser', () {
+    final rows = [_dl('1', 'staged', 'alice'), _dl('2', 'queued', 'bob')];
+    test('empty filter keeps all rows', () {
+      expect(filterDownloadsByUser(rows, '').length, 2);
+    });
+    test('owner filter keeps only own rows', () {
+      final out = filterDownloadsByUser(rows, 'alice');
+      expect(out.map((d) => d.id), ['1']);
+    });
+    test('unknown user yields empty', () {
+      expect(filterDownloadsByUser(rows, 'carol'), isEmpty);
+    });
+  });
+
+  group('downloadOwners', () {
+    test('distinct uploaders sorted, blanks dropped', () {
+      final rows = [
+        _dl('1', 'staged', 'bob'),
+        _dl('2', 'queued', 'alice'),
+        _dl('3', 'staged', 'bob'),
+        _dl('4', 'staged'),
+      ];
+      expect(downloadOwners(rows), ['alice', 'bob']);
+    });
+    test('empty rows yield no users', () {
+      expect(downloadOwners([]), isEmpty);
+    });
+  });
+
+  group('DownloadRow.owner', () {
+    test('parses owner, defaults to empty', () {
+      expect(
+          DownloadRow.fromJson({
+            'id': '1',
+            'base_name': 'a - b',
+            'status': 'staged',
+            'owner': 'alice',
+          }).owner,
+          'alice');
+      expect(
+          DownloadRow.fromJson(
+              {'id': '1', 'base_name': 'a - b', 'status': 'staged'}).owner,
+          '');
     });
   });
 }
