@@ -36,10 +36,13 @@ void main() {
     // AudioPlayer() creates its platform player in the constructor; swallow
     // it so RemoteEngine/LocalEngine construct with no device.
     m.setMockMethodCallHandler(
-        const MethodChannel('xyz.luan/audioplayers'), (c) async => null);
+      const MethodChannel('xyz.luan/audioplayers'),
+      (c) async => null,
+    );
     m.setMockMethodCallHandler(
-        const MethodChannel('xyz.luan/audioplayers.global'),
-        (c) async => null);
+      const MethodChannel('xyz.luan/audioplayers.global'),
+      (c) async => null,
+    );
   });
 
   group('engineStateFromName (handler reply -> native truth)', () {
@@ -77,48 +80,54 @@ void main() {
       return (inbox: inbox, engine: engine);
     }
 
-    test('returns the handler\'s own answer, not the stale cached flag',
-        () async {
-      final f = fakeHandler();
-      // UI isolate slept with the icon on "playing"; handler actually paused.
-      f.engine.feedRemoteEvent({'ev': 'state', 's': 'playing'});
-      expect(f.engine.isPlaying, isTrue);
+    test(
+      'returns the handler\'s own answer, not the stale cached flag',
+      () async {
+        final f = fakeHandler();
+        // UI isolate slept with the icon on "playing"; handler actually paused.
+        f.engine.feedRemoteEvent({'ev': 'state', 's': 'playing'});
+        expect(f.engine.isPlaying, isTrue);
 
-      final q = f.engine.queryTruthDirect(timeout: const Duration(seconds: 2));
-      final cmd = jsonDecode(await f.inbox.first.timeout(
-        const Duration(seconds: 2),
-      ) as String) as Map<String, dynamic>;
-      expect(cmd['cmd'], 'getState');
-      f.engine.feedRemoteEvent({'ev': 'state', 's': 'paused'});
+        final q = f.engine.queryTruthDirect(
+          timeout: const Duration(seconds: 2),
+        );
+        final cmd = jsonDecode(
+          await f.inbox.first.timeout(const Duration(seconds: 2)) as String,
+        ) as Map<String, dynamic>;
+        expect(cmd['cmd'], 'getState');
+        f.engine.feedRemoteEvent({'ev': 'state', 's': 'paused'});
 
-      expect(await q, PlayerState.paused);
-    });
+        expect(await q, PlayerState.paused);
+      },
+    );
 
-    test('still answers when the engine was never engaged (_remoteUp false)',
-        () async {
-      // THE regression: the port exists and answers, but the engine's latch
-      // was never set (constructed before the handler booted, or a send
-      // cleared it). resync would skip the handler entirely here.
-      final inbox = ReceivePort();
-      IsolateNameServer.removePortNameMapping(kAudioStatePort);
-      IsolateNameServer.registerPortWithName(inbox.sendPort, kAudioStatePort);
-      addTearDown(() {
+    test(
+      'still answers when the engine was never engaged (_remoteUp false)',
+      () async {
+        // THE regression: the port exists and answers, but the engine's latch
+        // was never set (constructed before the handler booted, or a send
+        // cleared it). resync would skip the handler entirely here.
+        final inbox = ReceivePort();
         IsolateNameServer.removePortNameMapping(kAudioStatePort);
-        inbox.close();
-      });
-      final engine = RemoteEngine();
-      addTearDown(engine.dispose);
-      expect(engine.remoteUp, isTrue);
+        IsolateNameServer.registerPortWithName(inbox.sendPort, kAudioStatePort);
+        addTearDown(() {
+          IsolateNameServer.removePortNameMapping(kAudioStatePort);
+          inbox.close();
+        });
+        final engine = RemoteEngine();
+        addTearDown(engine.dispose);
+        expect(engine.remoteUp, isTrue);
 
-      // Force the demoted latch that resync gates on.
-      final q = engine.queryTruthDirect(timeout: const Duration(seconds: 2));
-      final cmd = jsonDecode(await inbox.first.timeout(
-        const Duration(seconds: 2),
-      ) as String) as Map<String, dynamic>;
-      expect(cmd['cmd'], 'getState');
-      engine.feedRemoteEvent({'ev': 'state', 's': 'playing'});
-      expect(await q, PlayerState.playing);
-    });
+        // Force the demoted latch that resync gates on.
+        final q = engine.queryTruthDirect(timeout: const Duration(seconds: 2));
+        final cmd = jsonDecode(
+          await inbox.first.timeout(const Duration(seconds: 2)) as String,
+        ) as Map<String, dynamic>;
+        expect(cmd['cmd'], 'getState');
+        engine.feedRemoteEvent({'ev': 'state', 's': 'playing'});
+        expect(await q, PlayerState.playing);
+      },
+    );
 
     test('a missing port answers null (caller falls back to resync)', () async {
       IsolateNameServer.removePortNameMapping(kAudioStatePort);
@@ -126,7 +135,8 @@ void main() {
       addTearDown(engine.dispose);
       expect(
         await engine.queryTruthDirect(
-            timeout: const Duration(milliseconds: 200)),
+          timeout: const Duration(milliseconds: 200),
+        ),
         isNull,
       );
     });
@@ -136,7 +146,8 @@ void main() {
       // Port present, getState sent, handler never replies.
       expect(
         await f.engine.queryTruthDirect(
-            timeout: const Duration(milliseconds: 200)),
+          timeout: const Duration(milliseconds: 200),
+        ),
         isNull,
       );
     });
@@ -164,27 +175,27 @@ void main() {
     // button (now_playing.dart) are both ValueListenableBuilders on the SAME
     // QueuePlayer.playingN the resume path writes. One write, one frame.
     Widget twoButtons(ValueNotifier<bool> truth) => MaterialApp(
-          home: Scaffold(
-            body: Column(
-              children: [
-                ValueListenableBuilder<bool>(
-                  valueListenable: truth,
-                  builder: (_, p, _) => Icon(
-                    p ? Icons.pause : Icons.play_arrow,
-                    key: const Key('mini'),
-                  ),
-                ),
-                ValueListenableBuilder<bool>(
-                  valueListenable: truth,
-                  builder: (_, p, _) => Icon(
-                    p ? Icons.pause_circle_filled : Icons.play_circle_filled,
-                    key: const Key('full'),
-                  ),
-                ),
-              ],
+      home: Scaffold(
+        body: Column(
+          children: [
+            ValueListenableBuilder<bool>(
+              valueListenable: truth,
+              builder: (_, p, _) => Icon(
+                p ? Icons.pause : Icons.play_arrow,
+                key: const Key('mini'),
+              ),
             ),
-          ),
-        );
+            ValueListenableBuilder<bool>(
+              valueListenable: truth,
+              builder: (_, p, _) => Icon(
+                p ? Icons.pause_circle_filled : Icons.play_circle_filled,
+                key: const Key('full'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
 
     IconData iconOf(WidgetTester t, String key) =>
         t.widget<Icon>(find.byKey(Key(key))).icon!;
@@ -203,8 +214,9 @@ void main() {
       expect(iconOf(t, 'full'), Icons.play_circle_filled);
     });
 
-    testWidgets('resume truth also flips back to playing (handler resumed)',
-        (t) async {
+    testWidgets('resume truth also flips back to playing (handler resumed)', (
+      t,
+    ) async {
       final truth = ValueNotifier<bool>(false);
       addTearDown(truth.dispose);
       await t.pumpWidget(twoButtons(truth));
@@ -226,21 +238,29 @@ void main() {
     test('an advancing clock outranks a stale "playing" flag', () {
       expect(
         realStateAnswer(
-            firstMs: 12000, secondMs: 12300, trackedPlaying: true, trackedPaused: false),
+          firstMs: 12000,
+          secondMs: 12300,
+          trackedPlaying: true,
+          trackedPaused: false,
+        ),
         'playing',
       );
     });
 
-    test('a frozen clock outranks a stale "playing" flag (the takeover)',
-        () {
+    test('a frozen clock outranks a stale "playing" flag (the takeover)', () {
       // Another app took focus: the native player is paused, `_playing` is
       // still true from our last play() — the flag-based answer said
       // 'playing' over silence. The clock is frozen, so it is not playing.
       expect(
         realStateAnswer(
-            firstMs: 12000, secondMs: 12000, trackedPlaying: true, trackedPaused: false),
+          firstMs: 12000,
+          secondMs: 12000,
+          trackedPlaying: true,
+          trackedPaused: false,
+        ),
         'paused',
-        reason: 'a frozen native clock is the only proof an external app '
+        reason:
+            'a frozen native clock is the only proof an external app '
             'paused us — no flag and no player.state records it',
       );
     });
@@ -248,7 +268,11 @@ void main() {
     test('a rewound clock (seek to 0) still reads as not-moving', () {
       expect(
         realStateAnswer(
-            firstMs: 500, secondMs: 0, trackedPlaying: true, trackedPaused: false),
+          firstMs: 500,
+          secondMs: 0,
+          trackedPlaying: true,
+          trackedPaused: false,
+        ),
         'paused',
       );
     });
@@ -257,23 +281,39 @@ void main() {
       // Nothing loaded / the platform query threw: don't manufacture a state.
       expect(
         realStateAnswer(
-            firstMs: null, secondMs: null, trackedPlaying: true, trackedPaused: false),
+          firstMs: null,
+          secondMs: null,
+          trackedPlaying: true,
+          trackedPaused: false,
+        ),
         'playing',
       );
       expect(
         realStateAnswer(
-            firstMs: null, secondMs: null, trackedPlaying: false, trackedPaused: true),
+          firstMs: null,
+          secondMs: null,
+          trackedPlaying: false,
+          trackedPaused: true,
+        ),
         'paused',
       );
       expect(
         realStateAnswer(
-            firstMs: null, secondMs: null, trackedPlaying: false, trackedPaused: false),
+          firstMs: null,
+          secondMs: null,
+          trackedPlaying: false,
+          trackedPaused: false,
+        ),
         'stopped',
       );
       // One-sided failure is still a failure — no half-trusted answer.
       expect(
         realStateAnswer(
-            firstMs: 900, secondMs: null, trackedPlaying: true, trackedPaused: false),
+          firstMs: 900,
+          secondMs: null,
+          trackedPlaying: true,
+          trackedPaused: false,
+        ),
         'playing',
       );
     });
@@ -298,15 +338,26 @@ void main() {
           .split('\n')
           .where((l) => !l.trimLeft().startsWith('//'))
           .join('\n');
-      expect(code, contains('_realStateAnswer()'),
-          reason: 'the real player is read through the native position probe');
-      expect(code, isNot(contains(r"'s': _playing")),
-          reason: "answering from the tracked _playing flag is the stale-flag "
-              'lie — an external focus pause never reaches it');
-      expect(code, isNot(contains('_player.state')),
-          reason: '_player.state is assigned only by our own play/pause/stop/'
-              'resume (audioplayers feeds no native playback state back), so it '
-              'knows nothing the tracked flag does not — the bug stays fixed');
+      expect(
+        code,
+        contains('_realStateAnswer()'),
+        reason: 'the real player is read through the native position probe',
+      );
+      expect(
+        code,
+        isNot(contains(r"'s': _playing")),
+        reason:
+            "answering from the tracked _playing flag is the stale-flag "
+            'lie — an external focus pause never reaches it',
+      );
+      expect(
+        code,
+        isNot(contains('_player.state')),
+        reason:
+            '_player.state is assigned only by our own play/pause/stop/'
+            'resume (audioplayers feeds no native playback state back), so it '
+            'knows nothing the tracked flag does not — the bug stays fixed',
+      );
     });
 
     test('the probe actually reads the native clock twice', () {
@@ -314,20 +365,183 @@ void main() {
         src.indexOf('Future<int?> _probePositionMs()'),
         src.indexOf('Future<String> _realStateAnswer()'),
       );
-      expect(probe, contains('getCurrentPosition()'),
-          reason: 'a real platform query, not a cached flag');
+      expect(
+        probe,
+        contains('getCurrentPosition()'),
+        reason: 'a real platform query, not a cached flag',
+      );
     });
 
     test('a forced focus pause wins immediately, without probing', () {
       expect(getState, contains('_focusPaused'));
-      expect(focusLoss, contains('_focusPaused = true'),
-          reason: 'set _playing=false + the forced pause on AUDIOFOCUS_LOSS so '
-              'any query after the takeover answers paused');
+      expect(
+        focusLoss,
+        contains('_focusPaused = true'),
+        reason:
+            'set _playing=false + the forced pause on AUDIOFOCUS_LOSS so '
+            'any query after the takeover answers paused',
+      );
       // Cleared by every command that starts sound again, plus the player's
       // own playing event (which is also the audio_service play() path).
-      expect(RegExp(r'_focusPaused = false').allMatches(src).length,
-          greaterThanOrEqualTo(4));
+      expect(
+        RegExp(r'_focusPaused = false').allMatches(src).length,
+        greaterThanOrEqualTo(4),
+      );
     });
+  });
+
+  group('adaptive truth query: a tap answers from intent, no 300ms probe', () {
+    final now = DateTime(2026, 10, 13, 12);
+    final epoch = DateTime.fromMillisecondsSinceEpoch(0);
+    final src = File('lib/audio_handler.dart').readAsStringSync();
+
+    ({String? answer, bool probe}) plan({
+      Duration cmdAgo = const Duration(milliseconds: 400),
+      String intent = 'playing',
+      String? cached,
+      Duration? cachedAgo,
+    }) => truthQueryPlan(
+      lastCmdAt: now.subtract(cmdAgo),
+      now: now,
+      intent: intent,
+      cachedAnswer: cached,
+      cachedAt: cached == null
+          ? null
+          : now.subtract(cachedAgo ?? Duration.zero),
+    );
+
+    test('right after our own command: answer the intent, never probe', () {
+      expect(plan().probe, isFalse);
+      expect(plan(cmdAgo: Duration.zero).answer, 'playing');
+      expect(plan(cmdAgo: Duration.zero, intent: 'paused').answer, 'paused');
+      expect(plan(cmdAgo: Duration.zero, intent: 'stopped').answer, 'stopped');
+    });
+
+    test('the recent-command fast path is microseconds (<10ms)', () {
+      final sw = Stopwatch()..start();
+      for (var i = 0; i < 100; i++) {
+        plan();
+      }
+      sw.stop();
+      expect(
+        sw.elapsedMilliseconds,
+        lessThan(10),
+        reason:
+            'the fast path is pure arithmetic — no await, no platform '
+            'round-trip, so a tap repaints in the same frame',
+      );
+    });
+
+    test('a stale query (poll/resume) still pays the native probe', () {
+      final p = plan(
+        cmdAgo: const Duration(seconds: 30),
+        cached: 'paused',
+        cachedAgo: const Duration(seconds: 30),
+      );
+      expect(p.probe, isTrue);
+      expect(
+        p.answer,
+        isNull,
+        reason:
+            'no fresh command and no fresh cache = the double-probe '
+            'is still the only truth about external takeovers',
+      );
+    });
+
+    test('the first query ever probes (no cache to serve)', () {
+      final p = truthQueryPlan(
+        lastCmdAt: epoch,
+        now: now,
+        intent: 'stopped',
+        cachedAnswer: null,
+        cachedAt: null,
+      );
+      expect(p.probe, isTrue);
+    });
+
+    test('between probes the cached answer is served (cheap 1s poll)', () {
+      final cached = plan(
+        cmdAgo: const Duration(seconds: 30),
+        cached: 'paused',
+        cachedAgo: const Duration(milliseconds: 900),
+      );
+      expect(cached.probe, isFalse);
+      expect(cached.answer, 'paused');
+      // ...and the probe comes back once the cache ages out.
+      expect(
+        plan(
+          cmdAgo: const Duration(seconds: 30),
+          cached: 'paused',
+          cachedAgo: const Duration(seconds: 2),
+        ).probe,
+        isTrue,
+      );
+    });
+
+    test('a fresh command wins over a stale cache', () {
+      final p = plan(
+        cmdAgo: const Duration(milliseconds: 100),
+        intent: 'playing',
+        cached: 'paused',
+        cachedAgo: const Duration(milliseconds: 50),
+      );
+      expect(p.answer, 'playing');
+      expect(p.probe, isFalse);
+    });
+
+    // Source-level: the handler must stamp every command that starts/halts
+    // sound, or the fast path answers with an intent from ages ago.
+    test('every own command stamps the intent window', () {
+      expect(src, contains("void _noteCmd(String intent)"));
+      // Anchor inside the command switch: "case 'play':" also appears in the
+      // pure transportReportFor mapper further up the file.
+      final cmds = src.substring(src.indexOf('Future<void> _handleCommand('));
+      for (final cmd in [
+        "case 'play':",
+        "case 'pause':",
+        "case 'resume':",
+        "case 'stop':",
+      ]) {
+        final at = cmds.indexOf(cmd);
+        final body = cmds.substring(at, at + 200);
+        expect(
+          body,
+          contains('_noteCmd('),
+          reason: '$cmd must stamp _lastCmdAt + _intentState',
+        );
+      }
+      expect(
+        src.substring(
+          src.indexOf('Future<void> play() async {'),
+          src.indexOf('Future<void> click('),
+        ),
+        contains("_noteCmd('playing')"),
+      );
+      expect(
+        src.substring(
+          src.indexOf('Future<void> pause() async {'),
+          src.indexOf('Future<void> click('),
+        ),
+        contains("_noteCmd('paused')"),
+      );
+    });
+
+    test(
+      'an honored external focus loss still short-circuits BEFORE intent',
+      () {
+        final gs = src.substring(
+          src.indexOf("case 'getState':"),
+          src.indexOf("case 'seek':"),
+        );
+        expect(
+          gs.indexOf('_focusPaused'),
+          lessThan(gs.indexOf('_realStateAnswer')),
+          reason:
+              'another app took the audio: answer paused from the focus '
+              'report, never from our own recent intent',
+        );
+      },
+    );
   });
 
   group('no silence blip on app open', () {
@@ -339,14 +553,17 @@ void main() {
     //
     // Matches a CALL, not a mention: the prose comment explaining why the call
     // was removed must stay.
-    final call = RegExp(r'AudioService\s*\.\s*androidForceEnableMediaButtons\s*\(');
+    final call = RegExp(
+      r'AudioService\s*\.\s*androidForceEnableMediaButtons\s*\(',
+    );
 
     test('main.dart never calls the silence-blip helper', () {
       final src = File('lib/main.dart').readAsStringSync();
       expect(
         call.hasMatch(src),
         isFalse,
-        reason: 'AudioService.androidForceEnableMediaButtons() plays a blip of '
+        reason:
+            'AudioService.androidForceEnableMediaButtons() plays a blip of '
             'silence through the music stream — that is the noise on app open. '
             'Use the native MediaSession flags (system channel '
             '"enableMediaButtons") instead.',
@@ -389,9 +606,13 @@ void main() {
       // A resume path that calls it untagged still runs, but the server row
       // loses the only field that says WHICH path fired.
       final untagged = RegExp(r'onResumed\(\s*\)');
-      expect(untagged.hasMatch(main), isFalse,
-          reason: 'tag every onResumed(src:) so focus vs app-resume is '
-              'distinguishable in the log');
+      expect(
+        untagged.hasMatch(main),
+        isFalse,
+        reason:
+            'tag every onResumed(src:) so focus vs app-resume is '
+            'distinguishable in the log',
+      );
     });
   });
 }

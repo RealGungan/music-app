@@ -88,12 +88,47 @@ String realStateAnswer({
     return trackedPlaying
         ? 'playing'
         : trackedPaused
-            ? 'paused'
-            : 'stopped';
+        ? 'paused'
+        : 'stopped';
   }
   if (secondMs > firstMs) return 'playing';
   // Clock frozen: whatever we thought, the audio is NOT moving.
   return trackedPaused || trackedPlaying ? 'paused' : 'stopped';
+}
+
+/// Adaptive `getState` windows, pure for tests.
+const intentEchoWindow = Duration(seconds: 2);
+const truthProbeInterval = Duration(seconds: 2);
+
+/// How a `getState` query should be answered. `answer != null` → reply with
+/// it now, no native probe. `probe` → run the 300ms double-probe.
+///
+/// A user tap is OUR OWN command: we know the state we just asked for, so
+/// the probe is pure latency on every play/pause (`toggleRecover` awaits the
+/// answer before acting, `stateSyncing` blocks the repaint). Only a query
+/// with no fresh command behind it — the 1s visible truth poll, a post-resume
+/// query — pays the probe, and at most once per [truthProbeInterval]; the
+/// cached answer is served in between. An honored external focus loss is
+/// still short-circuited to `paused` by the caller BEFORE this, so the fast
+/// path can never answer "playing" over audio another app took.
+({String? answer, bool probe}) truthQueryPlan({
+  required DateTime lastCmdAt,
+  required DateTime now,
+  required String intent,
+  required String? cachedAnswer,
+  required DateTime? cachedAt,
+  Duration intentWindow = intentEchoWindow,
+  Duration probeInterval = truthProbeInterval,
+}) {
+  if (now.difference(lastCmdAt) < intentWindow) {
+    return (answer: intent, probe: false);
+  }
+  if (cachedAnswer != null &&
+      cachedAt != null &&
+      now.difference(cachedAt) < probeInterval) {
+    return (answer: cachedAnswer, probe: false);
+  }
+  return (answer: null, probe: true);
 }
 
 /// Stable MediaSession id: strip the re-resolving ?token= query so head
@@ -212,10 +247,8 @@ QueueTapAction queueTapAction({
 /// handler must restore the USER volume (never 1.0) and clear the duck flag —
 /// otherwise audio strands at 25% under a playing skin ("stopped but shows
 /// playing"). Returns the volume to set, or null when nothing is ducked.
-double? gainRestoreVolume({
-  required bool ducked,
-  required double userVolume,
-}) => ducked ? userVolume : null;
+double? gainRestoreVolume({required bool ducked, required double userVolume}) =>
+    ducked ? userVolume : null;
 
 /// Self-echo window for our OWN play/focus-take. Our play path takes focus
 /// AND the player requests it again internally, so the OS reports a focus
@@ -231,8 +264,8 @@ bool isSelfFocusEcho({
   required DateTime lastOwnPlayAt,
   required DateTime now,
   Duration window = selfFocusEchoWindow,
-}) =>
-    now.difference(lastOwnPlayAt) < window;
+}) => now.difference(lastOwnPlayAt) < window;
+
 class NASMusicAudioHandler extends BaseAudioHandler {
   final _statePort = ReceivePort();
   final AudioPlayer _player = AudioPlayer();
@@ -282,6 +315,22 @@ class NASMusicAudioHandler extends BaseAudioHandler {
   /// while paused still updates state instead of being filtered below.
   Duration? _userSeekTarget;
   DateTime _userSeekAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Moment + intended state of our OWN last play/pause/resume/stop: a
+  /// getState within [intentEchoWindow] answers from this intent instead of
+  /// paying the 300ms double-probe (see [truthQueryPlan]).
+  DateTime _lastCmdAt = DateTime.fromMillisecondsSinceEpoch(0);
+  String _intentState = 'stopped';
+
+  /// Last probed truth answer + when it was probed: probes are throttled to
+  /// one per [truthProbeInterval] so the 1s visible truth poll stays cheap.
+  DateTime _lastTruthAt = DateTime.fromMillisecondsSinceEpoch(0);
+  String? _lastTruthAns;
+
+  void _noteCmd(String intent) {
+    _lastCmdAt = DateTime.now();
+    _intentState = intent;
+  }
 
   /// A zero tick while paused is never real playback: the platform emits
   /// pos 0 when the main isolate's heal silently swaps the source under a
@@ -368,7 +417,9 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         if (event.begin) {
           debugPrint('[handler] audio focus lost: ${event.type}');
           if (isSelfFocusEcho(
-              lastOwnPlayAt: _lastOwnPlayAt, now: DateTime.now())) {
+            lastOwnPlayAt: _lastOwnPlayAt,
+            now: DateTime.now(),
+          )) {
             debugPrint('[handler] ignoring self-induced focus loss');
             _sendEvent({
               'ev': 'focus',
@@ -561,9 +612,9 @@ class NASMusicAudioHandler extends BaseAudioHandler {
     }
     _lastDurReread = now;
     try {
-      final gd = await _player
-          .getDuration()
-          .timeout(const Duration(seconds: 3));
+      final gd = await _player.getDuration().timeout(
+        const Duration(seconds: 3),
+      );
       if (gd == null || gd <= Duration.zero || gd == _duration) return;
       _duration = gd;
       _sendEvent({'ev': 'dur', 'ms': gd.inMilliseconds});
@@ -579,28 +630,44 @@ class NASMusicAudioHandler extends BaseAudioHandler {
   /// (see [realStateAnswer]).
   Future<int?> _probePositionMs() async {
     try {
-      final d = await _player
-          .getCurrentPosition()
-          .timeout(const Duration(seconds: 2));
+      final d = await _player.getCurrentPosition().timeout(
+        const Duration(seconds: 2),
+      );
       return d?.inMilliseconds;
     } catch (_) {
       return null;
     }
   }
 
-  /// The `getState` answer, read from the REAL player: probe the native
-  /// position clock twice with a gap and see whether it actually moved. A
-  /// paused native player freezes it, whatever Dart believes.
+  /// The `getState` answer. Adaptive (see [truthQueryPlan]): right after our
+  /// OWN command the intended state IS the truth, so a tap repaints with no
+  /// native round-trip at all; a poll with no fresh command behind it pays
+  /// the 300ms double-probe, at most once per [truthProbeInterval].
   Future<String> _realStateAnswer() async {
+    final plan = truthQueryPlan(
+      lastCmdAt: _lastCmdAt,
+      now: DateTime.now(),
+      intent: _intentState,
+      cachedAnswer: _lastTruthAns,
+      cachedAt: _lastTruthAns == null ? null : _lastTruthAt,
+    );
+    if (!plan.probe) {
+      _lastTruthAns = plan.answer;
+      _lastTruthAt = DateTime.now();
+      return plan.answer!;
+    }
     final p1 = await _probePositionMs();
     await Future<void>.delayed(const Duration(milliseconds: 300));
     final p2 = await _probePositionMs();
-    return realStateAnswer(
+    final ans = realStateAnswer(
       firstMs: p1,
       secondMs: p2,
       trackedPlaying: _playing,
       trackedPaused: _paused,
     );
+    _lastTruthAt = DateTime.now();
+    _lastTruthAns = ans;
+    return ans;
   }
 
   /// Starts the pre-pushed next track (gapless handoff). The main isolate
@@ -816,6 +883,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         if (url == null || url.isEmpty) break;
         _userPaused = false;
         _lastOwnPlayAt = DateTime.now();
+        _noteCmd('playing');
         // A user/main-initiated play wins over any pre-pushed next track.
         _nextUrl = null;
         _nextTitle = _nextArtist = _nextAlbum = null;
@@ -866,15 +934,18 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         }
         break;
       case 'pause':
+        _noteCmd('paused');
         _userPaused = true;
         await _player.pause();
         break;
       case 'resume':
+        _noteCmd('playing');
         _userPaused = false;
         _focusPaused = false;
         await _player.resume();
         break;
       case 'stop':
+        _noteCmd('stopped');
         _userPaused = false;
         _focusPaused = false;
         _stoppedUrl = _currentUrl;
@@ -899,8 +970,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         // Fire-and-forget duration re-read first: a stale/omitted total
         // corrects itself via the following dur event.
         unawaited(_rereadDuration(force: true));
-        final ans =
-            _focusPaused ? 'paused' : await _realStateAnswer();
+        final ans = _focusPaused ? 'paused' : await _realStateAnswer();
         // Self-heal the tracked flags so the car/notification publish and the
         // next focus-regain decision agree with the audio instead of
         // re-asserting the lie we just corrected.
@@ -1095,6 +1165,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
   /// 'advanced' for main to adopt on wake.
   @override
   Future<void> play() async {
+    _noteCmd('playing');
     _userPaused = false;
     _sendEvent({'ev': 'transport', 'op': 'play'});
     if (!_hasMedia || _currentUrl == null) {
@@ -1131,6 +1202,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
 
   @override
   Future<void> pause() async {
+    _noteCmd('paused');
     _userPaused = true;
     _sendEvent({'ev': 'transport', 'op': 'pause'});
     return _player.pause();
