@@ -235,6 +235,11 @@ class RemoteEngine implements PlaybackEngine {
   SendPort? get _handlerPort =>
       IsolateNameServer.lookupPortByName(kAudioStatePort);
 
+  /// Is the handler isolate's command port reachable right now? Resume-sync
+  /// telemetry: proves whether a null [queryTruthDirect] answer means "no
+  /// port" (nothing to ask) or "port sent, no reply in the timeout".
+  bool get handlerPortAlive => _handlerPort != null;
+
   void _tryEngage() {
     if (_remoteUp || _handlerPort == null) return;
     _remoteUp = true;

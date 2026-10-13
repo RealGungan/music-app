@@ -1424,21 +1424,30 @@ class QueuePlayer {
   /// over audio that never stopped, then a second tap "resumes" a song that
   /// was already playing. Here the port is asked directly; only a genuinely
   /// absent port falls back to resync's local correction.
-  Future<void> onResumed() {
+  Future<void> onResumed({String src = 'resume'}) {
     final p = _player;
-    if (p is! RemoteEngine) return Future.value();
-    // Interrupt-resync hook: this IS the live path (app resume +
-    // focus regain both land here — main.dart), so the row proves the
-    // resync fired instead of vanishing into a swallowed catch.
-    report('resync', 'fired playing=$playing items=${items.length}');
     // Snapshot BEFORE the query: the report names the icon that was lying.
     final skinBefore = playingN.value;
+    if (p is! RemoteEngine) {
+      _traceResume(src, 'n/a', 'local', skinBefore, 'n/a');
+      return Future.value();
+    }
     stateSyncing.value = true;
+    // Entry line, logged synchronously: a resume whose RESULT line never
+    // arrives is a suspended-isolate/timing problem, NOT a dead hook. Only
+    // the absence of THIS line means onResumed never ran.
+    _traceResume(src, '${p.handlerPortAlive}', '...', skinBefore, '...');
     return p
         .queryTruthDirect()
         .then((truth) {
-          if (truth == null) return p.resync();
+          if (truth == null) {
+            _traceResume(src, '${p.handlerPortAlive}', 'TIMEOUT', skinBefore,
+                'fallback-resync');
+            return p.resync();
+          }
           final shows = truth == PlayerState.playing;
+          _traceResume(src, '${p.handlerPortAlive}', truth.name, skinBefore,
+              '$shows');
           if (skinMismatch(skinShows: skinBefore, nativePlaying: shows)) {
             report(
               'skin-mismatch',
@@ -1447,7 +1456,7 @@ class QueuePlayer {
                 nativePlaying: shows,
                 engine: engineStateName,
                 handler: handlerStateName,
-              )} src=resume items=${items.length}',
+              )} src=$src items=${items.length}',
             );
           }
           // The single playing truth, written HERE rather than left to the
@@ -1456,7 +1465,34 @@ class QueuePlayer {
           _lastPlayerState = truth;
           playingN.value = shows;
         })
+        .catchError((Object e) {
+          _traceResume(src, '${p.handlerPortAlive}', 'THREW', skinBefore,
+              'no');
+        })
         .whenComplete(() => stateSyncing.value = false);
+  }
+
+  /// Resume-sync telemetry, one line per stage, kind `resume-sync`.
+  /// `called|port-ok|says|skin|wrote` — read together with the handler's
+  /// own rows this answers: did the hook run, was the port there, did the
+  /// query cross the isolate bridge, and did the icon get written.
+  void _traceResume(
+    String src,
+    String portOk,
+    String says,
+    bool skin,
+    String wrote,
+  ) {
+    report('resume-sync',
+        'src=$src called port-ok=$portOk says=$says skin=$skin wrote=$wrote');
+  }
+
+  /// App-start trace (no query): proves the resume-sync path is armed in
+  /// this process before any foreground event can fire it.
+  void traceResumeSyncAtStart() {
+    final p = _player;
+    _traceResume('app-start', p is RemoteEngine ? '${p.handlerPortAlive}' : 'n/a',
+        'skip', playingN.value, 'no');
   }
 
   /// Visible-screen truth poll (500ms, fire-and-forget): re-asks the

@@ -140,7 +140,7 @@ void _decodeAudioJson(String json) {
           } else {
             qp.report('resume-fire', 'focus $phase ${m?['type']}');
           }
-          unawaited(qp.onResumed());
+          unawaited(qp.onResumed(src: 'focus-$phase'));
         }
       }
       return;
@@ -700,6 +700,10 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
     AuthStore.instance.addListener(_onAuthChanged);
     _validateSession();
     _wireAudioStateBridge();
+    // Resume-sync armed? Logs the same resume-sync row shape the resume
+    // hook emits, so an app that never logs a resume line afterwards has
+    // proven the hook is dead (not just silent).
+    QueuePlayer.instance.traceResumeSyncAtStart();
     _wireDeepLinks();
     _wireReplacePopup();
     _wireOfflinePopup();
@@ -1021,7 +1025,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
       // the existing bridge into RemoteEngine.feedRemoteEvent to correct
       // stale _lastState (frozen play icon), and re-push metadata so a
       // restarted handler recovers _hasMedia/title instead of dropping play.
-      qp.onResumed();
+      qp.onResumed(src: 'app-resumed');
       _pushAudioState();
     }
   }

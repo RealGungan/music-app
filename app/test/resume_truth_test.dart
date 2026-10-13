@@ -248,4 +248,35 @@ void main() {
       expect(offenders, isEmpty);
     });
   });
+
+  group('resume-sync telemetry is armed on every resume path', () {
+    // A dead hook and a silent hook look identical from the bug report
+    // ("button stays playing"). These rows are the discriminator: a missing
+    // `called` line means onResumed never ran; a `called` with
+    // `says=TIMEOUT` means the handler never answered the query.
+    final qp = File('lib/queue_player.dart').readAsStringSync();
+    final main = File('lib/main.dart').readAsStringSync();
+
+    test('onResumed logs the full called/port-ok/says/skin/wrote row', () {
+      expect(qp, contains("report('resume-sync'"));
+      expect(qp, contains(r'called port-ok=$portOk says=$says skin=$skin'));
+      // Port liveness must be read live, not cached — a cached "true" from
+      // before suspension proves nothing.
+      expect(qp, contains('handlerPortAlive'));
+    });
+
+    test('app-start logs the same row so a dead hook is distinguishable', () {
+      expect(qp, contains('traceResumeSyncAtStart'));
+      expect(main, contains('traceResumeSyncAtStart()'));
+    });
+
+    test('every onResumed call site is tagged with its source', () {
+      // A resume path that calls it untagged still runs, but the server row
+      // loses the only field that says WHICH path fired.
+      final untagged = RegExp(r'onResumed\(\s*\)');
+      expect(untagged.hasMatch(main), isFalse,
+          reason: 'tag every onResumed(src:) so focus vs app-resume is '
+              'distinguishable in the log');
+    });
+  });
 }
