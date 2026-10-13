@@ -52,6 +52,7 @@ class Pipeline:
             "status": live.get("phase", row["status"]),
             "error": live.get("error"),
             "path": row["path"],
+            "owner": row.get("owner") or "",
         }
 
     def all_jobs(self, owner=None):

@@ -819,6 +819,7 @@ class DownloadRow {
   final String? channel;
   final int? durationS;
   final String? path;
+  final String owner;
   DownloadRow({
     required this.id,
     required this.baseName,
@@ -827,6 +828,7 @@ class DownloadRow {
     this.channel,
     this.durationS,
     this.path,
+    this.owner = '',
   });
 
   factory DownloadRow.fromJson(Map<String, dynamic> j) => DownloadRow(
@@ -837,6 +839,7 @@ class DownloadRow {
     channel: j['channel'],
     durationS: j['duration_s'],
     path: j['path'],
+    owner: (j['owner'] ?? '').toString(),
   );
 }
 
@@ -849,11 +852,13 @@ class JobStatus {
   final String baseName;
   final String status;
   final String? error;
+  final String owner;
   JobStatus({
     required this.id,
     required this.baseName,
     required this.status,
     this.error,
+    this.owner = '',
   });
 
   factory JobStatus.fromJson(Map<String, dynamic> j) => JobStatus(
@@ -861,6 +866,7 @@ class JobStatus {
     baseName: (j['base_name'] ?? '').toString(),
     status: (j['status'] ?? '').toString(),
     error: j['error']?.toString(),
+    owner: (j['owner'] ?? '').toString(),
   );
 }
 

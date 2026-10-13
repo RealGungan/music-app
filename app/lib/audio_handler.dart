@@ -112,6 +112,62 @@ TransportReport? transportReportFor(String? op) {
   }
 }
 
+/// Headset BT press mapping (pure, unit-tested). Native onMediaButtonEvent
+/// routes HEADSETHOOK/PLAY_PAUSE -> click(media), NEXT -> click(next),
+/// PREVIOUS -> click(previous). The toggle reads OUR _playing flag, never
+/// playbackState.nvalue timing.
+enum ClickAction { toggle, next, previous }
+
+ClickAction clickActionFor(MediaButton button) {
+  switch (button) {
+    case MediaButton.next:
+      return ClickAction.next;
+    case MediaButton.previous:
+      return ClickAction.previous;
+    case MediaButton.media:
+      return ClickAction.toggle;
+  }
+}
+
+/// Album-art URI published in MediaItem (pure, unit-tested). Session metadata
+/// art is SEPARATE from the notification bitmap: native setMetadata() decodes
+/// the `artCacheFile` extra in-process for the session bitmaps (what AVRCP
+/// cars read), while SystemUI loads `artUri` itself. Prefer the local
+/// content:// file; fall back to the remote http(s) URL (native still loads
+/// it into the session bitmaps for cars even when SystemUI can't fetch it);
+/// null only when nothing is known (never a placeholder).
+Uri? artUriFor({
+  required bool isFile,
+  String? filePath,
+  String? remote,
+  required int bust,
+}) {
+  if (isFile && filePath != null && filePath.isNotEmpty) {
+    return Uri.parse(
+      'content://com.nasmusic.nasmusic.art/nasmusic_art.jpg?v=$bust',
+    );
+  }
+  if (remote != null && remote.isNotEmpty) {
+    final u = Uri.tryParse(remote);
+    if (u != null && (u.scheme == 'http' || u.scheme == 'https')) return u;
+  }
+  return null;
+}
+
+/// Car queue-tap routing (pure, unit-tested). Index 0 is the now-playing item
+/// (replay/resume); index 1 is the pre-pushed next when one is warm;
+/// anything else is ignored (never crash on a new head unit).
+enum QueueTapAction { replayCurrent, startPrePushed, ignore }
+
+QueueTapAction queueTapAction({
+  required int index,
+  required bool hasPrePushed,
+}) {
+  if (index == 0) return QueueTapAction.replayCurrent;
+  if (index == 1 && hasPrePushed) return QueueTapAction.startPrePushed;
+  return QueueTapAction.ignore;
+}
+
 /// Media-session handler that OWNS the real audioplayers player on Android.
 ///
 /// audio_service runs this class in a SEPARATE isolate. Keeping the
@@ -226,6 +282,11 @@ class NASMusicAudioHandler extends BaseAudioHandler {
   /// blasts back to full when the user had lowered it.
   double _userVolume = 1.0;
   bool _ducked = false;
+
+  /// Last URL cleared by stop(): a car PLAY after a stop (or a swiped-away
+  /// session) replays it instead of dropping (Spotify resumes; we froze).
+  /// Cleared by any new play command.
+  String? _stoppedUrl;
 
   /// Configure this isolate's audio session (music focus). Fire-and-
   /// forget: a missing session only loses car routing, never playback.
@@ -684,6 +745,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         _nextTitle = _nextArtist = _nextAlbum = null;
         _nextDurMs = null;
         _currentUrl = url;
+        _stoppedUrl = null;
         _loading = true;
         _playing = false;
         // New-track total: the play command carries the known-metadata seed
@@ -736,6 +798,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         break;
       case 'stop':
         _userPaused = false;
+        _stoppedUrl = _currentUrl;
         _currentUrl = null;
         await _player.stop();
         break;
@@ -838,13 +901,14 @@ class NASMusicAudioHandler extends BaseAudioHandler {
     final stableId = stableMediaId(_currentUrl, '$_artist - $_title');
     // Unique artUri per track: SystemUI caches bitmaps BY URI, so a fixed
     // filename keeps showing the previous song's art. The file stays one
-    // (nasmusic_art.jpg); only the query busts the cache.
-    final artUri = _artIsFile && _art != null
-        ? Uri.parse(
-            'content://com.nasmusic.nasmusic.art/nasmusic_art.jpg'
-            '?v=${stableId.hashCode.toUnsigned(32)}',
-          )
-        : null;
+    // (nasmusic_art.jpg); only the query busts the cache. Remote-URL
+    // fallback keeps session art on cars when the file fetch failed.
+    final artUri = artUriFor(
+      isFile: _artIsFile,
+      filePath: _art,
+      remote: _artRemote,
+      bust: stableId.hashCode.toUnsigned(32),
+    );
     final item = MediaItem(
       id: stableId.isNotEmpty ? stableId : '$_artist - $_title',
       album: _album.isNotEmpty ? _album : null,
@@ -858,7 +922,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
     // (the loader re-publishes on every art/duration tick) chokes head
     // units at several pushes per second. Real changes still go out.
     final sig =
-        '${item.id}|$_title|$_artist|$_album|${_duration.inMilliseconds}|$artUri';
+        '${item.id}|$_title|$_artist|$_album|${_duration.inMilliseconds}|$artUri|n=$_nextUrl';
     if (sig == _lastPubSig) return;
     _lastPubSig = sig;
     mediaItem.add(item);
@@ -870,7 +934,24 @@ class NASMusicAudioHandler extends BaseAudioHandler {
     // ignore transport buttons even though the phone works fine. Spotify sets
     // a real active item id — this is the exact difference that was killing
     // the car display.
-    queue.add([item]);
+    // Second slot = the pre-pushed next when warm: a single-item queue greys
+    // NEXT on some head units (at-last-item), while Spotify keeps it live.
+    final items = [item];
+    final nu = _nextUrl;
+    if (nu != null && nu.isNotEmpty) {
+      items.add(
+        MediaItem(
+          id: stableMediaId(nu, nu),
+          album: _nextAlbum,
+          artist: _nextArtist,
+          title: _nextTitle ?? '',
+          duration: (_nextDurMs != null && _nextDurMs! > 0)
+              ? Duration(milliseconds: _nextDurMs!)
+              : null,
+        ),
+      );
+    }
+    queue.add(items);
     debugPrint(
       '[handler] publish uri=${artUri} cache=${_artIsFile ? _art : null}',
     );
@@ -930,8 +1011,9 @@ class NASMusicAudioHandler extends BaseAudioHandler {
     if (!_hasMedia || _currentUrl == null) {
       // Resume race / service restart lost the metadata push but the URL
       // is ground truth: re-publish + play instead of dropping (drop =
-      // frozen play icon, 0:00, taps no-op).
-      final url = _currentUrl;
+      // frozen play icon, 0:00, taps no-op). A post-stop PLAY replays the
+      // stopped URL (Spotify resumes; a null drop stranded the car).
+      final url = _currentUrl ?? _stoppedUrl;
       if (url == null || url.isEmpty) {
         debugPrint(
           '[handler] play() dropped: hasMedia=$_hasMedia url set=false',
@@ -940,6 +1022,7 @@ class NASMusicAudioHandler extends BaseAudioHandler {
       }
       debugPrint('[handler] play() recovering media for <$url>');
       _hasMedia = true;
+      _stoppedUrl = null;
       _publishMedia();
       _lastOwnPlayAt = DateTime.now();
       await _takeFocus();
@@ -964,6 +1047,28 @@ class NASMusicAudioHandler extends BaseAudioHandler {
     return _player.pause();
   }
 
+  /// BT headset / car-wheel single-press entry point. Native routes media
+  /// clicks here (not to play/pause); without this override the Base default
+  /// (playbackState.nvalue toggle) owns the mapping untested.
+  @override
+  Future<void> click([MediaButton button = MediaButton.media]) async {
+    switch (clickActionFor(button)) {
+      case ClickAction.next:
+        await skipToNext();
+        break;
+      case ClickAction.previous:
+        await skipToPrevious();
+        break;
+      case ClickAction.toggle:
+        if (_playing) {
+          await pause();
+        } else {
+          await play();
+        }
+        break;
+    }
+  }
+
   @override
   Future<void> stop() async {
     _userPaused = false;
@@ -983,7 +1088,15 @@ class NASMusicAudioHandler extends BaseAudioHandler {
   }
 
   @override
-  Future<void> seek(Duration position) async => _player.seek(position);
+  Future<void> seek(Duration position) async {
+    // Publish first: cars snap the seek bar back until the next tick without
+    // this (the player event can lag a second behind the wheel input).
+    _userSeekTarget = position;
+    _userSeekAt = DateTime.now();
+    _position = position;
+    _publishPlayback();
+    await _player.seek(position);
+  }
 
   @override
   Future<void> skipToNext() async {
@@ -997,15 +1110,69 @@ class NASMusicAudioHandler extends BaseAudioHandler {
   @override
   Future<void> skipToPrevious() async => _sendBridge('prev');
 
+  /// Car queue-tap / voice actions. Auto-enabled natively (PLAY_FROM_*,
+  /// SKIP_TO_QUEUE_ITEM) but BaseAudioHandler no-ops — untapped they left
+  /// queue taps + "play X" dead while wheel NEXT/PREV worked. Index 0
+  /// replays/resumes; index 1 starts the pre-pushed next (or asks the queue
+  /// when paused); media-id match routes the same; raw text/URI forwards to
+  /// the app (only it can resolve a query — see the 'voice' event in main).
+  @override
+  Future<void> skipToQueueItem(int index) async {
+    switch (queueTapAction(
+      index: index,
+      hasPrePushed: _nextUrl?.isNotEmpty ?? false,
+    )) {
+      case QueueTapAction.replayCurrent:
+        await play();
+        break;
+      case QueueTapAction.startPrePushed:
+        if (_playing && !_userPaused && await _startPrePushed()) return;
+        _sendBridge('next');
+        break;
+      case QueueTapAction.ignore:
+        break;
+    }
+  }
+
+  @override
+  Future<void> playFromMediaId(
+    String mediaId, [
+    Map<String, dynamic>? extras,
+  ]) async {
+    if (mediaId == stableMediaId(_currentUrl, '$_artist - $_title')) {
+      await play();
+      return;
+    }
+    final nu = _nextUrl;
+    if (nu != null && nu.isNotEmpty && mediaId == stableMediaId(nu, nu)) {
+      await skipToQueueItem(1);
+    }
+  }
+
+  @override
+  Future<void> playFromSearch(
+    String query, [
+    Map<String, dynamic>? extras,
+  ]) async {
+    _sendEvent({'ev': 'voice', 'q': query});
+  }
+
+  @override
+  Future<void> playFromUri(Uri uri, [Map<String, dynamic>? extras]) async {
+    _sendEvent({'ev': 'voice', 'q': uri.toString()});
+  }
+
   /// Android Auto browse: the head unit lists the session queue through the
   /// native onLoadChildren, which audio_service forwards here. Serve the
-  /// live media item so the car shows the queue instead of an empty tree.
+  /// live session queue (current + warm pre-push) so the car shows tracks
+  /// instead of an empty tree.
   @override
   Future<List<MediaItem>> getChildren(
     String parentMediaId, [
     Map<String, dynamic>? options,
   ]) async {
-    final m = mediaItem.value;
-    return m == null ? [] : [m];
+    // valueOrNull: the subjects are unseeded, a pre-first-publish browse
+    // must return [] instead of throwing (a throw kills the car tree).
+    return List<MediaItem>.of(queue.valueOrNull ?? const <MediaItem>[]);
   }
 }

@@ -28,6 +28,9 @@ class _StagingScreenState extends State<StagingScreen> {
   bool _loading = true;
   String _error = '';
   Timer? _timer;
+  // Owner of the list on screen: a user switch must force a full refresh,
+  // never a silent poll that keeps (or merges into) the previous user's rows.
+  String _user = '';
   // Adaptive poll state: back off when the list is unchanged/idle, poll fast
   // while jobs run. Single-flight so slow ticks never overlap into 2x load.
   bool _inFlight = false;
@@ -72,6 +75,15 @@ class _StagingScreenState extends State<StagingScreen> {
   }
 
   Future<void> _load({bool silent = false}) async {
+    // User switch: drop the previous user's rows + hash and reload loud.
+    final u = AuthStore.instance.username ?? '';
+    if (u != _user) {
+      _user = u;
+      _downloads = [];
+      _lastHash = '';
+      _stableTicks = 0;
+      silent = false;
+    }
     if (!silent) setState(() => _loading = true);
     if (_inFlight) {
       _schedule();
@@ -81,9 +93,10 @@ class _StagingScreenState extends State<StagingScreen> {
     try {
       final dls = await widget.api.downloads();
       if (!mounted) return;
-      // Silent polls must never clobber a good list with a transient
-      // empty (that reads as "everything vanished").
-      if (silent && dls.isEmpty && _downloads.isNotEmpty) return;
+      // No empty-guard here: downloads() throws on failure (caught below,
+      // silent polls keep the old list), so an empty reply is REAL — e.g.
+      // the server now scopes other users' rows away. Clobbering it kept
+      // ghost rows listed forever on background polls.
       final hash = downloadsHash(dls);
       if (hash == _lastHash) {
         _stableTicks++;
@@ -227,6 +240,8 @@ class _StagingScreenState extends State<StagingScreen> {
   bool _phoneSide = false;
   // Filter text for the on-phone list (per-group delete below reuses it).
   String _phoneFilter = '';
+  // Owner-only uploader filter for the server list ('' = all users).
+  String _userFilter = '';
   // Collapsed phone-group keys (normKey): drives the trailing arrow +
   // survives rebuilds (reuses existing strings, no new translations).
   final Set<String> _collapsedGroups = {};
@@ -321,18 +336,61 @@ class _StagingScreenState extends State<StagingScreen> {
         ),
       );
     }
+    final users = _rowUsers;
+    if (!AuthStore.instance.isOwner || users.length < 2) {
+      return RefreshIndicator(
+        onRefresh: () => _load(),
+        child: _serverRows(),
+      );
+    }
     return RefreshIndicator(
       onRefresh: () => _load(),
-      child: _serverRows(),
+      child: Column(
+        children: [
+          _userFilterRow(users),
+          Expanded(child: _serverRows()),
+        ],
+      ),
+    );
+  }
+
+  /// Distinct uploaders in the current rows (owner view filter).
+  List<String> get _rowUsers => downloadOwners(_downloads);
+
+  List<DownloadRow> get _visibleDownloads =>
+      filterDownloadsByUser(_downloads, _userFilter);
+
+  Widget _userFilterRow(List<String> users) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      child: Row(
+        children: [
+          ChoiceChip(
+            label: Text(tr('All')),
+            selected: _userFilter.isEmpty,
+            onSelected: (_) => setState(() => _userFilter = ''),
+          ),
+          for (final u in users) ...[
+            const SizedBox(width: 8),
+            ChoiceChip(
+              label: Text(u),
+              selected: _userFilter == u,
+              onSelected: (_) => setState(() => _userFilter = u),
+            ),
+          ],
+        ],
+      ),
     );
   }
 
   Widget _serverRows() {
+    final rows = _visibleDownloads;
     return ListView.builder(
       padding: const EdgeInsets.symmetric(vertical: 4),
-      itemCount: _downloads.length,
+      itemCount: rows.length,
       itemBuilder: (_, i) {
-                  final d = _downloads[i];
+                  final d = rows[i];
                   final done = d.status == 'staged' || d.status == 'kept';
                   return ListTile(
                     leading: CoverThumb(
@@ -707,6 +765,20 @@ class _StagingScreenState extends State<StagingScreen> {
 /// are everything the staging UI renders per tick.
 String downloadsHash(List<DownloadRow> dls) =>
     dls.map((d) => '${d.id}:${d.status}').join('|');
+
+/// Owner user-filter for the server downloads list (pure, unit-tested):
+/// '' = all users, else only that uploader's rows.
+List<DownloadRow> filterDownloadsByUser(List<DownloadRow> dls, String user) =>
+    user.isEmpty ? dls : dls.where((d) => d.owner == user).toList();
+
+/// Distinct uploaders in download rows, sorted (pure, unit-tested).
+List<String> downloadOwners(List<DownloadRow> dls) {
+  final s = <String>{};
+  for (final d in dls) {
+    if (d.owner.isNotEmpty) s.add(d.owner);
+  }
+  return s.toList()..sort();
+}
 
 /// Adaptive /api/downloads poll interval (pure, unit-tested): 3s while jobs
 /// are active or the list just changed, else 6→9→12→15s backoff. Steady idle

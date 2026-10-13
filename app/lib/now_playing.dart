@@ -211,11 +211,15 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
     qp.currentTitle.addListener(_prewarmShare);
     qp.currentTitle.addListener(_clearSeekStateOnTrackChange);
     _prewarmShare();
-    // Visible-screen truth poll (1s): re-asks the handler for native truth
-    // via getState; the reply feeds playingN, which rebuilds every button
-    // directly. No watchdog compare/setState needed — one notifier means
-    // the skin cannot disagree with itself. Bg-gated (resumed only).
-    _truthPoll = Timer.periodic(const Duration(seconds: 2), (_) {
+    // Visible-screen truth poll (1s): re-asks the handler DIRECTLY for
+    // native truth via getState; the reply feeds playingN, which rebuilds
+    // every button directly. No watchdog compare/setState needed — one
+    // notifier means the skin cannot disagree with itself. Bg-gated
+    // (resumed only). Was 2s: a native MediaPlayer-JNI pause on external
+    // focus loss lands OUTSIDE Dart, so 2s of stale "playing" was the
+    // user's double-tap. 1s also covers the whole <10s window after any
+    // external-focus signal — no separate fast/slow mode needed.
+    _truthPoll = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
         return;

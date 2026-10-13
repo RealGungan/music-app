@@ -144,7 +144,8 @@ class _FakeState:
 
     def local_mp3_index(self):
         self.calls += 1
-        return self._index
+        # Real index is base -> full path; library paths stay visible.
+        return {b: "/music/" + b + ".mp3" for b in self._index}
 
 
 def _resolve_handler(index):

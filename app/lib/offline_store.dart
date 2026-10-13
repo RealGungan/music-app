@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api_client.dart';
+import 'auth_store.dart';
 
 /// Thrown when a download (or a quota change) would break the user's cap.
 class OfflineQuotaError implements Exception {
@@ -76,6 +77,45 @@ class OfflineStore {
   static Directory? _dir;
   static final Map<String, OfflineEntry> _entries = {};
   static double quotaGb = defaultQuotaGb;
+  // Safe user this in-memory index belongs to (mirrors PrefetchStore:
+  // the downloaded badge is per-user — a shared index leaked one user's
+  // "Downloaded" rows into the next user's view on the same device).
+  static String? _user;
+
+  static String _safeUser(String? u) {
+    final s = (u ?? '')
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9_-]+'), '_');
+    return s.isEmpty ? 'shared' : s;
+  }
+
+  static String _currentSafeUser() {
+    try {
+      return _safeUser(AuthStore.instance.username);
+    } catch (_) {
+      return 'shared';
+    }
+  }
+
+  static String _indexKey(String safe) => '$_kIndex.$safe';
+
+  /// Force reload for the current user (call on login/logout/user switch;
+  /// init() also drops the previous user's rows lazily on next call).
+  static Future<void> reloadForUserSwitch() async {
+    _entries.clear();
+    _user = null;
+    await init();
+    change.value++;
+  }
+
+  /// Test hook: forget everything (user + dir + index) between cases.
+  static Future<void> resetForTest() async {
+    _entries.clear();
+    _user = null;
+    _dir = null;
+    quotaGb = defaultQuotaGb;
+  }
 
   /// Bumped on every mutation so Settings/queue UI can listen.
   static final ValueNotifier<int> change = ValueNotifier(0);
@@ -97,12 +137,29 @@ class OfflineStore {
   }
 
   static Future<void> init() async {
+    final safe = _currentSafeUser();
+    if (_user != null && _user != safe) {
+      // User switch without an explicit reload: never serve the previous
+      // user's rows from memory — prefs load below replaces them.
+      _entries.clear();
+    }
+    _user = safe;
     final docs = await getApplicationDocumentsDirectory();
     _dir = Directory('${docs.path}/offline');
     if (!await _dir!.exists()) await _dir!.create(recursive: true);
     final prefs = await SharedPreferences.getInstance();
     quotaGb = prefs.getDouble(_kQuota) ?? defaultQuotaGb;
-    final raw = prefs.getString(_kIndex);
+    var raw = prefs.getString(_indexKey(safe));
+    if ((raw == null || raw.isEmpty)) {
+      // One-time upgrade: adopt the legacy global index into whoever is
+      // logged in now, then drop it so it can't leak to the next user.
+      final legacy = prefs.getString(_kIndex);
+      if (legacy != null && legacy.isNotEmpty) {
+        raw = legacy;
+        await prefs.setString(_indexKey(safe), legacy);
+        await prefs.remove(_kIndex);
+      }
+    }
     _entries.clear();
     if (raw != null && raw.isNotEmpty) {
       try {
@@ -141,7 +198,7 @@ class OfflineStore {
 
   static Future<void> _save() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_kIndex,
+    await prefs.setString(_indexKey(_user ?? _currentSafeUser()),
         jsonEncode(_entries.map((k, v) => MapEntry(k, v.toJson()))));
     change.value++;
   }
@@ -255,7 +312,7 @@ class OfflineStore {
   }) async {
     base = base.trim();
     playlist = playlist.trim();
-    if (_dir == null) await init();
+    if (_dir == null || _user != _currentSafeUser()) await init();
     if (isDownloaded(base)) return _entries[base]!;
     final client = http.Client();
     try {

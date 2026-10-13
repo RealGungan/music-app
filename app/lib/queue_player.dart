@@ -273,6 +273,13 @@ StallFix stallAudit({
   return StallFix.none;
 }
 
+/// Consecutive frozen-clock counter (pure, unit-tested): how many 1s audit
+/// samples have seen a native position that did NOT move. Reset on any
+/// movement. Sampled at 1s, a run of 2 == 2s of frozen position under an
+/// engine "playing" claim — the player died without a focus event.
+int frozenRun({required bool advanced, required int prev}) =>
+    advanced ? 0 : prev + 1;
+
 /// Headless-advance pre-push selector (pure, unit-tested): index of the track
 /// the handler must auto-start on natural completion while the UI isolate
 /// sleeps (screen off / Doze — no Dart timers run there). Repeat-one replays
@@ -483,29 +490,39 @@ class QueuePlayer {
         _healCurrent(reason: 'stall');
       }
     });
-    // Stall detector: the engine CLAIM vs NATIVE clock, sampled every 3s.
-    // A frozen clock under a playing claim (dead socket with no complete/
-    // error) — or a moving clock under a paused claim (lost resume event) —
-    // re-feeds the native truth through the state stream, which is the
-    // skin's sole source, so the lie corrects itself within one tick.
-    // Repaint-only: the handler keeps actual audio state, so a false
-    // positive self-reverses on the next tick instead of killing sound.
-    _auditTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+    // Stall detector: the engine CLAIM vs NATIVE clock, sampled every 1s
+    // (was 10s — far too slow for a player that dies without any focus
+    // event: the skin sat on "playing" for ten seconds over dead audio).
+    // A frozen clock for 2s under a playing claim (dead socket/player, no
+    // complete/error and no focus event) — or a moving clock under a paused
+    // claim (lost resume event) — re-feeds the native truth through the
+    // state stream, which is the skin's sole source, so the lie corrects
+    // itself within two ticks. Repaint-only: the handler keeps actual audio
+    // state, so a false positive self-reverses on the next tick instead of
+    // killing sound.
+    _auditTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
         _auditPos = position.value;
+        _auditFrozen = 0;
         return;
       }
       if (!_player.isPlaying) {
         _auditPos = position.value;
+        _auditFrozen = 0;
         return;
       }
       if (items.isEmpty || index < 0 || index >= items.length) {
         _auditPos = position.value;
+        _auditFrozen = 0;
         return;
       }
       final pos = position.value;
       final advanced = pos != _auditPos;
       _auditPos = pos;
+      // 1s samples: two consecutive frozen ones == a 2s frozen native
+      // position. One frozen tick is normal (seek/reload jitter), so the
+      // run counter — not a single tick — is what forces the repaint.
+      _auditFrozen = frozenRun(advanced: advanced, prev: _auditFrozen);
       final fix = stallAudit(
         enginePlaying: _player.isPlaying,
         posAdvanced: advanced,
@@ -518,8 +535,31 @@ class QueuePlayer {
           DateTime.now().difference(_lastPlayStartAt).inSeconds < 20) {
         return;
       }
+      // toPaused waits for the 2s frozen RUN (one frozen tick is seek /
+      // reload jitter, not a dead player); toPlaying stays single-tick — a
+      // moving clock under a paused claim can never be jitter.
+      if (fix == StallFix.toPaused && _auditFrozen < _auditFrozenLimit) {
+        return;
+      }
       final p = _player;
       if (p is! RemoteEngine) return;
+      // Evidence BEFORE the correction lands: the client-log row naming
+      // which path lied (skin vs the engine's claim vs the handler's own
+      // last-known state). Section 'playback'; logClientError stamps av.
+      if (skinMismatch(skinShows: playingN.value, nativePlaying: advanced)) {
+        report(
+          'skin-mismatch',
+          '${skinMismatchMessage(
+            skinShows: playingN.value,
+            nativePlaying: advanced,
+            engine: p.lastStateName,
+            handler: p.lastStateName,
+          )} '
+          'src=${fix == StallFix.toPaused ? 'frozen-pos' : 'moving-pos'} '
+          'pos=${pos.inSeconds}s frozen=${_auditFrozen}s idx=$index '
+          '"${items[index].title}"',
+        );
+      }
       p.feedRemoteEvent({
         'ev': 'state',
         's': fix == StallFix.toPaused ? 'paused' : 'playing',
@@ -734,12 +774,17 @@ class QueuePlayer {
   Duration _watchPos = Duration.zero;
   DateTime _watchSince = DateTime.now();
 
-  /// Stall-detector baseline: native position at the last 3s audit tick.
+  /// Stall-detector baseline: native position at the last 1s audit tick.
   // App-lifetime audit (singleton player); never cancelled.
   // ignore: unused_field
   // ignore: unused_field — held so the audit lives as long as the app.
   Timer? _auditTimer;
   Duration _auditPos = Duration.zero;
+
+  /// Consecutive 1s audit samples that saw a frozen native position, and
+  /// the run length that forces the paused repaint. Two ticks == 2s frozen.
+  static const _auditFrozenLimit = 2;
+  int _auditFrozen = 0;
 
   bool _shuffle = false;
 
