@@ -12,6 +12,7 @@ import 'dart:typed_data';
 
 import '../api_client.dart';
 import '../auth_store.dart';
+import '../home_shortcut.dart';
 import '../import_sheet.dart';
 import '../lang.dart';
 import '../meta_cache.dart';
@@ -66,6 +67,31 @@ Future<void> _learnOffline(ApiClient api, Object e) async {
       if (!await api.ping()) QueuePlayer.instance.isOffline.value = true;
     } catch (_) {
       QueuePlayer.instance.isOffline.value = true;
+    }
+  }
+}
+
+/// Pin a launcher shortcut for [playlistName] ("Add to home screen").
+/// File-level so the library list ⋮ menu, the long-press sheet and the
+/// playlist detail app bar share one entry point. Android caps pinned
+/// shortcuts at 4, so the 5th pin drops the oldest — the toast names it,
+/// because a shortcut disappearing with no explanation is the confusing
+/// part. Always answers visibly: every path toasts success or failure.
+Future<void> pinPlaylistToHome(BuildContext context, String playlistName) async {
+  try {
+    final evicted = await HomeShortcuts.pin(playlistName);
+    if (!context.mounted) return;
+    toast(
+      context,
+      evicted == null
+          ? tr('Added to home screen')
+          : '${tr('Added to home screen')} · ${tr('max 4 shortcuts')}: '
+              '"$evicted" ${tr('removed')}',
+      icon: Icons.add_to_home_screen,
+    );
+  } catch (e) {
+    if (context.mounted) {
+      toast(context, "${tr('Failed')}: $e", icon: Icons.error_outline);
     }
   }
 }
@@ -705,6 +731,11 @@ Future<void> _load({bool forceOnline = false}) async {
               onTap: () => Navigator.pop(context, 'cover'),
             ),
             ListTile(
+              leading: const Icon(Icons.add_to_home_screen),
+              title: Text(tr('Add to home screen')),
+              onTap: () => Navigator.pop(context, 'pin'),
+            ),
+            ListTile(
               leading: const Icon(Icons.fact_check_outlined),
               title: Text(tr('Verify against source')),
               onTap: () => Navigator.pop(context, 'verify'),
@@ -741,6 +772,10 @@ Future<void> _load({bool forceOnline = false}) async {
     }
     if (action == 'verify') {
       await _verifyAgainstSource(context, widget.api, pl.name);
+      return;
+    }
+    if (action == 'pin') {
+      await pinPlaylistToHome(context, pl.name);
       return;
     }
     if (action == 'delete') {
@@ -1180,6 +1215,7 @@ try {
                             if (v == 'delete') _deletePlaylist(pl);
                             if (v == 'download') _downloadWholePlaylist(pl);
                             if (v == 'cover') _changePlaylistCover(pl);
+                            if (v == 'pin') pinPlaylistToHome(context, pl.name);
                             if (v == 'rename') _renamePlaylist(pl);
                             if (v == 'verify') {
                               _verifyAgainstSource(context, widget.api, pl.name);
@@ -1197,6 +1233,10 @@ try {
                             PopupMenuItem(
                               value: 'cover',
                               child: Text(tr('Change cover')),
+                            ),
+                            PopupMenuItem(
+                              value: 'pin',
+                              child: Text(tr('Add to home screen')),
                             ),
                             PopupMenuItem(
                               value: 'rename',
@@ -2636,6 +2676,12 @@ Future<void> _playFrom(int i) async {
             icon: const Icon(Icons.photo_outlined),
             tooltip: tr('Change cover'),
             onPressed: _busy ? null : _editPhoto,
+          ),
+          IconButton(
+            icon: const Icon(Icons.add_to_home_screen),
+            tooltip: tr('Add to home screen'),
+            onPressed:
+                _busy ? null : () => pinPlaylistToHome(context, widget.name),
           ),
           IconButton(
             icon: const Icon(Icons.fact_check_outlined),

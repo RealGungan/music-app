@@ -1,11 +1,23 @@
 /// Pure deep-link helpers (testable, no Flutter deps).
 /// Single source of truth for which share-URL hosts the app handles;
 /// mirrors the manifest intent-filters + server `_open_url` host sets.
-enum DeepLinkKind { spotify, youtube, other }
+enum DeepLinkKind { spotify, youtube, playlist, other }
+
+/// Custom scheme for playlist launcher shortcuts (the only host the app
+/// owns, so unlike the Spotify/YouTube links it needs no verification).
+const kGunganScheme = 'gunganfm';
+
+/// Android hard-caps PINNED dynamic shortcuts at 4. Past that it silently
+/// drops one itself, which reads as "my shortcut vanished", so we cap the
+/// list ourselves and drop the OLDEST on purpose (with a toast).
+const kMaxPinnedShortcuts = 4;
 
 DeepLinkKind classifyDeepLink(String rawUrl) {
   final url = Uri.tryParse(rawUrl);
   if (url == null) return DeepLinkKind.other;
+  if (url.scheme.toLowerCase() == kGunganScheme) {
+    return url.host.toLowerCase() == 'playlist' ? DeepLinkKind.playlist : DeepLinkKind.other;
+  }
   final host = (url.host.isNotEmpty ? url.host : url.path).toLowerCase();
   final isSpotify = host == 'open.spotify.com' ||
       host == 'spotify.link' ||
@@ -62,6 +74,7 @@ String stripTrackingParams(String rawUrl) {
 
 final _urlRe = RegExp(r'https?://[^\s]+');
 
+
 /// First http(s) URL inside shared text (WhatsApp "share to app" sends
 /// ACTION_SEND text/plain, not a VIEW intent). Strips trailing punctuation
 /// messengers leave behind. Returns '' when none found.
@@ -69,4 +82,39 @@ String extractFirstUrl(String text) {
   final m = _urlRe.firstMatch(text);
   if (m == null) return '';
   return m.group(0)!.replaceAll(RegExp(r'[)\].,;!]+$'), '');
+}
+
+/// The URI a pinned playlist launcher shortcut fires: opens straight into
+/// that playlist. `Uri.encodeComponent` keeps spaces/slashes/accents intact
+/// through the intent, and [parsePlaylistDeepLink] reverses it.
+String playlistDeepLinkUri(String name) =>
+    '$kGunganScheme://playlist/${Uri.encodeComponent(name)}';
+
+/// Playlist name out of a `gunganfm://playlist/<name>` link, '' when the
+/// link is not one (or carries no name). Reads `pathSegments`, NOT `path`:
+/// `Uri.path` hands back the still-ENCODED path ("Mi%20lista"), while each
+/// segment is decoded — and a `%2F` inside a name stays inside its segment,
+/// so a slash in a playlist name survives the round trip. The host already
+/// consumed "playlist", so the segments ARE the name.
+String parsePlaylistDeepLink(String rawUrl) {
+  if (classifyDeepLink(rawUrl) != DeepLinkKind.playlist) return '';
+  final url = Uri.tryParse(rawUrl);
+  if (url == null) return '';
+  return url.pathSegments.join('/');
+}
+
+/// Append [name] to the newest-last pinned list, keeping the newest
+/// [max] entries. Re-pinning an existing name moves it to the newest slot
+/// without consuming a slot. Returns the list to publish plus the oldest
+/// entry dropped to stay under the cap (null when nothing was dropped —
+/// including every re-pin of an already-pinned name).
+({List<String> list, String? evicted}) pinPlaylistShortcut(
+    List<String> pinned, String name,
+    {int max = kMaxPinnedShortcuts}) {
+  final next = <String>[...pinned.where((n) => n != name), name];
+  String? evicted;
+  while (next.length > max) {
+    evicted = next.removeAt(0);
+  }
+  return (list: next, evicted: evicted);
 }

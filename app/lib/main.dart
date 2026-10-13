@@ -18,6 +18,7 @@ import 'package:workmanager/workmanager.dart';
 import 'api_client.dart';
 import 'announcer.dart';
 import 'deep_link.dart';
+import 'home_shortcut.dart';
 import 'audio_handler.dart';
 import 'audio_session_state.dart';
 import 'auth_store.dart';
@@ -705,6 +706,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
     // proven the hook is dead (not just silent).
     QueuePlayer.instance.traceResumeSyncAtStart();
     _wireDeepLinks();
+    unawaited(HomeShortcuts.load());
     _wireReplacePopup();
     _wireOfflinePopup();
     _wireAnnouncements();
@@ -756,7 +758,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
   /// receive warm links whenever onNewIntent fires. Each one opens the song
   /// like a tapped discovery row.
   Future<void> _wireDeepLinks() async {
-    _traceDl('BUILD=V41');
+    _traceDl('BUILD=V42');
     String? initial;
     try {
       initial = await _kDeepLinkChannel.invokeMethod<String>('getInitialLink');
@@ -829,6 +831,22 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
       return;
     }
     final kind = classifyDeepLink(rawUrl);
+    // Home-screen shortcut: gunganfm://playlist/<name> opens that playlist
+    // directly. Checked BEFORE the share-link gate below, which would
+    // reject it as "not a music share link".
+    if (kind == DeepLinkKind.playlist) {
+      final name = parsePlaylistDeepLink(rawUrl);
+      _traceDl('playlist shortcut -> "$name"');
+      final nav = _navigatorKey.currentState;
+      if (name.isEmpty || nav == null) {
+        _dlToast(tr("Can't open that playlist"));
+        return;
+      }
+      nav.push(MaterialPageRoute(
+        builder: (_) => PlaylistDetailScreen(api: _api, name: name),
+      ));
+      return;
+    }
     final host = (url.host.isNotEmpty ? url.host : url.path).toLowerCase();
     final isSpotify = kind == DeepLinkKind.spotify;
     final isYt = kind == DeepLinkKind.youtube;

@@ -17,6 +17,59 @@ void main() {
   test('non-music link is other', () {
     expect(classifyDeepLink('https://example.com/foo'), DeepLinkKind.other);
   });
+  group('playlist home-screen shortcut (gunganfm://)', () {
+    test('classifies only the playlist host of our own scheme', () {
+      expect(classifyDeepLink('gunganfm://playlist/Liked'), DeepLinkKind.playlist);
+      expect(classifyDeepLink('GUNGANFM://playlist/Liked'), DeepLinkKind.playlist);
+      expect(classifyDeepLink('gunganfm://song/Liked'), DeepLinkKind.other);
+      // A Spotify/YT link is still a share link, never a shortcut.
+      expect(classifyDeepLink('https://open.spotify.com/track/abc'), DeepLinkKind.spotify);
+    });
+    test('build <-> parse round-trips nasty names', () {
+      for (final n in [
+        'Liked',
+        'Mi lista 2026',
+        'Rock/Metal & Funk',
+        'Café ☕ Remix',
+        '100%',
+      ]) {
+        final uri = playlistDeepLinkUri(n);
+        expect(uri, startsWith('gunganfm://playlist/'), reason: uri);
+        expect(classifyDeepLink(uri), DeepLinkKind.playlist, reason: uri);
+        expect(parsePlaylistDeepLink(uri), n, reason: uri);
+      }
+    });
+    test('parse ignores non-playlist links and empty names', () {
+      expect(parsePlaylistDeepLink('https://open.spotify.com/track/abc'), '');
+      expect(parsePlaylistDeepLink('gunganfm://playlist/'), '');
+      expect(parsePlaylistDeepLink('not a uri at all'), '');
+    });
+    test('pin caps at 4 and evicts the OLDEST', () {
+      var pinned = <String>[];
+      for (final n in ['A', 'B', 'C', 'D']) {
+        final r = pinPlaylistShortcut(pinned, n);
+        expect(r.evicted, isNull, reason: 'under the cap nothing is dropped');
+        pinned = r.list;
+      }
+      expect(pinned, ['A', 'B', 'C', 'D']);
+      // 5th pin: Android would silently kill one, so we drop A on purpose.
+      final r = pinPlaylistShortcut(pinned, 'E');
+      expect(r.evicted, 'A');
+      expect(r.list, ['B', 'C', 'D', 'E']);
+      expect(r.list.length, lessThanOrEqualTo(4));
+    });
+    test('re-pinning an existing playlist moves it, never evicts', () {
+      final pinned = ['A', 'B', 'C', 'D'];
+      final r = pinPlaylistShortcut(pinned, 'B');
+      expect(r.evicted, isNull);
+      expect(r.list, ['A', 'C', 'D', 'B']);
+    });
+    test('pin drops down to a single entry when max is 1', () {
+      final r = pinPlaylistShortcut(['old'], 'new', max: 1);
+      expect(r.evicted, 'old');
+      expect(r.list, ['new']);
+    });
+  });
   test('spotify ?si=/utm_ stripped entirely', () {
     expect(
       stripTrackingParams('https://open.spotify.com/track/4uLU6hMCjMI75M1A2tkuQ?si=abc123&utm_source=whatsapp'),

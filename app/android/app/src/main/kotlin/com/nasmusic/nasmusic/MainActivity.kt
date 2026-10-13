@@ -5,6 +5,10 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ShortcutInfo
+import android.content.pm.ShortcutManager
+import android.graphics.BitmapFactory
+import android.graphics.drawable.Icon
 import android.net.Uri
 import android.provider.Settings
 import android.util.Log
@@ -29,6 +33,7 @@ class MainActivity : AudioServiceActivity() {
         @Volatile private var noisyReceiver: BroadcastReceiver? = null
         private const val SHARE_TAG = "NASMusicShare"
         private const val SESSION_TAG = "NASMusicSession"
+        private const val SHORTCUT_TAG = "NASMusicShortcut"
     }
 
     // Deep links (open.spotify.com / music.youtube.com / youtu.be) arrive
@@ -139,6 +144,16 @@ class MainActivity : AudioServiceActivity() {
                     result.notImplemented()
                 }
             }
+        MethodChannel(messenger!!, "com.nasmusic.nasmusic/shortcuts")
+            .setMethodCallHandler { call, result ->
+                if (call.method == "publishShortcuts") {
+                    val n = publishShortcuts(call.arguments)
+                    Log.i(SHORTCUT_TAG, "publishShortcuts n=$n")
+                    result.success(n)
+                } else {
+                    result.notImplemented()
+                }
+            }
         // Cold start goes ONLY via getInitialLink (Dart pulls it post-frame
         // when the navigator exists). Forwarding here too would deliver the
         // same URL twice (openUrl event + getInitialLink) → double
@@ -167,6 +182,52 @@ class MainActivity : AudioServiceActivity() {
                     .invokeMethod("openUrl", url)
             }
         }
+    }
+
+    // Publishes Dart's pinned playlist list as dynamic launcher shortcuts.
+    // Dart owns the list (SharedPreferences) and the 4-item cap; the
+    // launcher only ever sees the final set, pushed as a whole because
+    // setDynamicShortcuts REPLACES everything that was there before.
+    // Icon = the cached cover bitmap when one is on disk, else the app icon.
+    // Tapping fires ACTION_VIEW on the gunganfm:// playlist URI, which the
+    // manifest filter routes back into MainActivity (hence the explicit
+    // component — it can only ever be us). Returns how many were published.
+    private fun publishShortcuts(arg: Any?): Int {
+        if (Build.VERSION.SDK_INT < 25) return 0 // ShortcutManager is API 25+
+        val items = (arg as? List<*>)?.filterIsInstance<Map<*, *>>() ?: return 0
+        val sm = getSystemService(Context.SHORTCUT_SERVICE) as? ShortcutManager ?: return 0
+        val out = ArrayList<ShortcutInfo>(items.size)
+        for (m in items) {
+            val id = m["id"]?.toString().orEmpty()
+            val label = m["label"]?.toString().orEmpty()
+            val uri = m["uri"]?.toString().orEmpty()
+            if (id.isEmpty() || label.isEmpty() || uri.isEmpty()) continue
+            val bitmap = (m["icon"] as? String)
+                ?.takeIf { it.isNotBlank() }
+                ?.let { runCatching { BitmapFactory.decodeFile(it) }.getOrNull() }
+            val icon = if (bitmap != null) {
+                Icon.createWithBitmap(bitmap)
+            } else {
+                runCatching { Icon.createWithResource(packageName, applicationInfo.icon) }
+                    .getOrElse { Icon.createWithResource(packageName, R.mipmap.ic_launcher) }
+            }
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(uri)).apply {
+                setClass(this@MainActivity, MainActivity::class.java)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+            out.add(
+                ShortcutInfo.Builder(this, id)
+                    .setShortLabel(label)
+                    .setLongLabel(label)
+                    .setIcon(icon)
+                    .setIntent(intent)
+                    .build(),
+            )
+        }
+        runCatching { sm.dynamicShortcuts = out }.onFailure {
+            Log.w(SHORTCUT_TAG, "setDynamicShortcuts failed: $it")
+        }
+        return out.size
     }
 
     // A native ACTION_SEND share sheet for the YT-Music link the app built.
