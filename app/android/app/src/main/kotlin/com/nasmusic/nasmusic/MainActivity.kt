@@ -28,6 +28,7 @@ class MainActivity : AudioServiceActivity() {
         @Volatile private var audioEventChannel: MethodChannel? = null
         @Volatile private var noisyReceiver: BroadcastReceiver? = null
         private const val SHARE_TAG = "NASMusicShare"
+        private const val SESSION_TAG = "NASMusicSession"
     }
 
     // Deep links (open.spotify.com / music.youtube.com / youtu.be) arrive
@@ -132,6 +133,8 @@ class MainActivity : AudioServiceActivity() {
             .setMethodCallHandler { call, result ->
                 if (call.method == "openSupportedLinks") {
                     result.success(openSupportedLinks())
+                } else if (call.method == "enableMediaButtons") {
+                    result.success(enableMediaButtons())
                 } else {
                     result.notImplemented()
                 }
@@ -472,6 +475,50 @@ class MainActivity : AudioServiceActivity() {
             "fail: launch-failed err=${errs.joinToString(" | ").ifEmpty { "no IG package found" }}"
         } catch (e: Exception) {
             "fail: exception=$e"
+        }
+    }
+
+    // Qualify for Bluetooth headset / car-wheel media buttons by setting the
+    // session FLAGS, which is what Android actually routes on. audio_service
+    // only sets FLAG_HANDLES_QUEUE_COMMANDS (AudioService.onCreate), so
+    // without this the session declines media buttons on some devices.
+    //
+    // This replaces AudioService.androidForceEnableMediaButtons(), which
+    // "qualified" us by playing a blip of SILENCE through the music stream —
+    // the audible noise on app open (1.0.305). Same routing result, no sound.
+    //
+    // audio_service exposes no Dart getter for its MediaSessionCompat, so we
+    // reach the field directly. Guarded end to end: a renamed field or a
+    // future audio_service with its own accessor degrades to "false", which
+    // costs BT routing and nothing else.
+    private fun enableMediaButtons(): Boolean {
+        return try {
+            val service = Class.forName("com.ryanheise.audioservice.AudioService")
+            val instanceField = service.getDeclaredField("instance").apply { isAccessible = true }
+            val svc = instanceField.get(null)
+            if (svc == null) {
+                Log.w(SESSION_TAG, "enableMediaButtons: audio_service instance not created yet")
+                return false
+            }
+            val sessionField = service.getDeclaredField("mediaSession").apply { isAccessible = true }
+            val session = sessionField.get(svc)
+            if (session == null) {
+                Log.w(SESSION_TAG, "enableMediaButtons: mediaSession field not found/created")
+                return false
+            }
+            // FLAG_HANDLES_MEDIA_BUTTONS (1) | FLAG_HANDLES_TRANSPORT_CONTROLS (2),
+            // OR-ed onto whatever the session already advertises. Reflected off
+            // the instance so we never name the MediaSessionCompat class (audio_service
+            // still imports the old android.support.v4 coordinate).
+            val current = session.javaClass.getMethod("getFlags").invoke(session) as Int
+            val wanted = current or 1 or 2
+            session.javaClass.getMethod("setFlags", Int::class.javaPrimitiveType)
+                .invoke(session, wanted)
+            Log.i(SESSION_TAG, "enableMediaButtons ok flags=$current->$wanted")
+            true
+        } catch (e: Throwable) {
+            Log.w(SESSION_TAG, "enableMediaButtons failed: $e")
+            false
         }
     }
 

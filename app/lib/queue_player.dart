@@ -1411,24 +1411,52 @@ class QueuePlayer {
 
   /// Called on app resume (UI isolate may have slept while the handler
   /// kept playing/paused). Awaits handler truth via
-  /// [RemoteEngine.resync]: state/pos/dur events re-feed the existing
-  /// broadcast listeners (attached once in the constructor — never
-  /// detached, so nothing to re-attach), correcting a stale [playing]
-  /// that froze the play button. [stateSyncing] stays true until the
-  /// repaint lands, so the UI blocks taps on the stale icon meanwhile.
+  /// [RemoteEngine.queryTruthDirect]: the handler's own getState answer,
+  /// written straight into the single playing truth. [stateSyncing] stays true
+  /// until it lands, so the UI blocks taps on the stale icon meanwhile.
   /// Position is restored from the handler's clock, never zeroed.
   /// No-op on desktop (local engine).
+  ///
+  /// NOT via [RemoteEngine.resync]: that path is gated on the engine's
+  /// `_remoteUp` latch, which is cleared whenever a send finds the port
+  /// missing. A resume landing in that window never queried the handler at all
+  /// and fell through to the local-only correction — which forces `paused`
+  /// over audio that never stopped, then a second tap "resumes" a song that
+  /// was already playing. Here the port is asked directly; only a genuinely
+  /// absent port falls back to resync's local correction.
   Future<void> onResumed() {
     final p = _player;
-    if (p is RemoteEngine) {
-      // Interrupt-resync hook: this IS the live path (app resume +
-      // focus regain both land here — main.dart), so the row proves the
-      // resync fired instead of vanishing into a swallowed catch.
-      report('resync', 'fired playing=$playing items=${items.length}');
-      stateSyncing.value = true;
-      return p.resync().whenComplete(() => stateSyncing.value = false);
-    }
-    return Future.value();
+    if (p is! RemoteEngine) return Future.value();
+    // Interrupt-resync hook: this IS the live path (app resume +
+    // focus regain both land here — main.dart), so the row proves the
+    // resync fired instead of vanishing into a swallowed catch.
+    report('resync', 'fired playing=$playing items=${items.length}');
+    // Snapshot BEFORE the query: the report names the icon that was lying.
+    final skinBefore = playingN.value;
+    stateSyncing.value = true;
+    return p
+        .queryTruthDirect()
+        .then((truth) {
+          if (truth == null) return p.resync();
+          final shows = truth == PlayerState.playing;
+          if (skinMismatch(skinShows: skinBefore, nativePlaying: shows)) {
+            report(
+              'skin-mismatch',
+              '${skinMismatchMessage(
+                skinShows: skinBefore,
+                nativePlaying: shows,
+                engine: engineStateName,
+                handler: handlerStateName,
+              )} src=resume items=${items.length}',
+            );
+          }
+          // The single playing truth, written HERE rather than left to the
+          // state stream: mini + full both listen to playingN, so this one
+          // write repaints both in the same frame.
+          _lastPlayerState = truth;
+          playingN.value = shows;
+        })
+        .whenComplete(() => stateSyncing.value = false);
   }
 
   /// Visible-screen truth poll (500ms, fire-and-forget): re-asks the

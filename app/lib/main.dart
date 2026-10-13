@@ -363,6 +363,18 @@ const _kAudioEventChannel = MethodChannel('com.nasmusic.nasmusic/audio_events');
 /// cold-start URL and forwards warm ones via this channel).
 const _kDeepLinkChannel = MethodChannel('com.nasmusic.nasmusic/deep_links');
 
+/// Native MediaSession flag tuning (MainActivity). Best-effort: a miss costs
+/// BT media-button routing, never audio, so failures are logged and dropped.
+const _kSystemChannel = MethodChannel('com.nasmusic.nasmusic/system');
+
+Future<void> _enableMediaButtons() async {
+  try {
+    await _kSystemChannel.invokeMethod<bool>('enableMediaButtons');
+  } catch (e) {
+    debugPrint('[audio] media-button flags not set: $e');
+  }
+}
+
 Future<void> _initAudioService() async {
   if (!_mobileOnlyAudio()) return;
   try {
@@ -398,9 +410,16 @@ Future<void> _initAudioService() async {
     // Push the current (possibly idle) state once the session is up.
     _pushAudioState();
     audioSessionReady.value = true;
-    // Qualify for BT media-button routing (headset single/double-press):
-    // plays a blip of silence so Android treats us as real audio output.
-    await AudioService.androidForceEnableMediaButtons();
+    // Qualify for BT media-button routing (headset single/double-press).
+    // Was AudioService.androidForceEnableMediaButtons — it plays a blip of
+    // SILENCE through the music stream to convince Android we're real audio
+    // output — that blip IS the audible noise on app open (1.0.305). Dropped.
+    // The qualifiers that matter are session FLAGS, not a noise burst, so set
+    // those natively instead (MainActivity → AudioService's MediaSessionCompat):
+    // FLAG_HANDLES_MEDIA_BUTTONS | FLAG_HANDLES_TRANSPORT_CONTROLS (OR-ed onto
+    // whatever audio_service already set). Best-effort: a failure here costs
+    // BT routing, never audio, so it never blocks init.
+    await _enableMediaButtons();
     // Catch ACTION_AUDIO_BECOMING_NOISY ourselves. NOTE: we deliberately do
     // NOT use audio_session.setActive(true) + its becomingNoisyEventStream:
     // audioplayers requests its own audio focus when a song starts, which
