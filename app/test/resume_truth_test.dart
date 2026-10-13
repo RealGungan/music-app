@@ -215,6 +215,121 @@ void main() {
     });
   });
 
+  group('getState answers from the REAL player, not a tracked flag', () {
+    // audioplayers has NO native playback-state feedback: `AudioEventType` is
+    // log/duration/seekComplete/complete/prepared, and `_player.state` is
+    // written at exactly one place (the `set state` setter our own
+    // play/pause/stop/resume call). So `_playing` AND `player.state` both just
+    // mirror our last command — when another app takes the audio the native
+    // player pauses with no Dart call in between and they keep answering
+    // "playing" over dead audio. The native position clock is the only truth.
+    test('an advancing clock outranks a stale "playing" flag', () {
+      expect(
+        realStateAnswer(
+            firstMs: 12000, secondMs: 12300, trackedPlaying: true, trackedPaused: false),
+        'playing',
+      );
+    });
+
+    test('a frozen clock outranks a stale "playing" flag (the takeover)',
+        () {
+      // Another app took focus: the native player is paused, `_playing` is
+      // still true from our last play() — the flag-based answer said
+      // 'playing' over silence. The clock is frozen, so it is not playing.
+      expect(
+        realStateAnswer(
+            firstMs: 12000, secondMs: 12000, trackedPlaying: true, trackedPaused: false),
+        'paused',
+        reason: 'a frozen native clock is the only proof an external app '
+            'paused us — no flag and no player.state records it',
+      );
+    });
+
+    test('a rewound clock (seek to 0) still reads as not-moving', () {
+      expect(
+        realStateAnswer(
+            firstMs: 500, secondMs: 0, trackedPlaying: true, trackedPaused: false),
+        'paused',
+      );
+    });
+
+    test('a failed probe falls back to the tracked flags, never invents', () {
+      // Nothing loaded / the platform query threw: don't manufacture a state.
+      expect(
+        realStateAnswer(
+            firstMs: null, secondMs: null, trackedPlaying: true, trackedPaused: false),
+        'playing',
+      );
+      expect(
+        realStateAnswer(
+            firstMs: null, secondMs: null, trackedPlaying: false, trackedPaused: true),
+        'paused',
+      );
+      expect(
+        realStateAnswer(
+            firstMs: null, secondMs: null, trackedPlaying: false, trackedPaused: false),
+        'stopped',
+      );
+      // One-sided failure is still a failure — no half-trusted answer.
+      expect(
+        realStateAnswer(
+            firstMs: 900, secondMs: null, trackedPlaying: true, trackedPaused: false),
+        'playing',
+      );
+    });
+
+    // Source-level: the query can't run a real player in a unit test, so pin
+    // the two facts that make it honest — it READS the real native clock, and
+    // an honored focus loss forces the paused answer immediately.
+    final src = File('lib/audio_handler.dart').readAsStringSync();
+    final getState = src.substring(
+      src.indexOf("case 'getState':"),
+      src.indexOf("case 'seek':"),
+    );
+    final focusLoss = src.substring(
+      src.indexOf('_focusLostPermanent ='),
+      src.indexOf('focus-pause failed'),
+    );
+
+    test('the getState answer probes the native player, not the flags', () {
+      // Comments explain WHY `_player.state`/`_playing` are wrong, so match
+      // the CODE only — strip the line comments before the assertions.
+      final code = getState
+          .split('\n')
+          .where((l) => !l.trimLeft().startsWith('//'))
+          .join('\n');
+      expect(code, contains('_realStateAnswer()'),
+          reason: 'the real player is read through the native position probe');
+      expect(code, isNot(contains(r"'s': _playing")),
+          reason: "answering from the tracked _playing flag is the stale-flag "
+              'lie — an external focus pause never reaches it');
+      expect(code, isNot(contains('_player.state')),
+          reason: '_player.state is assigned only by our own play/pause/stop/'
+              'resume (audioplayers feeds no native playback state back), so it '
+              'knows nothing the tracked flag does not — the bug stays fixed');
+    });
+
+    test('the probe actually reads the native clock twice', () {
+      final probe = src.substring(
+        src.indexOf('Future<int?> _probePositionMs()'),
+        src.indexOf('Future<String> _realStateAnswer()'),
+      );
+      expect(probe, contains('getCurrentPosition()'),
+          reason: 'a real platform query, not a cached flag');
+    });
+
+    test('a forced focus pause wins immediately, without probing', () {
+      expect(getState, contains('_focusPaused'));
+      expect(focusLoss, contains('_focusPaused = true'),
+          reason: 'set _playing=false + the forced pause on AUDIOFOCUS_LOSS so '
+              'any query after the takeover answers paused');
+      // Cleared by every command that starts sound again, plus the player's
+      // own playing event (which is also the audio_service play() path).
+      expect(RegExp(r'_focusPaused = false').allMatches(src).length,
+          greaterThanOrEqualTo(4));
+    });
+  });
+
   group('no silence blip on app open', () {
     // The blip is an AUDIBLE regression, so nothing in the Dart test rig can
     // hear it — the guard has to be source-level. AudioService's helper plays
