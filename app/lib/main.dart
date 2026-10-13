@@ -398,6 +398,9 @@ Future<void> _initAudioService() async {
     // Push the current (possibly idle) state once the session is up.
     _pushAudioState();
     audioSessionReady.value = true;
+    // Qualify for BT media-button routing (headset single/double-press):
+    // plays a blip of silence so Android treats us as real audio output.
+    await AudioService.androidForceEnableMediaButtons();
     // Catch ACTION_AUDIO_BECOMING_NOISY ourselves. NOTE: we deliberately do
     // NOT use audio_session.setActive(true) + its becomingNoisyEventStream:
     // audioplayers requests its own audio focus when a song starts, which

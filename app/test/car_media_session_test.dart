@@ -1,3 +1,4 @@
+import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nasmusic/audio_handler.dart';
@@ -175,6 +176,14 @@ void main() {
         queueTapAction(index: -1, hasPrePushed: false),
         QueueTapAction.ignore,
       );
+    });
+  });
+
+  group('BT headset press mapping (single/double/triple)', () {
+    test('single-press toggles, double skips next, triple previous', () {
+      expect(clickActionFor(MediaButton.media), ClickAction.toggle);
+      expect(clickActionFor(MediaButton.next), ClickAction.next);
+      expect(clickActionFor(MediaButton.previous), ClickAction.previous);
     });
   });
 }

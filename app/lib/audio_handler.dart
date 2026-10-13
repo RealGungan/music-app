@@ -112,6 +112,23 @@ TransportReport? transportReportFor(String? op) {
   }
 }
 
+/// Headset BT press mapping (pure, unit-tested). Native onMediaButtonEvent
+/// routes HEADSETHOOK/PLAY_PAUSE -> click(media), NEXT -> click(next),
+/// PREVIOUS -> click(previous). The toggle reads OUR _playing flag, never
+/// playbackState.nvalue timing.
+enum ClickAction { toggle, next, previous }
+
+ClickAction clickActionFor(MediaButton button) {
+  switch (button) {
+    case MediaButton.next:
+      return ClickAction.next;
+    case MediaButton.previous:
+      return ClickAction.previous;
+    case MediaButton.media:
+      return ClickAction.toggle;
+  }
+}
+
 /// Album-art URI published in MediaItem (pure, unit-tested). Session metadata
 /// art is SEPARATE from the notification bitmap: native setMetadata() decodes
 /// the `artCacheFile` extra in-process for the session bitmaps (what AVRCP
@@ -1028,6 +1045,28 @@ class NASMusicAudioHandler extends BaseAudioHandler {
     _userPaused = true;
     _sendEvent({'ev': 'transport', 'op': 'pause'});
     return _player.pause();
+  }
+
+  /// BT headset / car-wheel single-press entry point. Native routes media
+  /// clicks here (not to play/pause); without this override the Base default
+  /// (playbackState.nvalue toggle) owns the mapping untested.
+  @override
+  Future<void> click([MediaButton button = MediaButton.media]) async {
+    switch (clickActionFor(button)) {
+      case ClickAction.next:
+        await skipToNext();
+        break;
+      case ClickAction.previous:
+        await skipToPrevious();
+        break;
+      case ClickAction.toggle:
+        if (_playing) {
+          await pause();
+        } else {
+          await play();
+        }
+        break;
+    }
   }
 
   @override
