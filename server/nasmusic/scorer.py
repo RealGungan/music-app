@@ -72,6 +72,42 @@ def title_core(raw):
     return _REMASTER_PAREN.sub("", raw or "")
 
 
+def _ytm_thumb(node):
+    """Largest thumbnail URL from a ytmusicapi node, or None."""
+    for t in (node or {}).get("thumbnails") or []:
+        if t.get("url"):
+            return t["url"]
+    return None
+
+
+def _ytm_duration(node):
+    """Seconds from a ytmusicapi node's duration_seconds, or a 'm:ss' string."""
+    d = (node or {}).get("duration_seconds")
+    if not d:
+        d = (node or {}).get("duration") or ""
+        parts = [int(p) for p in d.split(":") if p.isdigit()]
+        d = sum(v * 60 ** i for i, v in
+                enumerate(reversed(parts))) if parts else 0
+    return int(d or 0)
+
+
+def _reroot_single_column(resp):
+    """InnerTube moved the artist/album browse page from
+    `twoColumnBrowseResultsRenderer` to `singleColumnBrowseResultsRenderer`.
+    ytmusicapi 1.12.x still navigates the OLD path, so get_artist dies with
+    KeyError("Unable to find 'contents' ...") on a response that is otherwise
+    perfectly good. Re-root it instead of hand-rolling a renderer parser: the
+    payload is identical, so ytmusicapi's maintained parsers work again (and
+    keep working when they fix it themselves). Mutates + returns `resp`."""
+    c = resp.get("contents")
+    if isinstance(c, dict) and "singleColumnBrowseResultsRenderer" in c \
+            and "twoColumnBrowseResultsRenderer" not in c:
+        resp["contents"] = {
+            "twoColumnBrowseResultsRenderer":
+                c["singleColumnBrowseResultsRenderer"]}
+    return resp
+
+
 def _version_kind(name, wanted):
     """Tag a Deezer version title with its type + whether it's the studio cut.
 
@@ -260,6 +296,166 @@ class Scorer:
             return "" if a.lower() in ("", "na", "none") else a
         except Exception:                               # noqa: BLE001
             return ""
+
+    # ----------------------------------------------------- ytmusic artist
+    def _ytm_client(self):
+        """YTMusic with the singleColumn re-root applied to every response."""
+        try:
+            cache = getattr(self, "_ytm_client_cache", None)
+            if cache is None:
+                from ytmusicapi import YTMusic
+                cache = self._ytm_client_cache = YTMusic()
+                orig = cache._send_request
+
+                def _send(endpoint, *a, **kw):
+                    return _reroot_single_column(orig(endpoint, *a, **kw))
+
+                cache._send_request = _send
+            return cache
+        except Exception:                               # noqa: BLE001
+            return None
+
+    def ytm_artist_rows(self, artist, client=None):
+        """YTMusic artist page as (albums, songs) rows shaped EXACTLY like
+        `deezer_artist_albums` / `deezer_album_tracks_by_id`, so the artist
+        pipeline (`_merge_albums`, `_artist_disc_songs`) consumes them
+        unchanged. Album ids are tagged `ytm:<browseId>` so the tracklist
+        cache + provider routing can tell them from Deezer's numeric ids.
+
+        Deezer alone under-covers several catalogues — its Tame Impala
+        "Currents" tracklist has no "That's All for Everyone", and it lists
+        Bb Trickz "Trickstar" as an EP with no such track — so the artist page
+        showed nothing for them.
+
+        Two sources, always merged (like `deezer_artist_albums` merges the
+        artist feed with a search):
+          1. the YTM artist page (get_artist) — richest, but only exists for
+             artists YouTube Music has an auto-generated page for. Plenty of
+             channels (Bb Trickz) return a /browse response with NO contents
+             at all, which ytmusicapi surfaces as a hard KeyError naming the
+             `twoColumnBrowseResultsRenderer` path.
+          2. YTM album search (search(artist, filter="albums")) — reaches
+             releases the artist page's carousels drop.
+
+        CAVEAT: YTMusic is not a complete catalogue. Its Tame Impala
+        "Lonerism" page serves the DEMOS, and its searches are
+        popularity-ranked, so a deep track like "That's All For Everyone" is
+        in neither source. This widens coverage, it does not replace Deezer.
+        [client] is a test seam — pass a stub to avoid the network."""
+        yt = client if client is not None else self._ytm_client()
+        if yt is None:
+            return [], []
+        name = (artist or "").strip()
+        want = norm(name)
+        if not want:
+            return [], []
+
+        def _row(title, aid, arts, year):
+            aa = next((x for x in arts if x), name)
+            return dict(album=title.strip(), album_artist=aa,
+                        image=None, tracks=0,
+                        year=str(year) if year else None,
+                        album_id="ytm:" + aid, type="album")
+
+        def _arts_of(a):
+            return [x.get("name") or "" for x in a.get("artists") or []]
+
+        albums, songs, seen = [], [], set()
+
+        def _add_album(a):
+            title = (a.get("title") or "").strip()
+            aid = a.get("browseId") or a.get("albumId")
+            if not title or not aid:
+                return
+            k = norm(title)
+            if k in seen:
+                return
+            seen.add(k)
+            row = _row(title, aid, _arts_of(a), a.get("year"))
+            row["image"] = _ytm_thumb(a)
+            albums.append(row)
+
+        # 1) the artist page, when there is one
+        try:
+            hits = yt.search(name, filter="artists", limit=8) or []
+        except Exception as ex:                       # noqa: BLE001
+            self._log(f"ytm artist search failed: {str(ex)[:60]}")
+            hits = []
+        # search rows use `artist`, NOT `name`. Exact normalized match wins,
+        # otherwise ytmusicapi's own top hit.
+        cands = [h.get("browseId") for h in hits
+                 if any(norm(x) == want for x in _arts_of(h))]
+        cands += [h.get("browseId") for h in hits if h.get("browseId")]
+        data = {}
+        for bid in dict.fromkeys(x for x in cands if x):
+            try:
+                data = yt.get_artist(bid) or {}
+            except Exception:                       # noqa: BLE001
+                continue
+            if (data.get("albums") or {}).get("results") or \
+                    (data.get("songs") or {}).get("results"):
+                break
+            data = {}
+        if data:
+            for a in (data.get("albums") or {}).get("results") or []:
+                _add_album(a)
+            for a in (data.get("singles") or {}).get("results") or []:
+                _add_album(a)
+            for s in (data.get("songs") or {}).get("results") or []:
+                ti = (s.get("title") or "").strip()
+                if not ti:
+                    continue
+                ar = next((x for x in _arts_of(s) if x), name)
+                songs.append(dict(base_name=f"{ar} - {ti}", artist=ar,
+                                  album="", album_image=_ytm_thumb(s),
+                                  duration_s=_ytm_duration(s)))
+
+        # 2) album search — ALWAYS merged, not just as a fallback. The artist
+        #    page's carousels are a partial, popularity-ranked view (they omit
+        #    e.g. Bb Trickz "Trickstar") while album search reaches further.
+        #    Same pattern as deezer_artist_albums (artist feed + search).
+        try:
+            res = yt.search(name, filter="albums", limit=20) or []
+        except Exception as ex:                       # noqa: BLE001
+            self._log(f"ytm album search failed: {str(ex)[:60]}")
+            res = []
+        for a in res:
+            if any(norm(x) == want for x in _arts_of(a)):
+                _add_album(a)
+        return albums, songs
+
+    def ytm_album_tracks(self, album_id, client=None):
+        """Tracklist for a `ytm:<browseId>` album, in the same row shape as
+        `deezer_album_tracks_by_id`. Accepts the tag or a bare browseId."""
+        bid = (album_id or "")
+        if bid.startswith("ytm:"):
+            bid = bid[4:]
+        if not bid:
+            return []
+        yt = client if client is not None else self._ytm_client()
+        if yt is None:
+            return []
+        try:
+            al = yt.get_album(bid) or {}
+        except Exception as ex:                       # noqa: BLE001
+            self._log(f"ytm get_album failed: {str(ex)[:60]}")
+            return []
+        title = (al.get("title") or "").strip()
+        arts = [x.get("name") or "" for x in al.get("artists") or []]
+        aa = next((x for x in arts if x), "")
+        cover = _ytm_thumb(al)
+        out = []
+        for t in al.get("tracks") or []:
+            ti = (t.get("title") or "").strip()
+            if not ti:
+                continue
+            ta = next((x.get("name") or "" for x in t.get("artists") or []
+                       if x.get("name")), "") or aa
+            out.append(dict(
+                base_name=f"{ta} - {ti}", artist=ta or aa,
+                album=title, album_image=_ytm_thumb(t) or cover,
+                duration_s=_ytm_duration(t) or None))
+        return out
 
     def resolve_url(self, video_id, timeout=120):
         """Direct streamable URL (googlevideo) for instant playback.

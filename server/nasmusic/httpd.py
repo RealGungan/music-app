@@ -36,6 +36,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import scorer as _scorer
 from .users import UserError
 
 logging.basicConfig(level=logging.INFO,
@@ -155,7 +156,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.310"
+APP_VERSION = "1.0.311"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1372,7 +1373,8 @@ class Handler(BaseHTTPRequestHandler):
                        self._norm_core(r.get("title") or ""))
                 _in = (_rk in local_core) or (
                     self._innas_lenient(r.get("artist") or "",
-                                        r.get("title") or "") is not None)
+                                        r.get("title") or "",
+                                        r.get("duration_s")) is not None)
             except Exception:                           # noqa: BLE001
                 _in = bool(r.get("in_nas"))
             r["in_nas"] = _in
@@ -1528,7 +1530,8 @@ class Handler(BaseHTTPRequestHandler):
                 norm_key = (f"{self._norm_core(cand_art)} - "
                             f"{self._norm_core(cand_title)}")
                 in_nas = (norm_key in local_core) or \
-                         (self._innas_lenient(cand_art, cand_title)
+                         (self._innas_lenient(cand_art, cand_title,
+                                              c.get("duration_s"))
                           is not None)
                 virtual.append({
                     "kind": "virtual", "video_id": c["video_id"],
@@ -2791,9 +2794,17 @@ class Handler(BaseHTTPRequestHandler):
         return re.sub(r"[^a-z0-9]+", "", s)
 
     def _norm_core(self, s):
-        """norm() but ignoring parentheticals like (2017 Remaster)."""
-        import re as _re
-        return self._norm(_re.sub(r"\(.*?\)|\[.*?\]|\{.*?\}", "", s or ""))
+        """norm() ignoring QUALIFIER tags — but never a recording variant.
+
+        '(2017 Remaster)' is the same studio recording, so it is dropped
+        (scorer.title_core), as are [..]/{..} tags. 'Live' / 'Remix' /
+        'Acoustic' / 'Slowed' / 'Karaoke' / 'Cover' / '8D' are DIFFERENT
+        recordings (scorer.REJECT) and STAY, so a live cut can never match
+        as the studio song. Pure function — covered by local tests."""
+        s = re.sub(r"\[.*?\]|\{.*?\}", "", _scorer.title_core(s or ""))
+        return self._norm("".join(
+            p for p in re.split(r"(\([^)]*\))", s)
+            if not p.startswith("(") or _scorer.REJECT.search(p)))
 
     # ------------------------------------------------------------ resolve
     def _rz_url_for_vid(self, video_id):
@@ -3471,15 +3482,17 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------ in-nas lookup (O)
     @staticmethod
-    def _innas_score(q_ar, q_ti, q_both, b_ar_c, b_ti_c, base_norm):
+    def _innas_score(q_ar, q_ti, q_both, b_ar_c, b_ti_c, base_norm,
+                      variant=False):
         """Score one NAS file against a wanted artist/title. Returns
         (score, title_ok). Two independent guards (both learned from real
         mismatches in the wild):
         1. Artist-only agreement NEVER matches (same-artist different song).
         2. Short-substring containment NEVER counts ("eros" ⊂ "caballeros",
            "hoy"/"todo"/"go" inside longer titles). Containment needs the
-           shorter side >= 6 chars AND a compatible artist (or no artist
-           on the file side, e.g. dash-less bases).
+           shorter side >= 6 chars AND a compatible artist (a dash-less base
+           has none, so it matches only an artist-less query) AND no variant
+           on either side ('Song' ⊄ 'Song (Live)').
         Pure function — covered by local tests, no server needed."""
         s = 0
         title_ok = False
@@ -3507,29 +3520,35 @@ class Handler(BaseHTTPRequestHandler):
         b_ti_cc = Handler._norm(b_ti_cc)
         artist_ok = bool(q_ar_c and b_ar_cc and (
             q_ar_c == b_ar_cc or q_ar_c in b_ar_cc or b_ar_cc in q_ar_c))
+        # A dash-less base carries no artist to agree with: it qualifies only
+        # when the query has none either. Never a wildcard.
+        artist_gate = artist_ok or (not b_ar_cc and not q_ar_c)
         if q_ar_c and b_ar_cc and q_ar_c == b_ar_cc:
             s += 50
         if q_ti_c and b_ti_cc:
             if q_ti_c == b_ti_cc:
                 s += 55
                 title_ok = True
-            elif (min(len(q_ti_c), len(b_ti_cc)) >= 6
-                    and (not b_ar_cc or artist_ok)
-                    and (q_ti_c in b_ti_cc or b_ti_cc in q_ti_c)):
+            elif (artist_gate
+                    and Handler._contain_ok(q_ti_c, b_ti_cc, variant)):
                 s += 40
                 title_ok = True
-        if q_both and q_both in base_norm:
+        # q_both = norm("artist title") vs the whole base. Anchored to the
+        # artist boundary (must start the base) and gated on artist agreement
+        # — floating containment matched any base that merely mentioned both.
+        if q_both and artist_gate and base_norm.startswith(q_both):
             s += 60
             title_ok = True
         return s, title_ok
 
-    def _innas(self, artist, title):
+    def _innas(self, artist, title, dur_s=None):
         """Best local file for an internet queue track (artist + title).
 
         The queue uses this to prefer the NAS copy of a song instead of
-        streaming it. Tolerant core-normalized match (ignores '(Remaster)',
-        '(Live)' tags, feat./multi-artist lines). Cached briefly so an
-        infinite queue doesn't hammer it per row."""
+        streaming it. Tolerant core-normalized match (ignores '(Remaster)'
+        tags, keeps 'Live'/'Remix' variants distinct, feat./multi-artist
+        lines). dur_s = caller's duration when known (sanity gate).
+        Cached briefly so an infinite queue doesn't hammer it per row."""
         state = self.state
         ar = (artist or "").strip()
         ti = (title or "").strip()
@@ -3537,6 +3556,8 @@ class Handler(BaseHTTPRequestHandler):
         scope = me  # always per-user: scope="" served A's staged hits to B
         key = "innas:{}\x00{}\x00{}".format(
             self._norm_core(ar), self._norm_core(ti), scope)
+        if dur_s:  # duration takes part in the verdict -> part of the key
+            key += "\x00%d" % int(float(dur_s) // 10)
         got = state.db.misc_get(key, 2 * 3600)
         if got is not None:
             return got
@@ -3550,15 +3571,15 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             if self._staging_hidden(base, _full, me):
                 continue
-            if " - " in base:
-                b_ar, b_ti = base.split(" - ", 1)
-                b_ar_c = self._norm_core(b_ar)
-                b_ti_c = self._norm_core(b_ti)
-            else:
-                b_ar_c, b_ti_c = "", self._norm_core(base)
+            b_ar, b_ti = self._split_base(base)
+            b_ar_c = self._norm_core(b_ar)
+            b_ti_c = self._norm_core(b_ti)
             s, title_ok = self._innas_score(
-                q_ar, q_ti, q_both, b_ar_c, b_ti_c, self._norm(base))
+                q_ar, q_ti, q_both, b_ar_c, b_ti_c, self._norm(base),
+                variant=(self._variant(b_ti) or self._variant(ti)))
             if s <= 0 or not title_ok:
+                continue
+            if dur_s and not self._dur_ok(dur_s, state.duration_for(_full)):
                 continue
             if s > best_score:
                 best_score = s
@@ -3588,7 +3609,8 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             try:
                 hit = self._innas(r.get("artist") or "",
-                                  r.get("title") or "")
+                                  r.get("title") or "",
+                                  r.get("duration_s"))
             except Exception:                         # noqa: BLE001
                 hit = None
             if hit and hit.get("found") and hit.get("url"):
@@ -3598,10 +3620,49 @@ class Handler(BaseHTTPRequestHandler):
         return rows
 
     @staticmethod
+    def _split_base(base):
+        """'Artist - Title' -> (artist, title); no dash -> ('', base) i.e.
+        artist unknown. Two or more dashes split on the LAST one so a
+        compound artist keeps its own dashes ('A - B - C' -> ('A - B','C'))."""
+        if " - " not in (base or ""):
+            return "", base or ""
+        head, tail = (base or "").rsplit(" - ", 1)
+        return head, tail
+
+    @staticmethod
+    def _variant(raw):
+        """Does this RAW title name a different recording (live/remix/
+        slowed/karaoke/cover/8D…)? Pure function — covered by local tests."""
+        return bool(_scorer.REJECT.search(raw or ""))
+
+    @staticmethod
+    def _contain_ok(q_c, b_c, variant=False):
+        """Shared containment gate for both NAS matchers: exact cores always
+        pass, otherwise the short side needs >=6 chars AND neither title may
+        be a recording variant — 'Song' never matches 'Song (Live)' or
+        'Song (8D Audio)', while '(feat. X)' leftovers still match."""
+        if q_c == b_c:
+            return True
+        if variant or min(len(q_c), len(b_c)) < 6:
+            return False
+        return q_c in b_c or b_c in q_c
+
+    @staticmethod
+    def _dur_ok(q_dur, f_dur):
+        """Duration sanity gate, only used when the CALLER's duration is
+        known: a NAS hit under 45s or over 2h is a clip/compilation, not the
+        song, and an otherwise-perfect match must not drift wildly either."""
+        if not q_dur or not f_dur:
+            return True
+        if f_dur < 45 or f_dur > 7200:
+            return False
+        return abs(f_dur - q_dur) <= max(20.0, 0.2 * float(q_dur))
+
+    @staticmethod
     def _title_of(base):
         """True song title from a 'Artist - Title' base_name (or the whole
         string if there is no artist separator)."""
-        return base.split(" - ", 1)[1].strip() if " - " in base else base
+        return Handler._split_base(base)[1].strip()
 
     @staticmethod
     def _split_artists(raw):
@@ -3612,14 +3673,34 @@ class Handler(BaseHTTPRequestHandler):
                           raw or "")
         return [p.strip() for p in parts if p and p.strip()]
 
-    def _innas_lenient(self, artist, title):
+    def _artist_on_page(self, page_artist, row_artist):
+        """Is a discography row's artist one of the page's artists? Compares
+        every part of a multi-artist credit ('A & B', 'A feat. B')."""
+        pc = self._norm_core(page_artist or "")
+        if not pc:
+            return True
+        for a in self._split_artists(row_artist or ""):
+            ac = self._norm_core(a)
+            if ac and (ac == pc or ac in pc or pc in ac):
+                return True
+        return False
+
+    def _hit_title_ok(self, hit_base, title_core):
+        """A lenient NAS hit may only be adopted for a row when it really is
+        that title — never overwrite bn/path with a different song."""
+        return self._norm_core(self._title_of(hit_base or "")) == title_core
+
+    def _innas_lenient(self, artist, title, dur_s=None):
         """Best single NAS base_name for an artist/title, or None.
 
         More tolerant than _innas: matches when the artist's core equals and
         the title core is either contained in the NAS title or the NAS title
         is contained in it (catches "In Da Club" vs "In da club (feat.)" and
         similar). Used to set the search-result "in NAS" cloud marker even when
-        the exact spelling differs."""
+        the exact spelling differs. Same guards as _innas_score: the artist
+        must agree (a dash-less base can never match a query that HAS an
+        artist) and short containment ("yo" inside "yoshimi") never counts.
+        dur_s = caller's duration when known (sanity gate)."""
         # Cached 2h like _innas (funnel audit 2026-10-11: this full-library
         # scan ran on EVERY resolve poll; scope key mirrors _innas).
         state = self.state
@@ -3628,6 +3709,8 @@ class Handler(BaseHTTPRequestHandler):
         _lkey = "inlen:{}\x00{}\x00{}".format(
             self._norm_core(artist or ""), self._norm_core(title or ""),
             scope)
+        if dur_s:  # duration takes part in the verdict -> part of the key
+            _lkey += "\x00%d" % int(float(dur_s) // 10)
         _got = state.db.misc_get(_lkey, 2 * 3600)
         if _got is not None:
             return _got.get("base") or None
@@ -3642,20 +3725,23 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             if self._staging_hidden(base, _full, self._me()):
                 continue
-            if " - " in base:
-                b_ar, b_ti = base.split(" - ", 1)
-                b_ar_c = self._norm_core(b_ar)
-                b_ti_c = self._norm_core(b_ti)
-            else:
-                b_ar_c, b_ti_c = "", self._norm_core(base)
-            if q_ar != b_ar_c and q_ar not in b_ar_c and \
-                    b_ar_c not in q_ar:
+            b_ar, b_ti = self._split_base(base)
+            b_ar_c = self._norm_core(b_ar)
+            b_ti_c = self._norm_core(b_ti)
+            # q_ar is non-empty here, so an empty b_ar_c (dash-less base)
+            # fails artist_ok -> never matches.
+            artist_ok = bool(b_ar_c and (q_ar == b_ar_c or q_ar in b_ar_c
+                                         or b_ar_c in q_ar))
+            if not artist_ok:
                 continue
             if q_ti == b_ti_c:
                 s = 60
-            elif q_ti and b_ti_c and (q_ti in b_ti_c or b_ti_c in q_ti):
+            elif self._contain_ok(q_ti, b_ti_c,
+                                  self._variant(b_ti) or self._variant(title)):
                 s = 45
             else:
+                continue
+            if dur_s and not self._dur_ok(dur_s, state.duration_for(_full)):
                 continue
             if s > best_score:
                 best_score = s
@@ -4888,6 +4974,23 @@ class Handler(BaseHTTPRequestHandler):
         if got:
             return got
         out = self.state.scorer.deezer_artist_albums(artist) or []
+        # Deezer under-covers some catalogues (no Tame Impala "That's All For
+        # Everyone", no Bb Trickz track "Trickstar"), so the artist page lost
+        # real tracks. YTMusic is the second source; its rows are already
+        # Deezer-shaped, so just merge them in (deezer wins on core title).
+        try:
+            yalbs, _ysongs = self.state.scorer.ytm_artist_rows(artist)
+        except Exception:                               # noqa: BLE001
+            yalbs = []
+        merged, seen = [], set()
+        for a in list(out) + list(yalbs or []):
+            k = self._album_core((a.get("album") or "").strip())
+            if not k or k in seen:
+                continue
+            seen.add(k)
+            merged.append(a)
+        if merged:
+            out = merged
         if out:
             self.state.db.misc_put(key, out)
         return out
@@ -4899,9 +5002,16 @@ class Handler(BaseHTTPRequestHandler):
         got = self.state.db.misc_get(key, 7 * 86400)
         if got is not None:
             return got
-        out = (self.state.scorer.deezer_album_tracks_by_id(album_id)
-               if album_id
-               else self.state.scorer.deezer_album_tracks(artist, album)) or []
+        # `ytm:` tagged ids came from the YTMusic discography merge in
+        # `_deezer_discography` — route them to YTMusic, never to Deezer
+        # (its /album/{id} wants a numeric id).
+        if album_id and str(album_id).startswith("ytm:"):
+            out = self.state.scorer.ytm_album_tracks(album_id) or []
+        else:
+            out = (self.state.scorer.deezer_album_tracks_by_id(album_id)
+                   if album_id
+                   else self.state.scorer.deezer_album_tracks(
+                       artist, album)) or []
         if out:
             self.state.db.misc_put(key, out)
         return out
@@ -5121,15 +5231,17 @@ class Handler(BaseHTTPRequestHandler):
 
         def _add(t, alb, aa, fallback_img=None):
             base = (t.get("base_name") or "").strip()
-            ti = (t.get("title") or
-                  (base.split(" - ", 1)[1] if " - " in base else base)
-                  or "").strip()
-            ar = (t.get("artist") or
-                  (base.split(" - ", 1)[0] if " - " in base else "")
-                  or aa).strip()
+            _sar, _sti = self._split_base(base)
+            ti = (t.get("title") or _sti or "").strip()
+            ar = (t.get("artist") or _sar or aa).strip()
             if not ti or self._is_live(ti) or self._is_live(base):
                 return
-            ck = (self._norm_core(ar), self._norm_core(ti))
+            # Discography rows are per-page: a row credited to another artist
+            # (compilations, mislabelled Deezer entries) must not show up.
+            if not self._artist_on_page(name, ar):
+                return
+            ti_core = self._norm_core(ti)
+            ck = (self._norm_core(ar), ti_core)
             if ck in seen:
                 return
             seen.add(ck)
@@ -5137,13 +5249,14 @@ class Handler(BaseHTTPRequestHandler):
             full = local_idx.get(bn)
             if full is not None and not self._lib_visible(bn, self._me()):
                 full = None
-            owned = full is not None or (
-                self._innas_lenient(ar, ti) is not None)
-            if full is None and owned:
-                hit = self._innas_lenient(ar, ti)
-                full = local_idx.get(hit) if hit else None
-                if hit:
-                    bn = hit
+            hit = None if full is not None else self._innas_lenient(
+                ar, ti, t.get("duration_s"))
+            if hit and not self._hit_title_ok(hit, ti_core):
+                hit = None   # lenient hit is a DIFFERENT song -> not owned
+            if hit:
+                full = local_idx.get(hit)
+                bn = hit
+            owned = full is not None or bool(hit)
             songs.append({
                 "base_name": bn, "path": full,
                 "exists": owned and full is not None,
