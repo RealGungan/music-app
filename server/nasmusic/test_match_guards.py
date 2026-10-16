@@ -4,7 +4,9 @@ Each test is the assert for one audited fix:
 1. _innas_score q_both: artist agreement + artist-boundary anchor.
 2. _innas_lenient: same >=6-char containment floor + artist required.
 3. _norm_core: qualifier tags drop, RECORDING VARIANTS stay.
-4. _split_base/_title_of: multi-dash bases split on the LAST ' - '.
+4. _split_base/_title_of: multi-dash bases split on the LAST ' - ', but a
+   bare qualifier/date tail ('- Remastered', '- July 8th, 1991)') never
+   becomes the title.
 5. Artist-page rows: row artist must be on the page; a lenient hit may not
    be adopted unless its title core is the row's title.
 Plus the cheap duration sanity gate (_dur_ok).
@@ -91,7 +93,7 @@ class InnasScoreQbothTest(unittest.TestCase):
 
 
 class SplitBaseTest(unittest.TestCase):
-    """Fix 4: multi-dash bases split on the LAST ' - '."""
+    """Fix 4: a bare qualifier/date tail is never a title (regression)."""
 
     def setUp(self):
         from . import httpd as _h
@@ -106,14 +108,51 @@ class SplitBaseTest(unittest.TestCase):
         self.assertEqual(self.split("AC/DC - T.N.T."),
                          ("AC/DC", "T.N.T."))
 
-    def test_two_dashes_split_on_last(self):
-        art, ti = self.split("Travis Scott - Highest in the Room - Remastered")
+    def test_two_dashes_still_split_on_last(self):
+        art, ti = self.split("Travis Scott - Highest in the Room - 2019")
         self.assertEqual(art, "Travis Scott - Highest in the Room")
-        self.assertEqual(ti, "Remastered")
-        self.assertEqual(self.h._title_of(
-            "Travis Scott - Highest in the Room - Remastered"), "Remastered")
+        self.assertEqual(ti, "2019")
 
-    def test_dashless_base_has_no_artist(self):
+    def test_qualifier_tail_falls_back_to_first_dash(self):
+        # Was (artist+title, 'Remastered') -> the whole title was garbage.
+        self.assertEqual(self.split("Metallica - Fade To Black - Remastered"),
+                         ("Metallica", "Fade To Black - Remastered"))
+        self.assertEqual(
+            self.h._title_of("Metallica - Fade To Black - Remastered"),
+            "Fade To Black - Remastered")
+
+    def test_date_tail_falls_back_to_first_dash(self):
+        self.assertEqual(
+            self.split("Artist - Song Title - July 8th, 1991)"),
+            ("Artist", "Song Title - July 8th, 1991)"))
+        self.assertEqual(
+            self.split("Artist - Song Title - February 5th, 1991)")[1],
+            "Song Title - February 5th, 1991)")
+
+    def test_qualifier_tail_no_artist_keeps_whole_base(self):
+        t = self.h._title_of("Fade To Black - Remastered")
+        self.assertEqual(t, "Fade To Black - Remastered")   # qualifier kept
+        self.assertIn("Fade To Black", t)
+        self.assertEqual(self.split("Fade To Black - Remastered"),
+                         ("", "Fade To Black - Remastered"))
+
+    def test_venue_tail_no_artist_is_sane(self):
+        art, ti = self.split("Live at Wembley - Reissue")
+        self.assertEqual(art, "")
+        self.assertEqual(ti, "Live at Wembley - Reissue")
+        self.assertNotEqual(ti, "Reissue")
+
+    def test_degenerate_side_is_not_a_split(self):
+        self.assertEqual(self.split("Artist - X"), ("", "Artist - X"))
+        self.assertEqual(self.split(" - Something"), ("", "- Something"))
+
+    def test_real_short_titles_untouched(self):
+        self.assertEqual(self.split("Weezer - Help"), ("Weezer", "Help"))
+        self.assertEqual(self.split("A Tribe Called Quest - Scenario"),
+                         ("A Tribe Called Quest", "Scenario"))
+        self.assertEqual(self.split("T.I. - Live Your Life"),
+                         ("T.I.", "Live Your Life"))
+        self.assertEqual(self.split("Blur - Song 2"), ("Blur", "Song 2"))
         self.assertEqual(self.split("Jóga"), ("", "Jóga"))
 
 

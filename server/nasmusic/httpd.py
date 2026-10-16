@@ -156,7 +156,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.311"
+APP_VERSION = "1.0.312"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -182,6 +182,16 @@ _PLAYLIST_ORDER_KEY = "playlist_order"
 # sink below assumes registered users may be hostile. Stdlib only.
 MAX_JSON_BODY = 2 * 1024 * 1024       # _body_json cap (memory-DoS guard)
 VID_RE = re.compile(r"[A-Za-z0-9_\-]{5,80}")   # YouTube video ids
+# _split_base: a trailing "- Remastered"/"- July 8th, 1991)" fragment is a
+# release/date tag, never a song title, so such a tail must not become one.
+# The tag must be the WHOLE tail (else 'Live Your Life' is a real title), and
+# only a bare year in parens ('1991)') — never a bare '1979' (a song).
+_MIN_SPLIT_SIDE = 2
+_TAIL_FRAGMENT = re.compile(
+    r"^(?:remaster\w*|live|demo|version|edit|mix|single|explicit|"
+    r"deluxe|bonus|mono|stereo|reissue)\s*(?:\d{4})?\s*(?:\([^)]*\))?$"
+    r"|\d{4}\)"
+    r"|^\w+ \d{1,2}(st|nd|rd|th),", re.IGNORECASE)
 MAX_TRACK_FIELD = 120                 # artist/title length cap
 MAX_COVER_CACHE = 200                 # _relay_image entries
 MAX_COVER_BYTES = 5 * 1024 * 1024     # single relayed image cap
@@ -3622,12 +3632,22 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _split_base(base):
         """'Artist - Title' -> (artist, title); no dash -> ('', base) i.e.
-        artist unknown. Two or more dashes split on the LAST one so a
-        compound artist keeps its own dashes ('A - B - C' -> ('A - B','C'))."""
-        if " - " not in (base or ""):
-            return "", base or ""
-        head, tail = (base or "").rsplit(" - ", 1)
-        return head, tail
+        artist unknown. Two or more dashes split on the LAST one so a compound
+        artist keeps its own dashes ('A - B - C' -> ('A - B','C')), UNLESS the
+        tail is a bare qualifier/date fragment ('Fade To Black - Remastered',
+        '... - July 8th, 1991)') or a side is degenerate — those titles came
+        back as 'Remastered'/'July 8th, 1991)'. Then the FIRST ' - ' wins, and
+        if that is degenerate too the whole base stays the title (qualifier
+        kept: 'Fade To Black - Remastered'), never a fragment."""
+        base = base or ""
+        if " - " not in base:
+            return "", base
+        for parts in (base.rsplit(" - ", 1), base.split(" - ", 1)):
+            head, tail = (p.strip() for p in parts)
+            if (len(head) >= _MIN_SPLIT_SIDE and len(tail) >= _MIN_SPLIT_SIDE
+                    and not _TAIL_FRAGMENT.match(tail)):
+                return head, tail
+        return "", base.strip()
 
     @staticmethod
     def _variant(raw):
