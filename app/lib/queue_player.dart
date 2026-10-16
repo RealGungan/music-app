@@ -67,11 +67,11 @@ class QueueItem {
   /// likedStatus roundtrip in the prefetch wave).
   final bool? liked;
 
-  /// Known total in ms (server metainfo / Deezer duration_s): pre-seeds the
-  /// readout when the stream itself omits its duration (chunked relay never
-  /// emits onDurationChanged → total stuck at –:––). A measured stream value
-  /// always wins — this is only the fallback.
-  final int? durationMs;
+/// Known total in ms (server metainfo / Deezer duration_s): pre-seeds the
+/// readout when the stream itself omits its duration (chunked relay never
+/// emits onDurationChanged → total stuck at –:––). A measured stream value
+/// always wins — this is only the fallback.
+  int? durationMs;
   QueueItem(
     this.title,
     this.url, {
@@ -86,8 +86,19 @@ class QueueItem {
     this.lyricsArtist,
     this.lyricsTitle,
     this.liked,
+    this.preview = false,
     this.durationMs,
-  });
+  }) {
+    // A Deezer preview fallback is ALWAYS a ~30s clip: seed the readout with
+    // 30s so the bar shows 0:30 instead of sitting at –:–– (chunked relays
+    // never emit onDurationChanged). Set once, here, so every construction
+    // site (tap, prefetch, pre-push, rebase) carries it.
+    if (preview && durationMs == null) durationMs = 30000;
+  }
+
+  /// True when this item is a 30s Deezer preview (server fell back because
+  /// YouTube could not resolve it). Shown labeled, and completed in 30s.
+  bool preview;
 
   /// Copy with a new url (base-flip rebase): identity/display untouched.
   QueueItem withUrl(String u) => QueueItem(
@@ -104,9 +115,17 @@ class QueueItem {
         lyricsArtist: lyricsArtist,
         lyricsTitle: lyricsTitle,
         liked: liked,
+        preview: preview,
         durationMs: durationMs,
       );
 }
+
+/// Seconds in a Deezer preview clip (all Deezer previews are 30s).
+const int previewSecs = 30;
+
+/// "Preview · 30s" label for a preview row (localized by the caller).
+String previewLabel(String translatedWord) =>
+    '$translatedWord · $previewSecs';
 
 /// Instant placeholder for a Spotify /track/ deep-link parse ([OpenLink]
 /// from /api/open-url): plays immediately; the engine fills the stream URL
@@ -127,8 +146,11 @@ QueueItem spotifyDeepLinkItem(OpenLink info, {String? art}) {
   );
 }
 
-/// Turns a discovery [videoId] into a direct streamable audio URL.
-typedef UrlResolver = Future<String> Function(String videoId);
+/// Turns a discovery [videoId] into a direct streamable audio URL. [preview]
+/// is true when the server could not resolve YouTube and handed back a
+/// Deezer 30s clip instead.
+typedef UrlResolver =
+    Future<({String url, bool preview})> Function(String videoId);
 
 /// Turns an [artist]+[title] pair into a streamable URL + art (for
 /// online album/artist rows that have no video id yet). Returns url + thumb
@@ -142,6 +164,7 @@ typedef NameResolver =
           String? videoId,
           String? album,
           int? durationS,
+          bool preview,
         })>
     Function(String artist, String title);
 
@@ -273,6 +296,13 @@ StallFix stallAudit({
   return StallFix.none;
 }
 
+/// Consecutive frozen-clock counter (pure, unit-tested): how many 1s audit
+/// samples have seen a native position that did NOT move. Reset on any
+/// movement. Sampled at 1s, a run of 2 == 2s of frozen position under an
+/// engine "playing" claim — the player died without a focus event.
+int frozenRun({required bool advanced, required int prev}) =>
+    advanced ? 0 : prev + 1;
+
 /// Headless-advance pre-push selector (pure, unit-tested): index of the track
 /// the handler must auto-start on natural completion while the UI isolate
 /// sleeps (screen off / Doze — no Dart timers run there). Repeat-one replays
@@ -299,6 +329,22 @@ bool needsPushResolve(QueueItem it) =>
     it.url.contains('/staging/resolve/') ||
     it.resolveName != null;
 
+/// Did the player really play the current item to its end (pure, unit-
+/// tested) — the completion handler's anti-dropout decision.
+/// A track that stops far from its total is a dead stream and gets healed;
+/// but a Deezer PREVIEW is only ~30s, and a chunked relay routinely reports a
+/// stale/seeded total, so "far from end" there is normal — advancing is what
+/// the user expects when the clip runs out.
+bool completionIsFinish({
+  required int positionSec,
+  required int durationSec,
+  required bool isPreview,
+}) {
+  if (isPreview) return true;
+  if (durationSec <= 0) return true; // unknown total: advance (pre-existing)
+  return positionSec >= durationSec - 5;
+}
+
 /// App-wide playback queue with shuffle — the "streaming engine".
 class QueuePlayer {
   QueuePlayer._() {
@@ -313,8 +359,11 @@ class QueuePlayer {
       // when we switched) — ignore them entirely.
       if (DateTime.now().difference(_lastPlayStartAt).inSeconds < 3) return;
       final dur = trackDuration.value;
-      if (dur > Duration.zero &&
-          currentPosition < dur - const Duration(seconds: 5)) {
+      if (!completionIsFinish(
+        positionSec: currentPosition.inSeconds,
+        durationSec: dur.inSeconds,
+        isPreview: current?.preview ?? false,
+      )) {
         debugPrint('[queue] completion far before end — treating as dropout');
         DiagLog.restart.log(
           'complete-dropout pos=${currentPosition.inSeconds}s '
@@ -483,29 +532,39 @@ class QueuePlayer {
         _healCurrent(reason: 'stall');
       }
     });
-    // Stall detector: the engine CLAIM vs NATIVE clock, sampled every 3s.
-    // A frozen clock under a playing claim (dead socket with no complete/
-    // error) — or a moving clock under a paused claim (lost resume event) —
-    // re-feeds the native truth through the state stream, which is the
-    // skin's sole source, so the lie corrects itself within one tick.
-    // Repaint-only: the handler keeps actual audio state, so a false
-    // positive self-reverses on the next tick instead of killing sound.
-    _auditTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+    // Stall detector: the engine CLAIM vs NATIVE clock, sampled every 1s
+    // (was 10s — far too slow for a player that dies without any focus
+    // event: the skin sat on "playing" for ten seconds over dead audio).
+    // A frozen clock for 2s under a playing claim (dead socket/player, no
+    // complete/error and no focus event) — or a moving clock under a paused
+    // claim (lost resume event) — re-feeds the native truth through the
+    // state stream, which is the skin's sole source, so the lie corrects
+    // itself within two ticks. Repaint-only: the handler keeps actual audio
+    // state, so a false positive self-reverses on the next tick instead of
+    // killing sound.
+    _auditTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
         _auditPos = position.value;
+        _auditFrozen = 0;
         return;
       }
       if (!_player.isPlaying) {
         _auditPos = position.value;
+        _auditFrozen = 0;
         return;
       }
       if (items.isEmpty || index < 0 || index >= items.length) {
         _auditPos = position.value;
+        _auditFrozen = 0;
         return;
       }
       final pos = position.value;
       final advanced = pos != _auditPos;
       _auditPos = pos;
+      // 1s samples: two consecutive frozen ones == a 2s frozen native
+      // position. One frozen tick is normal (seek/reload jitter), so the
+      // run counter — not a single tick — is what forces the repaint.
+      _auditFrozen = frozenRun(advanced: advanced, prev: _auditFrozen);
       final fix = stallAudit(
         enginePlaying: _player.isPlaying,
         posAdvanced: advanced,
@@ -518,8 +577,31 @@ class QueuePlayer {
           DateTime.now().difference(_lastPlayStartAt).inSeconds < 20) {
         return;
       }
+      // toPaused waits for the 2s frozen RUN (one frozen tick is seek /
+      // reload jitter, not a dead player); toPlaying stays single-tick — a
+      // moving clock under a paused claim can never be jitter.
+      if (fix == StallFix.toPaused && _auditFrozen < _auditFrozenLimit) {
+        return;
+      }
       final p = _player;
       if (p is! RemoteEngine) return;
+      // Evidence BEFORE the correction lands: the client-log row naming
+      // which path lied (skin vs the engine's claim vs the handler's own
+      // last-known state). Section 'playback'; logClientError stamps av.
+      if (skinMismatch(skinShows: playingN.value, nativePlaying: advanced)) {
+        report(
+          'skin-mismatch',
+          '${skinMismatchMessage(
+            skinShows: playingN.value,
+            nativePlaying: advanced,
+            engine: p.lastStateName,
+            handler: p.lastStateName,
+          )} '
+          'src=${fix == StallFix.toPaused ? 'frozen-pos' : 'moving-pos'} '
+          'pos=${pos.inSeconds}s frozen=${_auditFrozen}s idx=$index '
+          '"${items[index].title}"',
+        );
+      }
       p.feedRemoteEvent({
         'ev': 'state',
         's': fix == StallFix.toPaused ? 'paused' : 'playing',
@@ -734,12 +816,17 @@ class QueuePlayer {
   Duration _watchPos = Duration.zero;
   DateTime _watchSince = DateTime.now();
 
-  /// Stall-detector baseline: native position at the last 3s audit tick.
+  /// Stall-detector baseline: native position at the last 1s audit tick.
   // App-lifetime audit (singleton player); never cancelled.
   // ignore: unused_field
   // ignore: unused_field — held so the audit lives as long as the app.
   Timer? _auditTimer;
   Duration _auditPos = Duration.zero;
+
+  /// Consecutive 1s audit samples that saw a frozen native position, and
+  /// the run length that forces the paused repaint. Two ticks == 2s frozen.
+  static const _auditFrozenLimit = 2;
+  int _auditFrozen = 0;
 
   bool _shuffle = false;
 
@@ -770,6 +857,7 @@ class QueuePlayer {
         videoId: r.videoId.isNotEmpty ? r.videoId : null,
         album: r.album,
         durationS: r.durationS,
+        preview: r.preview,
       );
     };
     nasLookup = (artist, title) async {
@@ -1366,24 +1454,88 @@ class QueuePlayer {
 
   /// Called on app resume (UI isolate may have slept while the handler
   /// kept playing/paused). Awaits handler truth via
-  /// [RemoteEngine.resync]: state/pos/dur events re-feed the existing
-  /// broadcast listeners (attached once in the constructor — never
-  /// detached, so nothing to re-attach), correcting a stale [playing]
-  /// that froze the play button. [stateSyncing] stays true until the
-  /// repaint lands, so the UI blocks taps on the stale icon meanwhile.
+  /// [RemoteEngine.queryTruthDirect]: the handler's own getState answer,
+  /// written straight into the single playing truth. [stateSyncing] stays true
+  /// until it lands, so the UI blocks taps on the stale icon meanwhile.
   /// Position is restored from the handler's clock, never zeroed.
   /// No-op on desktop (local engine).
-  Future<void> onResumed() {
+  ///
+  /// NOT via [RemoteEngine.resync]: that path is gated on the engine's
+  /// `_remoteUp` latch, which is cleared whenever a send finds the port
+  /// missing. A resume landing in that window never queried the handler at all
+  /// and fell through to the local-only correction — which forces `paused`
+  /// over audio that never stopped, then a second tap "resumes" a song that
+  /// was already playing. Here the port is asked directly; only a genuinely
+  /// absent port falls back to resync's local correction.
+  Future<void> onResumed({String src = 'resume'}) {
     final p = _player;
-    if (p is RemoteEngine) {
-      // Interrupt-resync hook: this IS the live path (app resume +
-      // focus regain both land here — main.dart), so the row proves the
-      // resync fired instead of vanishing into a swallowed catch.
-      report('resync', 'fired playing=$playing items=${items.length}');
-      stateSyncing.value = true;
-      return p.resync().whenComplete(() => stateSyncing.value = false);
+    // Snapshot BEFORE the query: the report names the icon that was lying.
+    final skinBefore = playingN.value;
+    if (p is! RemoteEngine) {
+      _traceResume(src, 'n/a', 'local', skinBefore, 'n/a');
+      return Future.value();
     }
-    return Future.value();
+    stateSyncing.value = true;
+    // Entry line, logged synchronously: a resume whose RESULT line never
+    // arrives is a suspended-isolate/timing problem, NOT a dead hook. Only
+    // the absence of THIS line means onResumed never ran.
+    _traceResume(src, '${p.handlerPortAlive}', '...', skinBefore, '...');
+    return p
+        .queryTruthDirect()
+        .then((truth) {
+          if (truth == null) {
+            _traceResume(src, '${p.handlerPortAlive}', 'TIMEOUT', skinBefore,
+                'fallback-resync');
+            return p.resync();
+          }
+          final shows = truth == PlayerState.playing;
+          _traceResume(src, '${p.handlerPortAlive}', truth.name, skinBefore,
+              '$shows');
+          if (skinMismatch(skinShows: skinBefore, nativePlaying: shows)) {
+            report(
+              'skin-mismatch',
+              '${skinMismatchMessage(
+                skinShows: skinBefore,
+                nativePlaying: shows,
+                engine: engineStateName,
+                handler: handlerStateName,
+              )} src=$src items=${items.length}',
+            );
+          }
+          // The single playing truth, written HERE rather than left to the
+          // state stream: mini + full both listen to playingN, so this one
+          // write repaints both in the same frame.
+          _lastPlayerState = truth;
+          playingN.value = shows;
+        })
+        .catchError((Object e) {
+          _traceResume(src, '${p.handlerPortAlive}', 'THREW', skinBefore,
+              'no');
+        })
+        .whenComplete(() => stateSyncing.value = false);
+  }
+
+  /// Resume-sync telemetry, one line per stage, kind `resume-sync`.
+  /// `called|port-ok|says|skin|wrote` — read together with the handler's
+  /// own rows this answers: did the hook run, was the port there, did the
+  /// query cross the isolate bridge, and did the icon get written.
+  void _traceResume(
+    String src,
+    String portOk,
+    String says,
+    bool skin,
+    String wrote,
+  ) {
+    report('resume-sync',
+        'src=$src called port-ok=$portOk says=$says skin=$skin wrote=$wrote');
+  }
+
+  /// App-start trace (no query): proves the resume-sync path is armed in
+  /// this process before any foreground event can fire it.
+  void traceResumeSyncAtStart() {
+    final p = _player;
+    _traceResume('app-start', p is RemoteEngine ? '${p.handlerPortAlive}' : 'n/a',
+        'skip', playingN.value, 'no');
   }
 
   /// Visible-screen truth poll (500ms, fire-and-forget): re-asks the
@@ -1821,7 +1973,9 @@ class QueuePlayer {
       if (vid != null &&
           url.contains('/staging/resolve/') &&
           resolver != null) {
-        url = await resolver!(vid).timeout(const Duration(seconds: 10));
+        final res = await resolver!(vid)
+            .timeout(const Duration(seconds: 10));
+        url = res.url;
         // A newer play request won while we resolved; never overwrite the
         // old item's URL nor start playback for it.
         if (gen != _playGen) return null;
@@ -1839,12 +1993,16 @@ class QueuePlayer {
           resolveName: item.resolveName,
           manuallyPlaced: item.manuallyPlaced,
           fromInternet: item.fromInternet,
+          preview: res.preview,
           album: item.album,
           albumImage: item.albumImage,
           lyricsArtist: item.lyricsArtist,
           lyricsTitle: item.lyricsTitle,
           durationMs: item.durationMs,
         );
+        // Late fill (the resolve decided it is a 30s Deezer preview): ping
+        // title listeners so Now Playing can label it without a track switch.
+        currentTitle.notifyListeners();
       } else if (item.resolveName != null && nameResolver != null) {
         var rn = item.resolveName!;
         // The tapped song is resolved by the caller, so it already has a real
@@ -1869,6 +2027,7 @@ class QueuePlayer {
           resolveName: item.resolveName,
           manuallyPlaced: item.manuallyPlaced,
           fromInternet: item.fromInternet,
+          preview: res.preview,
           album: res.album ?? item.album,
           albumImage: item.albumImage,
           lyricsArtist: item.lyricsArtist,
@@ -2792,19 +2951,20 @@ class QueuePlayer {
     if (isOffline.value) return null;
     try {
       if (it.videoId != null && resolver != null) {
-        final url = await resolver!(
+        final res = await resolver!(
           it.videoId!,
         ).timeout(const Duration(seconds: 8));
-        if (url.isEmpty) return null;
+        if (res.url.isEmpty) return null;
         return QueueItem(
           it.title,
-          url,
+          res.url,
           thumbUrl: it.thumbUrl,
           baseName: it.baseName,
           videoId: it.videoId,
           resolveName: it.resolveName,
           manuallyPlaced: it.manuallyPlaced,
           fromInternet: it.fromInternet,
+          preview: res.preview,
           album: it.album,
           albumImage: it.albumImage,
           lyricsArtist: it.lyricsArtist,
@@ -2975,13 +3135,13 @@ class QueuePlayer {
         (it.url.contains('/staging/resolve/') || it.resolveName != null) &&
         resolver != null) {
       resolver!(it.videoId!)
-          .then((u) {
+          .then((res) {
             if (n < items.length &&
                 identical(items[n], it) &&
                 it.videoId == items[n].videoId) {
               items[n] = QueueItem(
                 it.title,
-                u,
+                res.url,
                 thumbUrl: it.thumbUrl,
                 baseName: it.baseName,
                 videoId: it.videoId,
@@ -2991,6 +3151,7 @@ class QueuePlayer {
                 resolveName: it.resolveName,
                 manuallyPlaced: it.manuallyPlaced,
                 fromInternet: it.fromInternet,
+                preview: res.preview,
                 album: it.album,
                 albumImage: it.albumImage,
                 lyricsArtist: it.lyricsArtist,
@@ -3080,7 +3241,7 @@ class QueuePlayer {
         // Placeholder: nothing cacheable until resolved to http.
         if (vid == null || resolver == null) return;
         try {
-          url = await resolver!(vid).timeout(const Duration(seconds: 10));
+          url = (await resolver!(vid).timeout(const Duration(seconds: 10))).url;
         } catch (_) {
           return;
         }

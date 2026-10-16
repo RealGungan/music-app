@@ -450,6 +450,11 @@ class ResolvedName {
   /// the lyrics key so lyrics match what is really playing.
   final String? resolvedArtist;
   final String? resolvedTitle;
+
+  /// True when the server could not resolve YouTube for this song and
+  /// answered with Deezer's 30s preview clip instead (preview_sec of it).
+  final bool preview;
+  final int? previewSec;
   ResolvedName({
     required this.url,
     required this.videoId,
@@ -460,6 +465,8 @@ class ResolvedName {
     this.durationS,
     this.resolvedArtist,
     this.resolvedTitle,
+    this.preview = false,
+    this.previewSec,
   });
 
   factory ResolvedName.fromJson(Map<String, dynamic> j) => ResolvedName(
@@ -472,6 +479,8 @@ class ResolvedName {
     durationS: (j['duration_s'] as num?)?.toInt(),
     resolvedArtist: j['resolved_artist'],
     resolvedTitle: j['resolved_title'],
+    preview: j['preview'] == true,
+    previewSec: (j['preview_sec'] as num?)?.toInt(),
   );
 }
 
@@ -1734,18 +1743,28 @@ class ApiClient {
   /// relay does (the NAS's datacenter path is throttled to ~5 KB/s, but the
   /// phone gets the same stream instantly). Falls back to the NAS relay
   /// (`/api/stream`) if the direct URL can't be resolved.
-  Future<String> resolve(String videoId) async {
+  ///
+  /// `preview` = the server answered with Deezer's 30s clip (YouTube egress
+  /// from the NAS is IP-throttled), so the caller can label it and expect it
+  /// to end after 30s.
+  Future<({String url, bool preview})> resolve(String videoId) async {
     try {
       final j = _decode(await _client.get(_uri('/api/resolve/$videoId')));
       final url = (j['url'] as String?) ?? '';
+      final preview = j['preview'] == true;
       // Rebuild relay URLs from our own base (server-minted host dies
       // on funnel/non-default ports — see relayUrl).
-      if (url.contains('/staging/api/stream')) return relayUrl(videoId);
-      if (url.isNotEmpty) return url;
+      if (url.contains('/staging/api/stream')) {
+        return (url: relayUrl(videoId), preview: preview);
+      }
+      if (url.isNotEmpty) return (url: url, preview: preview);
     } catch (_) {
       // fall through to relay
     }
-    return _tok('$_base/staging/api/stream?vid=$videoId');
+    return (
+      url: _tok('$_base/staging/api/stream?vid=$videoId'),
+      preview: false,
+    );
   }
 
   /// Fire-and-forget warm-up: tell the server to resolve/cache this video's

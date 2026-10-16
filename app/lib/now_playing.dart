@@ -54,6 +54,16 @@ String? nowPlayingAlbum(String? metaAlbum, String? itemAlbum) {
 /// over a soft dim, while the album art itself flies in from the mini
 /// player's thumbnail via a shared Hero ([kPlayerArtHeroTag]) — a smooth
 /// YouTube-Music-style expansion. Reverses on close.
+/// "Preview · 30s" marker for a 30s Deezer preview clip — the server fell
+/// back to it because YouTube could not resolve the song, and a 30s clip
+/// must never read as a truncated full track.
+Widget previewLabelChip() => Text(
+      previewLabel(tr('Preview')),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(color: Colors.orangeAccent, fontSize: 12),
+    );
+
 class NowPlayingRoute extends PageRouteBuilder<void> {
   NowPlayingRoute()
     : super(
@@ -211,11 +221,15 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
     qp.currentTitle.addListener(_prewarmShare);
     qp.currentTitle.addListener(_clearSeekStateOnTrackChange);
     _prewarmShare();
-    // Visible-screen truth poll (1s): re-asks the handler for native truth
-    // via getState; the reply feeds playingN, which rebuilds every button
-    // directly. No watchdog compare/setState needed — one notifier means
-    // the skin cannot disagree with itself. Bg-gated (resumed only).
-    _truthPoll = Timer.periodic(const Duration(seconds: 2), (_) {
+    // Visible-screen truth poll (1s): re-asks the handler DIRECTLY for
+    // native truth via getState; the reply feeds playingN, which rebuilds
+    // every button directly. No watchdog compare/setState needed — one
+    // notifier means the skin cannot disagree with itself. Bg-gated
+    // (resumed only). Was 2s: a native MediaPlayer-JNI pause on external
+    // focus loss lands OUTSIDE Dart, so 2s of stale "playing" was the
+    // user's double-tap. 1s also covers the whole <10s window after any
+    // external-focus signal — no separate fast/slow mode needed.
+    _truthPoll = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
         return;
@@ -2063,6 +2077,12 @@ class _MetaSectionState extends State<_MetaSection> {
                     fontWeight: FontWeight.w500,
                   ),
                 ),
+              // 30s Deezer preview (YouTube egress blocked): say so, so the
+              // clip is never read as a truncated song.
+              if (qp.current?.preview ?? false) ...[
+                const SizedBox(height: 4),
+                previewLabelChip(),
+              ],
               const SizedBox(height: 10),
               // Artist + album side by side (red mark): each box caps at
               // half width but shrinks to its content when shorter —
@@ -2559,6 +2579,8 @@ class _QueueSheetState extends State<_QueueSheet> {
   /// Small secondary label for a queue row: the artist/group when known, the
   /// album, or "from internet" for online autoplay rows.
   static Widget? _queueSubtitle(QueueItem it) {
+    // A preview row says so instead of its album: the clip is not the song.
+    if (it.preview) return previewLabelChip();
     final group = _splitArtistsFromTitle(it.title);
     if (group.isNotEmpty && group != _songName(it.title)) {
       return Text(
@@ -2586,6 +2608,7 @@ class _QueueSheetState extends State<_QueueSheet> {
     }
     return null;
   }
+
 
   /// The "Artist - Song" prefix before the separator, or empty when the
   /// string has no separator.
