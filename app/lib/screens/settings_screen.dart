@@ -616,6 +616,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
               },
             ),
           ),
+          ValueListenableBuilder<bool>(
+            valueListenable: QueuePlayer.instance.variantsEnabled,
+            builder: (_, on, __) => SwitchListTile(
+              secondary: const Icon(Icons.album),
+              title: Text(tr('Lives & versions')),
+              subtitle: Text(
+                tr('Show live and alternate-version songs in results.'),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              value: on,
+              onChanged: (v) {
+                QueuePlayer.instance.setVariantsEnabled(v);
+              },
+            ),
+          ),
           ]),
           _sectionCard(tr('Connection'), [
           ListTile(

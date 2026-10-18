@@ -220,6 +220,15 @@ class MetaInfo {
   );
 }
 
+/// Tolerant int parse for JSON fields that aren't always well-typed: the
+/// server can hand us an int, a double (SQLite `REAL` durations) or a
+/// numeric string, and a hard `as int?` throws the whole page away.
+int? _asInt(Object? v) {
+  if (v is int) return v;
+  if (v is num) return v.toInt();
+  return int.tryParse('$v');
+}
+
 /// One playable song inside an artist/album page.
 class ArtistSong {
   final String baseName;
@@ -275,9 +284,9 @@ class ArtistAlbum {
     album: j['album'] ?? '',
     albumArtist: j['album_artist'],
     image: j['image'],
-    tracks: j['tracks'] ?? 0,
-    owned: j['owned'] ?? 0,
-    albumId: (j['album_id'] as num?)?.toInt(),
+    tracks: _asInt(j['tracks']) ?? 0,
+    owned: _asInt(j['owned']) ?? 0,
+    albumId: _asInt(j['album_id']),
     type: j['type'] ?? 'album',
   );
 }
@@ -983,7 +992,7 @@ class PlaylistEntry {
       exists: j['exists'] ?? false,
       url: j['url'],
       albumImage: p(j['album_image']),
-      durationS: j['duration_s'] as int?,
+durationS: _asInt(j['duration_s']),
       addedAt: (j['added_at'] as num?)?.toDouble(),
       liked: j['liked'] == true,
       inNas: (j['in_nas'] ?? j['exists']) == true,

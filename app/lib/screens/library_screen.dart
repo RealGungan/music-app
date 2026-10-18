@@ -259,6 +259,10 @@ class LibraryScreen extends StatefulWidget {  const LibraryScreen({super.key, re
 
 class _LibraryScreenState extends State<LibraryScreen> {
   List<PlaylistInfo> _playlists = [];
+  // Names deleted in this session whose row is still authoritative: both
+  // the local MetaCache snapshot and a just-missed server list can carry the
+  // pre-delete row, which would resurrect it on the next merge.
+  final Set<String> _pendingDeleted = {};
   bool _loading = true;
   String _error = '';
   // 0 = full list (reorderable), 1 = covers grid, 2 = compact list.
@@ -359,7 +363,9 @@ Future<void> _load({bool forceOnline = false}) async {
     setState(() {
       _loading = local.isEmpty;
       _error = '';
-      if (local.isNotEmpty) _playlists = local;
+      if (local.isNotEmpty) {
+        _playlists = local.where((p) => !_pendingDeleted.contains(p.name)).toList();
+      }
     });
     if (offline) {
       // Offline with nothing cached used to spin forever (_loading stuck
@@ -386,7 +392,7 @@ Future<void> _load({bool forceOnline = false}) async {
           .timeout(kPlaylistsTimeout);
       if (!mounted) return;
       setState(() {
-        _playlists = pls;
+        _playlists = pls.where((p) => !_pendingDeleted.contains(p.name)).toList();
         _loading = false;
         _error = '';
       });
@@ -648,6 +654,9 @@ Future<void> _load({bool forceOnline = false}) async {
     // Optimistic: vanish from the view instantly; the server confirms
     // in the background (its list cache lags a plain reload).
     setState(() => _playlists.removeWhere((p) => p.name == pl.name));
+    // Authoritative until a load has run WITH this name still marked: the
+    // local snapshot and the server list cache both hold the pre-delete row.
+    _pendingDeleted.add(pl.name);
     // Snapshot entries for undo in the BACKGROUND: awaiting it in front of
     // the setState was the multi-second "still there" stall. It fills `bases`
     // in place, so an undo tap later still gets the full order.
@@ -668,11 +677,13 @@ Future<void> _load({bool forceOnline = false}) async {
     } catch (e) {
       if (mounted) {
         await _load();
+        _pendingDeleted.remove(pl.name);
         toast(context, "${tr('Failed')}: $e", icon: Icons.error_outline);
       }
       return;
     }
     await _load();
+    _pendingDeleted.remove(pl.name);
   }
 
   /// Restore a just-deleted playlist (undo): recreate + re-add entries
@@ -687,8 +698,10 @@ Future<void> _load({bool forceOnline = false}) async {
     } catch (_) {
       // Delete never landed: it's already back in the list (the delete path
       // reloaded + toasted), so there is nothing to undo.
+      _pendingDeleted.remove(name);
       return;
     }
+    _pendingDeleted.remove(name);
     try {
       await widget.api.createPlaylist(name);
       for (final b in bases) {

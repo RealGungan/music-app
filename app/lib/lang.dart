@@ -596,6 +596,8 @@ const Map<String, String> _es = {
       'Aleatorio es para reproducir listas',
   'Shuffle off': 'Aleatorio off',
   'Shuffle on': 'Aleatorio on',
+  'Show live and alternate-version songs in results.':
+      'Mostrar canciones en vivo y versiones alternativas en los resultados.',
   'Shuffle playlist': 'Lista aleatoria',
   'Signed in': 'Sesión iniciada',
   'Singles': 'Sencillos',

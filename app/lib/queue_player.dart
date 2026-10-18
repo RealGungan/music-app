@@ -402,6 +402,18 @@ final RegExp _deadStreamRe = RegExp(r'\b(404|410|500|502|503|504)\b');
 
 bool deadStreamError(String e) => _deadStreamRe.hasMatch(e);
 
+/// Live / alternate-version markers, mirroring the server's scorer.py REJECT
+/// list + httpd.py `_is_live`. Word-bounded so "Olive" / "Believe" survive.
+/// Lives here (not in search_screen) so the search list AND the autoplay
+/// refill share one definition behind `variantsEnabled`.
+final RegExp _variantTokens = RegExp(
+  r'\b(live|lives|concert|unplugged|remix|karaoke|instrumental|'
+  r'sped\s+up|slowed|remaster(ed)?|demo|acoustic|nightcore|8d)\b|en concert',
+  caseSensitive: false,
+);
+
+bool isVariantRow(String title) => _variantTokens.hasMatch(title);
+
 /// The result of one dead-stream identity swap: [url] to replay (null =
 /// nothing was swapped), plus what it carries. [spent] means this play
 /// attempt used its swap — the caller latches even when the resolve failed,
@@ -1087,10 +1099,16 @@ class QueuePlayer {
   static const _restoreFlagKey = 'queue.restoreEnabled';
   static const _restoreDataKey = 'queue.restore';
 
+  /// OFF = studio/original only; ON = keep live/remix/karaoke rows. Feeds
+  /// BOTH the search list and the autoplay refill, off [isVariantRow].
+  final ValueNotifier<bool> variantsEnabled = ValueNotifier(false);
+  static const _variantsKey = 'queue.variantsEnabled';
+
   Future<void> loadAutoplay() async {
     final prefs = await SharedPreferences.getInstance();
     autoplayEnabled.value = prefs.getBool(_autoplayKey) ?? true;
     restoreQueueEnabled.value = prefs.getBool(_restoreFlagKey) ?? false;
+    variantsEnabled.value = prefs.getBool(_variantsKey) ?? false;
   }
 
   Future<void> _persistAutoplay() async {
@@ -1106,6 +1124,12 @@ class QueuePlayer {
   Future<void> _persistRestoreFlag() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_restoreFlagKey, restoreQueueEnabled.value);
+  }
+
+  void setVariantsEnabled(bool on) {
+    variantsEnabled.value = on;
+    final p = SharedPreferences.getInstance();
+    p.then((prefs) => prefs.setBool(_variantsKey, on));
   }
 
   /// Called once at startup (beside loadAutoplay). Goes through playList so
@@ -2953,6 +2977,7 @@ class QueuePlayer {
       final candMap = <String, QueueItem>{};
       for (final it in rel) {
         if (it.title.isEmpty) continue;
+        if (!variantsEnabled.value && isVariantRow(it.title)) continue;
         // First occurrence wins on key collisions (planner emits unique keys).
         candMap.putIfAbsent(_itemKey(it), () => it);
       }

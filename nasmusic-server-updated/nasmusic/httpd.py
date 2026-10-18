@@ -156,7 +156,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.318"
+APP_VERSION = "1.0.319"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -3609,31 +3609,71 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------------------------------------------------- metainfo
     def _entry_meta(self, base):
-        meta = self.state.db.song_meta_get(base)
+        db = self.state.db
+        meta = db.song_meta_get(base)
         if meta:
-            d = {
-                "base_name": base,
-                "artist": meta.get("artist"),
-                "album": meta.get("album"),
-                "album_artist": meta.get("album_artist"),
-                "album_image": meta.get("album_image"),
-            }
             artist = meta.get("artist")
         else:
             lead = base.split(" - ", 1)[0].strip() if " - " in base else ""
             artist = lead or None
-            d = {"base_name": base, "artist": artist,
-                 "album": None, "album_artist": None, "album_image": None}
-        # Total-duration backfill for streams that omit it (chunked relay
-        # never emits a duration): Deezer studio duration, cached 90d.
-        # Best-effort — never breaks the payload.
-        try:
-            title = base.split(" - ", 1)[1].strip() if " - " in base else ""
-            dur = self._studio_duration(artist or "", title) if title else None
-            if isinstance(dur, (int, float)) and dur > 0:
-                d["duration_s"] = int(dur)
-        except Exception:                                # noqa: BLE001
-            pass
+        d = {"base_name": base, "artist": artist,
+             "album": (meta or {}).get("album"),
+             "album_artist": (meta or {}).get("album_artist"),
+             "album_image": (meta or {}).get("album_image")}
+        # `.{ext}` is a display placeholder: local_mp3_index keys on
+        # basename[:-4] (state.py) and most DB rows omit it, so resolve a
+        # canonical key for every local lookup — same as _relay_cover does.
+        cb = base.replace(".{ext}", "") if ".{ext}" in base else base
+        dl = db.find_download_by_base(base)
+        if dl is None and cb != base:
+            dl = db.find_download_by_base(cb)
+
+        # Duration backfill for streams that omit it (chunked relay never
+        # emits one), cheapest local source first so the common case never
+        # blocks on the network:
+        #   1. downloads.duration_s   (one indexed lookup, db.py)
+        #   2. track_durations        (ffprobe cache for the local file)
+        #   3. Deezer studio duration (cached 90d — the only network hop)
+        dur = None
+        if dl and dl["duration_s"]:
+            dur = dl["duration_s"]
+        if dur is None:
+            full = self.state.local_mp3_index().get(cb)
+            if full:
+                dur = self.state.duration_for(full)
+        if dur is None:
+            try:
+                title = base.split(" - ", 1)[1].strip() if " - " in base else ""
+                got = self._studio_duration(artist or "", title) \
+                    if title else None
+                dur = got if isinstance(got, (int, float)) and got > 0 else None
+            except Exception:                            # noqa: BLE001
+                dur = None                                  # never break payload
+        if isinstance(dur, (int, float)) and dur > 0:
+            d["duration_s"] = int(round(dur))
+
+        # Cover backfill, same local-first order as the duration above.
+        if not d["album_image"]:
+            if dl and dl["video_id"]:
+                d["album_image"] = ("https://i.ytimg.com/vi/"
+                                    + dl["video_id"] + "/hqdefault.jpg")
+            else:
+                am = db.added_meta_get_any(base)
+                if am is None and cb != base:
+                    am = db.added_meta_get_any(cb)
+                if am and am.get("album_image"):
+                    d["album_image"] = am["album_image"]
+
+        # song_meta is INSERT OR REPLACE (whole row) -> only write when the
+        # cover is genuinely new; d already carries the row's existing album /
+        # album_artist / artist forward. song_meta has no duration column, so
+        # duration is never persisted.
+        if d["album_image"] and not (meta or {}).get("album_image"):
+            try:
+                db.song_meta_put(base, artist, d["album"],
+                                 d["album_artist"], d["album_image"])
+            except Exception:                            # noqa: BLE001
+                pass
         return d
 
     def _metainfo(self, base):
@@ -3925,10 +3965,14 @@ class Handler(BaseHTTPRequestHandler):
                                   r.get("duration_s"))
             except Exception:                         # noqa: BLE001
                 hit = None
-            if hit and hit.get("found") and hit.get("url"):
+            if hit and hit.get("found"):
+                # No url -> still flag it: the app skips its own lookup path
+                # when in_nas is set, and _innas is served from the cached
+                # suggest index (no per-row HTTP).
                 r["in_nas"] = True
-                r["nas_url"] = hit.get("url")
-                r["nas_base"] = hit.get("base_name")
+                if hit.get("url"):
+                    r["nas_url"] = hit.get("url")
+                    r["nas_base"] = hit.get("base_name")
         return rows
 
     @staticmethod
@@ -8144,6 +8188,9 @@ class Handler(BaseHTTPRequestHandler):
                 m3u = self._user_m3u_path(user, name)
                 if m3u is not None and os.path.exists(m3u):
                     os.remove(m3u)
+                    # list GET is cached 15s (_playlists_cache) -> a stale
+                    # row would resurrect the playlist in the app for 15s.
+                    type(self)._playlists_cache.pop(user, None)
                     if user == self.LEGACY_USER:
                         state.tombstone_playlist_folder(m3u, name)
                     return self._json({"deleted": name})

@@ -45,15 +45,8 @@ bool isSongRow(
   return (baseName ?? '').contains(' - ');
 }
 
-/// Live / alternate-version markers, mirroring the server's scorer.py REJECT
-/// list + httpd.py `_is_live`. Word-bounded so "Olive" / "Believe" survive.
-final RegExp _variantTokens = RegExp(
-  r'\b(live|lives|concert|unplugged|remix|karaoke|instrumental|'
-  r'sped\s+up|slowed|remaster(ed)?|demo|acoustic|nightcore|8d)\b|en concert',
-  caseSensitive: false,
-);
-
-bool isVariantRow(String title) => _variantTokens.hasMatch(title);
+/// Live / alternate-version markers live in queue_player.dart (`isVariantRow`)
+/// so the search list and the autoplay refill share one definition.
 
 /// Duration clock that never drops: unknown/zero renders as –:–– so the
 /// artist · album · duration triple stays complete on every row.
@@ -67,8 +60,6 @@ class _SearchScreenState extends State<SearchScreen> {
   int _suggestSeq = 0;
   bool _loading = false;
   bool _resolving = false;
-  // OFF = studio/original only; ON = keep live/remix/karaoke/instrumental rows.
-  bool _variants = false;
   String _error = '';
   List<String> _recent = [];
   // Single-flight guard: a double-tap (or tap-then-resume race) bumps this;
@@ -81,6 +72,11 @@ class _SearchScreenState extends State<SearchScreen> {
     AppHistory.loadSearch().then((l) {
       if (mounted) setState(() => _recent = l);
     });
+    QueuePlayer.instance.variantsEnabled.addListener(_onVariants);
+  }
+
+  void _onVariants() {
+    if (mounted) setState(() {});
   }
 
   void _runSearch(String q) {
@@ -336,7 +332,9 @@ class _SearchScreenState extends State<SearchScreen> {
   List<DiscoveryTrack> _visibleDiscovery(SearchResultPage r) {
     final vis = r.discovery
         .where((d) => _bestLocal(r, d) == null)
-        .where((d) => _variants || !isVariantRow(d.title))
+        .where((d) =>
+            QueuePlayer.instance.variantsEnabled.value ||
+            !isVariantRow(d.title))
         .toList();
     vis.sort((a, b) {
       final sa = isSongRow(artist: a.artist, title: a.title) ? 0 : 1;
@@ -407,7 +405,7 @@ class _SearchScreenState extends State<SearchScreen> {
   List<Suggestion> _suggestSongs() => _suggests
       .where((s) => s.kind != 'artist')
       .where((s) =>
-          _variants ||
+          QueuePlayer.instance.variantsEnabled.value ||
           (!isVariantRow(s.title ?? '') && !isVariantRow(s.baseName)))
       .toList();
 
@@ -661,6 +659,7 @@ class _SearchScreenState extends State<SearchScreen> {
   @override
   void dispose() {
     _debounce?.cancel();
+    QueuePlayer.instance.variantsEnabled.removeListener(_onVariants);
     _controller.dispose();
     super.dispose();
   }
@@ -754,24 +753,6 @@ class _SearchScreenState extends State<SearchScreen> {
                 borderSide: BorderSide.none,
               ),
             ),
-          ),
-        ),
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-          child: Row(
-            children: [
-              ChoiceChip(
-                label: Text(tr('Lives & versions')),
-                selected: _variants,
-                onSelected: (v) {
-                  setState(() => _variants = v);
-                  if (_controller.text.trim().isNotEmpty) {
-                    _search(_controller.text);
-                  }
-                },
-              ),
-            ],
           ),
         ),
         if (_resolving)
