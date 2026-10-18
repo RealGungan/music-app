@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 
 import '../api_client.dart';
@@ -33,6 +35,10 @@ class _AlbumScreenState extends State<AlbumScreen> {
   final Set<String> _preparing = {};
   bool _loading = true;
   String _error = '';
+
+  /// Intent of the header shuffle toggle: the album is played in random order
+  /// (the queue itself carries the shuffled order, this only paints the button).
+  bool _albumShuffle = false;
 
   @override
   void initState() {
@@ -94,7 +100,7 @@ class _AlbumScreenState extends State<AlbumScreen> {
   /// playing after it. Downloaded tracks come from the NAS, the others stream.
   /// Only the tapped track is resolved up front; the rest resolve lazily as
   /// they come up (so the tap starts instantly, no whole-queue waiting).
-  Future<void> _playFrom(int idx) async {
+  Future<void> _playFrom(int idx, {bool shuffle = false}) async {
     final songs = _page?.songs ?? const <ArtistSong>[];
     if (songs.isEmpty || idx >= songs.length) return;
     final tapped = songs[idx];
@@ -124,9 +130,12 @@ class _AlbumScreenState extends State<AlbumScreen> {
         if (r != null) queue.add(r);
       }
       if (queue.isEmpty) return;
+      if (shuffle) queue.shuffle(Random());
+      _albumShuffle = shuffle;
       await QueuePlayer.instance.playList(
         queue,
-        startIndex: queue.indexOf(first),
+        startIndex: shuffle ? 0 : queue.indexOf(first),
+        startShuffled: shuffle,
       );
     } finally {
       _preparing.remove(tapped.baseName);
@@ -278,6 +287,26 @@ class _AlbumScreenState extends State<AlbumScreen> {
                 style: const TextStyle(
                   fontSize: 14,
                   fontWeight: FontWeight.w600,
+                ),
+              ),
+              const Spacer(),
+              OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                  shape: const CircleBorder(),
+                  padding: const EdgeInsets.all(8),
+                  side: BorderSide(
+                    color: _albumShuffle ? Spots.green : Colors.white38,
+                  ),
+                  backgroundColor:
+                      _albumShuffle ? Spots.green.withOpacity(.18) : null,
+                ),
+                onPressed: _page!.songs.isNotEmpty
+                    ? () => _playFrom(0, shuffle: !_albumShuffle)
+                    : null,
+                child: Icon(
+                  Icons.shuffle,
+                  size: 20,
+                  color: _albumShuffle ? Spots.green : Colors.white70,
                 ),
               ),
             ],

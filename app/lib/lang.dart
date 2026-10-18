@@ -296,6 +296,9 @@ const Map<String, String> _es = {
       'Graba lo que publica la app para el coche y luego ',
   'Share diagnostic logs': 'Compartir registros',
   'Debug overlay': 'Superposición de depuración',
+  'Remember queue': 'Recordar la cola',
+  'Restore the last song and queue when the app reopens.':
+      'Restaura la última canción y la cola al reabrir la app.',
   'Tiny ground-truth HUD: engine, queue, last actions.':
       'Mini HUD de verdad: motor, cola, últimas acciones.',
   'Export debug bundle': 'Exportar paquete de depuración',

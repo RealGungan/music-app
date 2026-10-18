@@ -694,6 +694,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
     QueuePlayer.instance.lastError.addListener(_onPlayError);
     _wireAutoplay(_api);
     QueuePlayer.instance.loadAutoplay();
+    QueuePlayer.instance.restoreQueue();
     _wireApiAuth(_api);
     // Reachable-base: cached choice instantly, tailnet preferred, funnel
     // fallback — re-checks on network change (queue_player) / ping fail.

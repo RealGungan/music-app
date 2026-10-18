@@ -247,22 +247,159 @@ Future<void> openImportSheet(BuildContext context,
     ),
   );
   if (name == null || name.isEmpty || !context.mounted) return;
-  try {
-    final res = await api.importStart(name, tracks,
-        cover: listCover, source: link);
-    if (!context.mounted) return;
-    toast(
-      context,
-      retryMode
-          ? "${tr('Adding to')} \"$name\"… (${res['total']})"
-          : "${tr('Importing')} ${res['total']} ${tr('songs into')} \"$name\"…",
-      icon: Icons.downloading,
-    );
-  } catch (e) {
-    api.logClientError('import', 'start "$name": $e');
-    if (context.mounted) {
+  // Live feedback while the import runs. The old toast appeared only AFTER
+  // importStart resolved, so the user saw nothing at all for the whole
+  // server-side download. This dialog is on screen from the start and shows
+  // the real per-item counter.
+  await showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => _ImportProgressDialog(
+      api: api,
+      name: name,
+      tracks: tracks,
+      cover: listCover,
+      source: link,
+    ),
+  );
+}
+
+/// Non-dismissible import progress dialog. Polls the same `/api/import`
+/// snapshot as [ImportProgressCard] (`api.importStatus()`), so the counter
+/// here and the card on the Downloads screen always agree.
+class _ImportProgressDialog extends StatefulWidget {
+  const _ImportProgressDialog({
+    required this.api,
+    required this.name,
+    required this.tracks,
+    required this.cover,
+    required this.source,
+  });
+
+  final ApiClient api;
+  final String name;
+  final List<Map<String, String>> tracks;
+  final String cover;
+  final String source;
+
+  @override
+  State<_ImportProgressDialog> createState() => _ImportProgressDialogState();
+}
+
+class _ImportProgressDialogState extends State<_ImportProgressDialog> {
+  Timer? _timer;
+  int _done = 0;
+  int _total = 0;
+  int _failed = 0;
+  bool _finished = false;
+  bool _seenRunning = false;
+  final DateTime _startedAt = DateTime.now();
+
+  @override
+  void initState() {
+    super.initState();
+    _start();
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _start() async {
+    try {
+      final res = await widget.api.importStart(widget.name, widget.tracks,
+          cover: widget.cover, source: widget.source);
+      if (!mounted) return;
+      setState(() => _total = (res['total'] as num? ?? 0).toInt());
+      _timer = Timer.periodic(const Duration(seconds: 2), (_) => _tick());
+    } catch (e) {
+      widget.api.logClientError('import', 'start "${widget.name}": $e');
+      if (!mounted) return;
+      Navigator.pop(context);
       toast(context, "${tr('Import failed')}: $e", icon: Icons.error_outline);
     }
+  }
+
+  Future<void> _tick() async {
+    Map<String, dynamic> s;
+    try {
+      s = await widget.api.importStatus();
+    } catch (_) {
+      return; // transient network blip — the next tick retries
+    }
+    if (!mounted) return;
+    final done = (s['done'] as num? ?? 0).toInt();
+    final total = (s['total'] as num? ?? 0).toInt();
+    final running = s['running'] == true;
+    // The server can report running=false for a tick or two while it spins
+    // the job up, so don't end on the first non-running read unless we
+    // already watched it run, it clearly completed, or 15s have passed.
+    final finished = !running &&
+        (_seenRunning ||
+            (total > 0 && done >= total) ||
+            DateTime.now().difference(_startedAt).inSeconds > 15);
+    setState(() {
+      _done = done;
+      _total = total > 0 ? total : _total;
+      _failed = (s['failed'] as num? ?? 0).toInt();
+      _seenRunning = _seenRunning || running;
+      _finished = finished;
+    });
+    if (finished) _timer?.cancel();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final done = _finished;
+    return PopScope(
+      // No back-dismiss while running (the import keeps going invisibly
+      // otherwise); the Done state closes on OK or back.
+      canPop: done,
+      child: AlertDialog(
+        title: Text(done ? tr('Done') : '${tr('Importing')}…'),
+        content: Row(
+          children: [
+            if (done)
+              const Icon(Icons.check_circle, color: Colors.green, size: 32)
+            else
+              const SizedBox(
+                width: 32,
+                height: 32,
+                child: CircularProgressIndicator(strokeWidth: 3),
+              ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '"${widget.name}"',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12, color: Colors.white54),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(done
+                      ? '$_done/$_total${_failed > 0 ? ' ($_failed ${tr('failed')})' : ''}'
+                      : '$_done/$_total…'),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: done
+            ? [
+                FilledButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: Text(tr('OK')),
+                ),
+              ]
+            : null,
+      ),
+    );
   }
 }
 

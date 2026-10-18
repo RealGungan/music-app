@@ -600,6 +600,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   builder: (_) => const PlayerLayoutScreen()),
             ),
           ),
+          ValueListenableBuilder<bool>(
+            valueListenable: QueuePlayer.instance.restoreQueueEnabled,
+            builder: (_, on, __) => SwitchListTile(
+              secondary: const Icon(Icons.queue_music),
+              title: Text(tr('Remember queue')),
+              subtitle: Text(
+                tr('Restore the last song and queue when the app reopens.'),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              value: on,
+              onChanged: (v) {
+                QueuePlayer.instance.setRestoreQueue(v);
+              },
+            ),
+          ),
           ]),
           _sectionCard(tr('Connection'), [
           ListTile(

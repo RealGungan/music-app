@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:audioplayers/audioplayers.dart';
@@ -118,6 +119,53 @@ class QueueItem {
         preview: preview,
         durationMs: durationMs,
       );
+
+  /// Lossless round-trip for the session-restore pref (see `_restoreDataKey`).
+  Map<String, dynamic> toJson() => {
+        'title': title,
+        'url': url,
+        'thumbUrl': thumbUrl,
+        'baseName': baseName,
+        'videoId': videoId,
+        'resolveName': resolveName == null
+            ? null
+            : {'artist': resolveName!.artist, 'title': resolveName!.title},
+        'manuallyPlaced': manuallyPlaced,
+        'fromInternet': fromInternet,
+        'album': album,
+        'albumImage': albumImage,
+        'lyricsArtist': lyricsArtist,
+        'lyricsTitle': lyricsTitle,
+        'liked': liked,
+        'preview': preview,
+        'durationMs': durationMs,
+      };
+
+  factory QueueItem.fromJson(Map<String, dynamic> j) {
+    final rn = j['resolveName'];
+    return QueueItem(
+      j['title'] as String? ?? '',
+      j['url'] as String? ?? '',
+      thumbUrl: j['thumbUrl'] as String?,
+      baseName: j['baseName'] as String?,
+      videoId: j['videoId'] as String?,
+      resolveName: rn is Map
+          ? (
+              artist: rn['artist'] as String? ?? '',
+              title: rn['title'] as String? ?? ''
+            )
+          : null,
+      manuallyPlaced: j['manuallyPlaced'] == true,
+      fromInternet: j['fromInternet'] == true,
+      album: j['album'] as String?,
+      albumImage: j['albumImage'] as String?,
+      lyricsArtist: j['lyricsArtist'] as String?,
+      lyricsTitle: j['lyricsTitle'] as String?,
+      liked: j['liked'] as bool?,
+      preview: j['preview'] == true,
+      durationMs: (j['durationMs'] as num?)?.toInt(),
+    );
+  }
 }
 
 /// Seconds in a Deezer preview clip (all Deezer previews are 30s).
@@ -1033,14 +1081,69 @@ class QueuePlayer {
   final ValueNotifier<bool> autoplayEnabled = ValueNotifier(true);
   static const _autoplayKey = 'autoplay';
 
+  /// Reopen the app on the last song + queue. Opt-in: with it off nothing is
+  /// ever written (see [_persistQueue]), so behaviour is identical to before.
+  final ValueNotifier<bool> restoreQueueEnabled = ValueNotifier(false);
+  static const _restoreFlagKey = 'queue.restoreEnabled';
+  static const _restoreDataKey = 'queue.restore';
+
   Future<void> loadAutoplay() async {
     final prefs = await SharedPreferences.getInstance();
     autoplayEnabled.value = prefs.getBool(_autoplayKey) ?? true;
+    restoreQueueEnabled.value = prefs.getBool(_restoreFlagKey) ?? false;
   }
 
   Future<void> _persistAutoplay() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_autoplayKey, autoplayEnabled.value);
+  }
+
+  void setRestoreQueue(bool on) {
+    restoreQueueEnabled.value = on;
+    _persistRestoreFlag();
+  }
+
+  Future<void> _persistRestoreFlag() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_restoreFlagKey, restoreQueueEnabled.value);
+  }
+
+  /// Called once at startup (beside loadAutoplay). Goes through playList so
+  /// audio_handler stays the single source of truth for the player.
+  Future<void> restoreQueue() async {
+    if (!restoreQueueEnabled.value) return;
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_restoreDataKey);
+    if (raw == null || raw.isEmpty) return;
+    try {
+      final j = jsonDecode(raw) as Map<String, dynamic>;
+      final q = (j['items'] as List)
+          .map((e) => QueueItem.fromJson(e as Map<String, dynamic>))
+          .toList();
+      if (q.isEmpty) return;
+      final i = (j['index'] as num?)?.toInt() ?? 0;
+      await playList(q,
+          startIndex: i.clamp(0, q.length - 1),
+          startShuffled: j['shuffled'] == true);
+    } catch (e) {
+      debugPrint('[queue-restore] bad pref payload: $e');
+    }
+  }
+
+  /// Snapshot the queue + cursor. Hooked from _playCurrent (covers every
+  /// advance AND playList), toggleShuffle and _fillRelated.
+  Future<void> _persistQueue() async {
+    if (!restoreQueueEnabled.value) return;
+    if (items.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _restoreDataKey,
+      jsonEncode({
+        'index': index,
+        'shuffled': _shuffle,
+        'items': items.map((e) => e.toJson()).toList(),
+      }),
+    );
   }
 
   final ValueNotifier<String> currentThumb = ValueNotifier('');
@@ -1216,6 +1319,7 @@ class QueuePlayer {
       }
     }
     await _persistShuffle();
+    _persistQueue();
     _refreshEngineNext();
   }
 
@@ -1664,6 +1768,7 @@ class QueuePlayer {
       _setLoading(false);
       return;
     }
+    _persistQueue();
     // New track = fresh heal budget.
     _healStrikes = 0;
     _healTrackId = items[index];
@@ -2896,6 +3001,7 @@ class QueuePlayer {
       if (roomLeft <= 0) return;
       final added = fresh.take(roomLeft).toList();
       items.addAll(added);
+      _persistQueue();
       queueLength.value = items.length;
       DiagLog.restart.log(
         'fill +${added.length} rows (seed="${seed.artist} - ${seed.title}")',

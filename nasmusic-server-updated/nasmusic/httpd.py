@@ -156,7 +156,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.317"
+APP_VERSION = "1.0.318"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -7526,9 +7526,12 @@ class Handler(BaseHTTPRequestHandler):
         user = self._me()
         if not user:
             return self._error(401, "auth required")
-        if not _rate_allow("import:" + user, 3, 3600):
+        # Import is the one write path that bypasses the 30/h `stage:`
+        # limiter, so this stays as the per-user abuse ceiling (the
+        # _import_lock 409 is the real anti-runaway guard).
+        if not _rate_allow("import:" + user, 60, 3600):
             return self._error(
-                429, "too many imports — one every 20 minutes")
+                429, "too many imports — 60 per hour, try again shortly")
         body = self._body_json()
         if not isinstance(body, dict):
             return self._error(400, "invalid JSON")
