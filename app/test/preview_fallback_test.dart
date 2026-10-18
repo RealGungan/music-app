@@ -1,5 +1,8 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
-import 'package:nasmusic/api_client.dart' show ResolvedName;
+import 'package:http/http.dart' as http;
+import 'package:nasmusic/api_client.dart' show ApiClient, ResolvedName;
 import 'package:nasmusic/now_playing.dart' show previewLabelChip;
 import 'package:nasmusic/queue_player.dart'
     show
@@ -8,7 +11,68 @@ import 'package:nasmusic/queue_player.dart'
         previewLabel,
         previewSecs;
 
+class _Fake extends http.BaseClient {
+  _Fake(this._respond);
+  final http.Response Function(Uri url, String method) _respond;
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest req) async {
+    final r = _respond(req.url, req.method);
+    return http.StreamedResponse(
+      Stream.value(r.bodyBytes),
+      r.statusCode,
+      request: req,
+      headers: r.headers,
+    );
+  }
+}
+
 void main() {
+  group('preview flag survives the resolveByName url rebase', () {
+    test('deezer preview stays flagged after the relay rebuild', () async {
+      // The rebase rebuilds ResolvedName from the parsed row; losing the
+      // flags here is what made a 30s clip look like a full song.
+      final api = ApiClient(
+        baseUrl: 'http://music.rg.nig:8004',
+        client: _Fake((u, m) => http.Response(
+              jsonEncode(const {
+                'url': 'https://cdnt-preview.dzcdn.net/x.mp3?hdnea=t',
+                'video_id': '',
+                'thumb': '',
+                'artist': 'Pantera',
+                'title': 'Hollow',
+                'duration_s': 30,
+                'preview': true,
+                'preview_sec': 30,
+              }),
+              200,
+              headers: {'content-type': 'application/json'},
+            )),
+      );
+      final r = await api.resolveByName(artist: 'Pantera', title: 'Hollow');
+      expect(r.preview, isTrue);
+      expect(r.previewSec, 30);
+      expect(r.url, contains('dzcdn.net'));
+    });
+
+    test('a real relay resolve is not flagged', () async {
+      final api = ApiClient(
+        baseUrl: 'http://music.rg.nig:8004',
+        client: _Fake((u, m) => http.Response(
+              jsonEncode(const {
+                'url': 'http://100.89.94.101:8004/staging/api/stream?vid=abc',
+                'video_id': 'abc',
+                'thumb': '',
+              }),
+              200,
+              headers: {'content-type': 'application/json'},
+            )),
+      );
+      final r = await api.resolveByName(artist: 'Pantera', title: 'Hollow');
+      expect(r.preview, isFalse);
+      expect(r.previewSec, isNull);
+      expect(r.url, contains('/staging/api/stream'));
+    });
+  });
   group('preview flag propagation (server -> item)', () {
     test('resolvename json with preview flags', () {
       final r = ResolvedName.fromJson(const {

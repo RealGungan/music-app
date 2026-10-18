@@ -943,9 +943,12 @@ class PlaylistEntry {
   final bool liked;
   final bool inNas;
 
-  /// Direct CDN art (ytimg/dzcdn) when the server knows one: fetch it
-  /// straight off the CDN instead of NAS-proxied bytes (proxy doubles
-  /// the funnel uplink). Null = fall back to [ApiClient.coverUrl].
+  /// Server-side art: proxied through `/staging/api/cover?u=` so the
+  /// fetch (browser UA, cached, SSRF-guarded) happens on the NAS
+  /// instead of the phone hitting Spotify/ytimg CDNs directly.
+  /// [ApiClient.imageProxy] is idempotent, so already-proxied values
+  /// (coverUrl, MetaCache round-trips) pass through untouched.
+  /// Null = fall back to [ApiClient.coverUrl].
   final String? coverDirect;
   PlaylistEntry({
     required this.baseName,
@@ -960,15 +963,26 @@ class PlaylistEntry {
     this.coverDirect,
   });
 
-  factory PlaylistEntry.fromJson(Map<String, dynamic> j) {
-    final cd = j['cover_direct']?.toString();
-    final ai = j['album_image']?.toString() ?? '';
+  /// [proxy] (typically [ApiClient.imageProxy]) rewrites the absolute
+  /// third-party art URLs the server sends so they go through the
+  /// server's caching proxy instead of the device's CDN. Omit it to
+  /// keep the raw values (round-trips must not re-wrap).
+  factory PlaylistEntry.fromJson(Map<String, dynamic> j,
+      {String Function(String)? proxy}) {
+    String? p(String? v) {
+      final s = v?.toString();
+      if (s == null || s.isEmpty) return null;
+      return proxy == null ? s : proxy(s);
+    }
+
+    final cd = p(j['cover_direct']?.toString());
+    final ai = p(j['album_image']?.toString()) ?? '';
     return PlaylistEntry(
       baseName: j['base_name'],
       path: j['path'],
       exists: j['exists'] ?? false,
       url: j['url'],
-      albumImage: j['album_image'],
+      albumImage: p(j['album_image']),
       durationS: j['duration_s'] as int?,
       addedAt: (j['added_at'] as num?)?.toDouble(),
       liked: j['liked'] == true,
@@ -1341,7 +1355,16 @@ class ApiClient {
       }
       throw ApiException(r.statusCode, (j?['error'] ?? body).toString());
     }
-    return j ?? <String, dynamic>{};
+    if (j == null) {
+      // A 2xx that is not a JSON object is a proxy/interstitial HTML page, a
+      // truncated body, or a bare JSON array — never "no results". Returning
+      // {} here made callers answer "nothing exists" with no error and no
+      // retry (Library showed "No playlists yet." on a real HTTP 200).
+      var head = body.replaceAll(RegExp(r'\s+'), ' ').trim();
+      if (head.length > 120) head = '${head.substring(0, 120)}…';
+      throw ApiException(r.statusCode, 'Expected a JSON object, got: $head');
+    }
+    return j;
   }
 
   Future<SearchResultPage> search(String q) async {
@@ -1553,9 +1576,9 @@ class ApiClient {
     return PlaylistDetail(
       name: j['name'],
       entries: (j['entries'] as List? ?? [])
-          .map((e) => PlaylistEntry.fromJson(e))
+.map((e) => PlaylistEntry.fromJson(e, proxy: imageProxy))
           .toList(),
-      totalSeconds: (j['total_seconds'] as num?)?.toDouble(),
+        totalSeconds: (j['total_seconds'] as num?)?.toDouble(),
       source: (j['source'] ?? '').toString(),
     );
   }
@@ -1826,15 +1849,17 @@ class ApiClient {
     return _tok('$_base/staging/api/cover?f=${Uri.encodeComponent(f)}');
   }
 
-  /// Row art for a playlist entry: the server's direct CDN URL (ytimg /
-  /// dzcdn) when known — the phone pulls it straight off the CDN instead
-  /// of NAS-proxied bytes (proxy doubles the funnel uplink; N rows =
-  /// N proxied fetches fighting the audio stream). Falls back to the
-  /// proxied cover endpoint, so the Tailscale path is unchanged. '' =
-  /// no art; callers fall back to gradients/playlist cover.
+  /// Row art for a playlist entry: the server's art URL, forced through
+  /// [imageProxy] so the NAS fetches and caches it (browser UA,
+  /// SSRF-guarded) instead of the phone hitting Spotify/ytimg
+  /// directly. [imageProxy] is idempotent, so this is a no-op on
+  /// already-proxied values and rescues raw ones that came back
+  /// through the persisted MetaCache round-trip. Falls back to the
+  /// proxied cover endpoint. '' = no art; callers fall back to
+  /// gradients/playlist cover.
   String thumbFor(PlaylistEntry e) {
     final d = e.coverDirect;
-    if (d != null && d.isNotEmpty) return d; // CDN needs no token
+    if (d != null && d.isNotEmpty) return imageProxy(d);
     return e.url != null ? coverUrl(e.url!) : '';
   }
 
@@ -2375,6 +2400,8 @@ class ApiClient {
           durationS: r.durationS,
           resolvedArtist: r.resolvedArtist,
           resolvedTitle: r.resolvedTitle,
+          preview: r.preview,
+          previewSec: r.previewSec,
         );
       }
       if (n >= maxTries) throw ApiException(504, 'resolve timed out');
@@ -2438,10 +2465,24 @@ class ApiClient {
       : _tok('$_base/staging/api/cover?vid=$videoId');
 
   /// Any external image proxied through the server (Wrapped artist
-  /// photos). Direct CDN bytes often fail on the phone; the server
-  /// fetches with a browser UA and caches. Token attached like the rest.
-  String imageProxy(String raw) =>
-      _tok('$_base/staging/api/cover?u=${Uri.encodeComponent(raw)}');
+  /// photos, playlist/discovery art). Direct CDN bytes often fail on the
+  /// phone; the server fetches with a browser UA and caches. Token
+  /// attached like the rest.
+  ///
+  /// Idempotent: a URL that is already a server cover URL (path contains
+  /// `/staging/api/cover` AND query carries `u=`/`f=`) is returned
+  /// byte-identical, so re-wrapping a persisted/re-wrapped value can
+  /// never produce a double-proxied, doubly-tokenised URL.
+  String imageProxy(String raw) {
+    final p = Uri.tryParse(raw);
+    if (p != null &&
+        p.path.contains('/staging/api/cover') &&
+        (p.queryParameters.containsKey('u') ||
+            p.queryParameters.containsKey('f'))) {
+      return raw;
+    }
+    return _tok('$_base/staging/api/cover?u=${Uri.encodeComponent(raw)}');
+  }
 
   /// Lyrics for a track: synced (position-synced karaoke lines) when the
   /// server had an LRC source, plain lines otherwise.

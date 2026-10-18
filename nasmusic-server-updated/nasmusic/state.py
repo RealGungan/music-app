@@ -51,6 +51,14 @@ class Config:
         self.folders = [f.strip() for f in folders.split(",") if f.strip()]
         self.expiry_days = int(pick("EXPIRY_DAYS", "7"))
         self.yt_dlp_bin = pick("YT_DLP_BIN", "yt-dlp")
+        # Optional logged-in YouTube cookie file (Netscape/yt-dlp format).
+        # YouTube bot-gates some source IPs, which fails every yt-dlp
+        # resolve/stream; a cookie file is the only reliable fix. Lives under
+        # the users dir so it SURVIVES container recreates, and is OPTIONAL —
+        # absent means behave exactly as before.
+        self.yt_cookies = os.path.expanduser(
+            pick("YT_COOKIES",
+                 os.path.join(self.users_dir, ".nasmusic", "cookies.txt")))
         self.host = pick("HOST", "0.0.0.0")
         self.port = int(pick("PORT", "6680"))
         # googlevideo URLs expire ~6h after minting: caching them longer
@@ -117,6 +125,7 @@ class State:
         self.scorer = Scorer(
             yt_dlp_bin=config.yt_dlp_bin,
             log_fn=lambda m: print(m, flush=True),
+            yt_cookies=config.yt_cookies,
         )
         from .pipeline import Pipeline
         self.pipeline = Pipeline(self)

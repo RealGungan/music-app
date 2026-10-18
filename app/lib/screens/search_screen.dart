@@ -18,6 +18,11 @@ import 'artist_screen.dart';
 import 'album_screen.dart';
 import 'library_screen.dart' show offlineBanner;
 
+/// Client budget for `/api/search`. Server is ~1-5s warm but a cold
+/// discovery over a slow tailnet link can take far longer; the old 6s
+/// turned a merely slow search into a TimeoutException.
+const Duration kSearchTimeout = Duration(seconds: 45);
+
 class SearchScreen extends StatefulWidget {
   const SearchScreen({super.key, required this.api});
   final ApiClient api;
@@ -40,6 +45,16 @@ bool isSongRow(
   return (baseName ?? '').contains(' - ');
 }
 
+/// Live / alternate-version markers, mirroring the server's scorer.py REJECT
+/// list + httpd.py `_is_live`. Word-bounded so "Olive" / "Believe" survive.
+final RegExp _variantTokens = RegExp(
+  r'\b(live|lives|concert|unplugged|remix|karaoke|instrumental|'
+  r'sped\s+up|slowed|remaster(ed)?|demo|acoustic|nightcore|8d)\b|en concert',
+  caseSensitive: false,
+);
+
+bool isVariantRow(String title) => _variantTokens.hasMatch(title);
+
 /// Duration clock that never drops: unknown/zero renders as –:–– so the
 /// artist · album · duration triple stays complete on every row.
 String durOrDash(int? s) => (s != null && s > 0) ? fmtClock(s) : '–:––';
@@ -52,6 +67,8 @@ class _SearchScreenState extends State<SearchScreen> {
   int _suggestSeq = 0;
   bool _loading = false;
   bool _resolving = false;
+  // OFF = studio/original only; ON = keep live/remix/karaoke/instrumental rows.
+  bool _variants = false;
   String _error = '';
   List<String> _recent = [];
   // Single-flight guard: a double-tap (or tap-then-resume race) bumps this;
@@ -119,9 +136,7 @@ class _SearchScreenState extends State<SearchScreen> {
       return;
     }
     try {
-      final r = await widget.api
-          .search(query)
-          .timeout(const Duration(seconds: 6));
+      final r = await widget.api.search(query).timeout(kSearchTimeout);
       if (!mounted) return;
       setState(() {
         _results = r;
@@ -319,7 +334,10 @@ class _SearchScreenState extends State<SearchScreen> {
   /// Stable songs-first: structured song rows above artist/group rows
   /// (the Artists section itself always renders last in build()).
   List<DiscoveryTrack> _visibleDiscovery(SearchResultPage r) {
-    final vis = r.discovery.where((d) => _bestLocal(r, d) == null).toList();
+    final vis = r.discovery
+        .where((d) => _bestLocal(r, d) == null)
+        .where((d) => _variants || !isVariantRow(d.title))
+        .toList();
     vis.sort((a, b) {
       final sa = isSongRow(artist: a.artist, title: a.title) ? 0 : 1;
       final sb = isSongRow(artist: b.artist, title: b.title) ? 0 : 1;
@@ -386,8 +404,12 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   /// Song-only suggestions (artist rows render in their own section above).
-  List<Suggestion> _suggestSongs() =>
-      _suggests.where((s) => s.kind != 'artist').toList();
+  List<Suggestion> _suggestSongs() => _suggests
+      .where((s) => s.kind != 'artist')
+      .where((s) =>
+          _variants ||
+          (!isVariantRow(s.title ?? '') && !isVariantRow(s.baseName)))
+      .toList();
 
   Future<void> _playLibrary(LibraryTrack t) async {
     FocusManager.instance.primaryFocus?.unfocus();
@@ -734,6 +756,24 @@ class _SearchScreenState extends State<SearchScreen> {
             ),
           ),
         ),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          child: Row(
+            children: [
+              ChoiceChip(
+                label: Text(tr('Lives & versions')),
+                selected: _variants,
+                onSelected: (v) {
+                  setState(() => _variants = v);
+                  if (_controller.text.trim().isNotEmpty) {
+                    _search(_controller.text);
+                  }
+                },
+              ),
+            ],
+          ),
+        ),
         if (_resolving)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
@@ -984,7 +1024,18 @@ class _SearchScreenState extends State<SearchScreen> {
         else if (_error.isNotEmpty)
           Padding(
             padding: const EdgeInsets.all(24),
-            child: Center(child: Text(_error, textAlign: TextAlign.center)),
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(_error, textAlign: TextAlign.center),
+                  FilledButton(
+                    onPressed: _search,
+                    child: Text(tr('Retry')),
+                  ),
+                ],
+              ),
+            ),
           )
         else if (_suggests.isNotEmpty)
           Expanded(

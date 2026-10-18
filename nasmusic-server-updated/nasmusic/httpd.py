@@ -156,7 +156,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.312"
+APP_VERSION = "1.0.317"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -423,11 +423,37 @@ class Handler(BaseHTTPRequestHandler):
                 out.add(n)
         return out or None
 
+    _body_raw = None          # body bytes drained for THIS request (keep-alive
+    _body_cap = 0             #   resets per request, see _dispatch)
+
+    def _read_body(self, cap=MAX_JSON_BODY):
+        """Body bytes, read at most once per request.
+
+        _dispatch calls this centrally so an *unread* body can never
+        desync the socket: BaseHTTPRequestHandler then parses the leftover
+        JSON as the next request line (seen: every 429 paired 1-for-1
+        with `400 Bad request version ('completed","av":"1.0.316"}')`).
+        A declared length over `cap` reads NOTHING — a hostile client
+        must not make the server buffer megabytes. Best-effort: a dead
+        socket must not turn into a 500.
+        """
+        if self._body_raw is not None:
+            return self._body_raw
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            # a later caller may ask for a bigger cap (cover upload); an
+            # already-satisfied request is never re-read.
+            if 0 <= length <= cap and self._body_cap < cap:
+                self._body_cap = cap
+                self._body_raw = self.rfile.read(length) if length else b""
+        except Exception:                                # noqa: BLE001
+            pass
+        return self._body_raw or b""
+
     def _body_json(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        if length > MAX_JSON_BODY:
+        if int(self.headers.get("Content-Length") or 0) > MAX_JSON_BODY:
             raise ValueError("body too large")
-        raw = self.rfile.read(length) if length else b""
+        raw = self._read_body()
         try:
             return json.loads(raw.decode("utf-8") or "{}")
         except json.JSONDecodeError:
@@ -447,6 +473,16 @@ class Handler(BaseHTTPRequestHandler):
 
     # -------------------------------------------------------------- routing
     def _dispatch(self):
+        # Drain the body FIRST, before any early return (healthz / 401 / 429).
+        # An unread body desyncs the socket: BaseHTTPRequestHandler then parses
+        # the leftover JSON as the next request line -> "400 Bad request
+        # version". Reset is mandatory: one Handler instance is reused for
+        # every keep-alive request, so a stale _body_raw would leak into the
+        # next request.
+        self._body_raw = None
+        self._body_cap = 0
+        self._read_body()
+
         parsed = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(parsed.path)
         query = urllib.parse.parse_qs(parsed.query)
@@ -2237,7 +2273,7 @@ class Handler(BaseHTTPRequestHandler):
                         v = cand.get("video_id")
                         if not v:
                             continue
-                        u = state.scorer.resolve_url(v, timeout=90)
+                        u = self._resolve_try(v, timeout=90)
                         if not u:
                             continue
                         if state.scorer.stream_is_opus(u):
@@ -2329,6 +2365,16 @@ class Handler(BaseHTTPRequestHandler):
                     f"{artist} - {title}") or "") if artist and title else ""
             except Exception:                           # noqa: BLE001
                 album = ""
+            if artist and title:
+                # Identity row for the preview fallback: a deep-linked video
+                # never produced an rz: row (the app plays it by video_id),
+                # so _preview_marker had nothing to name the song with.
+                try:
+                    self.state.db.misc_put(
+                        "vid:" + vid,
+                        {"artist": artist, "title": title, "album": album})
+                except Exception:                       # noqa: BLE001
+                    pass
             return {
                 "kind": "youtube", "video_id": vid,
                 "artist": artist or "", "title": title or "",
@@ -2458,6 +2504,37 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     self.state.db.misc_put("ytm:" + video_id,
                                             {"artist": artist, "title": title})
+                except Exception:                          # noqa: BLE001
+                    pass
+            if artist or title:
+                return artist, title
+        except Exception:                                  # noqa: BLE001
+            pass
+        # yt-dlp / YTMusic egress is IP-throttled ("confirm you're not a bot")
+        # so this often returns nothing. YouTube's public oEmbed endpoint is
+        # NOT gated and still names the video: "Ozuna - Topic" / "Quiero
+        # Repetir" -> Ozuna / Quiero Repetir.
+        try:
+            import json as _json
+            import urllib.parse as _up
+            import urllib.request as _ur
+            _u = ("https://www.youtube.com/oembed?format=json&url=" +
+                  _up.quote("https://www.youtube.com/watch?v=" + video_id,
+                            safe=""))
+            _req = _ur.Request(_u, headers={"User-Agent": "Mozilla/5.0"})
+            with _ur.urlopen(_req, timeout=10) as _resp:
+                _d = _json.loads(_resp.read(64 * 1024).decode("utf-8", "replace"))
+            title = (_d.get("title") or "").strip()
+            artist = (_d.get("author_name") or "").strip()
+            if artist.lower().endswith(" - topic"):
+                artist = artist[: -len(" - topic")].strip()
+            elif " - " in title and not artist:
+                artist, title = [x.strip() for x in title.split(" - ", 1)]
+            if title or artist:
+                try:
+                    self.state.db.misc_put(
+                        "ytm:" + video_id,
+                        {"artist": artist, "title": title})
                 except Exception:                          # noqa: BLE001
                     pass
             return artist, title
@@ -2908,9 +2985,18 @@ class Handler(BaseHTTPRequestHandler):
     def _preview_marker(self, video_id):
         """'pz:<deezer_track_id>' for a video_id whose YouTube resolve came
         back empty. The song identity comes from the rz:/ry: row the app
-        itself resolved earlier (it always comes from artist+title). None
-        when we don't know the song or Deezer has no preview for it."""
+        itself resolved earlier (it always comes from artist+title), or —
+        when the video came from a share/deep link that never produced an
+        rz: row — the 'vid:<id>' identity row /api/open-url wrote when it
+        parsed the link. None when we don't know the song or Deezer has no
+        preview for it."""
         v = self._rz_row_for_vid(video_id) or {}
+        if not v.get("artist") or not v.get("title"):
+            try:
+                v = self.state.db.misc_get("vid:" + video_id,
+                                           14 * 86400) or v
+            except Exception:                           # noqa: BLE001
+                pass
         tid = self._deezer_preview_cached(v.get("artist") or "",
                                           v.get("title") or "")
         if not tid:
@@ -2965,6 +3051,81 @@ class Handler(BaseHTTPRequestHandler):
                 "duration_s": 30, "preview": True, "preview_sec": 30,
                 "resolved_artist": artist, "resolved_title": title}
 
+    # ---------------------------------------- resolve retry (bot-gate guard)
+    # YouTube egress from this NAS is INTERMITTENTLY bot-gated ("Sign in to
+    # confirm you're not a bot"), which yt-dlp reports as an EMPTY url rather
+    # than an exception. One attempt therefore turns a TRANSIENT gate into a
+    # permanent 30s-preview (or a 502). `_resolve_try` retries the SAME video
+    # with backoff before falling back — bounded so it can never hammer
+    # YouTube harder than the ungated single attempt did:
+    #   * NASMUSIC_RESOLVE_RETRY=0 disables all of it instantly (default ON).
+    #   * a per-vid "known dead" memo suppresses retries for 10 min.
+    #   * a process-wide cap of _RETRY_PER_MIN extra attempts per 60 s.
+    _RETRY_BACKOFF = (4.0, 10.0)   # seconds to wait before attempt 2 and 3
+    _RETRY_MEMO_TTL = 600.0        # per-vid dead memo (10 min)
+    _RETRY_PER_MIN = 6             # process-wide extra attempts per minute
+    _RETRY_DEAD_MAX = 512          # memo prune threshold (long-lived process)
+
+    def _resolve_try(self, video_id, timeout=30):
+        """scorer.resolve_url(video_id) with bounded backoff retries, for the
+        bot-gate / removed-video case. Returns the direct url, or None — then
+        the caller falls back to the Deezer preview exactly as before.
+        Every extra attempt is accounted for in `_resolve_retry_stats`."""
+        H = type(self)
+        scorer = self.state.scorer
+
+        def _once():
+            try:
+                return scorer.resolve_url(video_id, timeout=timeout)
+            except Exception:                           # noqa: BLE001
+                return None
+
+        # Kill switch: flag off -> byte-for-byte today's single attempt.
+        if os.environ.get("NASMUSIC_RESOLVE_RETRY", "1").strip().lower() in (
+                "0", "false", "no", "off"):
+            return _once()
+        now = time.time()
+        with H._resolve_retry_lock:
+            memo_at = H._resolve_dead.get(video_id, 0.0)
+            memoed = bool(memo_at) and (now - memo_at) < H._RETRY_MEMO_TTL
+            if memo_at and not memoed:
+                H._resolve_dead.pop(video_id, None)
+            if len(H._resolve_dead) > H._RETRY_DEAD_MAX:
+                H._resolve_dead = {k: v for k, v in H._resolve_dead.items()
+                                   if now - v < H._RETRY_MEMO_TTL}
+        url, retries = _once(), 0
+        for i in range(len(H._RETRY_BACKOFF)):
+            if url or memoed:            # got it, or this vid is known dead
+                break
+            with H._resolve_retry_lock:
+                H._resolve_retry_at[:] = [t for t in H._resolve_retry_at
+                                          if t > now - 60]
+                if len(H._resolve_retry_at) >= H._RETRY_PER_MIN:
+                    H._resolve_retry_stats["cap"] += 1
+                    logger.warning(
+                        "resolve %s: retry budget spent (%d/min), "
+                        "falling back without retry", video_id, H._RETRY_PER_MIN)
+                    break
+                H._resolve_retry_at.append(time.time())
+                H._resolve_retry_stats["retries"] += 1
+                retries += 1
+            logger.info("resolve %s: empty url, retry %d/%d in %.0fs",
+                        video_id, i + 1, len(H._RETRY_BACKOFF),
+                        H._RETRY_BACKOFF[i])
+            time.sleep(H._RETRY_BACKOFF[i])
+            url = _once()
+        with H._resolve_retry_lock:
+            if url:
+                H._resolve_dead.pop(video_id, None)
+            else:
+                H._resolve_dead[video_id] = time.time()
+            if memoed:
+                H._resolve_retry_stats["memo"] += 1
+        logger.info("resolve %s: attempts=%d retries=%d memo=%s stats=%s",
+                    video_id, 1 + retries, retries, memoed,
+                    H._resolve_retry_stats if (retries or memoed) else "-")
+        return url
+
     def _resolve_shared(self, video_id, timeout=30):
         """Resolve a video's direct stream URL, coalescing concurrent cold
         requests for the same id into a single yt-dlp round-trip."""
@@ -2996,7 +3157,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def _do():
             try:
-                return state.scorer.resolve_url(video_id, timeout=timeout)
+                return self._resolve_try(video_id, timeout=timeout)
             except Exception:                           # noqa: BLE001
                 return None
 
@@ -3556,14 +3717,24 @@ class Handler(BaseHTTPRequestHandler):
 
     _owner_map_cache = (0.0, {})
 
+    _per_user_libs_cache = (0.0, None)
+
     def _per_user_libs(self):
-        """Visibility split on? Env default OFF; DB flag wins when set."""
+        """Visibility split on? Env default OFF; DB flag wins when set.
+
+        Cached 30 s like _cached_owner_map: this is called once per result
+        row, so a warm search did ~20k DB flag reads for one constant."""
+        now = time.time()
+        ts, cached = type(self)._per_user_libs_cache
+        if now - ts < 30 and cached is not None:
+            return cached
         try:
-            if getattr(self.state.config, "per_user_libs", False):
-                return True
-            return bool(self.state.db.flag_get("per_user_libs", False))
+            v = (getattr(self.state.config, "per_user_libs", False)
+                 or bool(self.state.db.flag_get("per_user_libs", False)))
         except Exception:                                # noqa: BLE001
-            return False
+            v = False
+        type(self)._per_user_libs_cache = (now, v)
+        return v
 
     def _cached_owner_map(self):
         now = time.time()
@@ -3936,6 +4107,13 @@ class Handler(BaseHTTPRequestHandler):
     # call instead of each waiting its own full round-trip.
     _resolve_inflight = {}
     _resolve_inflight_lock = threading.Lock()
+    # Bot-gate retry bookkeeping (see _resolve_try): vid -> epoch of its last
+    # failed attempt (suppresses retries for _RETRY_MEMO_TTL), the 60s sliding
+    # window of extra attempts already spent, and the counters that get logged.
+    _resolve_dead = {}
+    _resolve_retry_at = []
+    _resolve_retry_stats = {"retries": 0, "memo": 0, "cap": 0}
+    _resolve_retry_lock = threading.Lock()
     # Single-flight for /api/search artists background fetch (key -> started
     # timestamp). Tracked separately from _artist_hydrating so a cold artist
     # search runs at most one Deezer fetch+hydrate job per query.
@@ -6250,6 +6428,11 @@ class Handler(BaseHTTPRequestHandler):
                 row = state.db.find_download_by_base(base or "")
                 state.db.update_download(row["id"], keep_to=playlist)
                 state.pipeline.start_stage(artist, title, owner=user)
+                append_entry(state, playlist,
+                             os.path.join(state.config.music_root,
+                                          base + ".mp3"),
+                             keep_basename=True,
+                             m3u=self._user_m3u_path(user, playlist))
                 return self._json({"queued": True})
             return self._error(404, "unknown track")
 
@@ -7930,8 +8113,10 @@ class Handler(BaseHTTPRequestHandler):
         # detail / delete / cover (playlist itself)
         if len(rest) == 1 and rest[0] == "cover":
             if self.command == "POST":
-                length = int(self.headers.get("Content-Length") or 0)
-                data = self.rfile.read(length) if length else b""
+                # _read_body already drained this socket in _dispatch; a
+                # direct rfile.read() here would come back EMPTY. Same helper,
+                # bigger cap, so a >2MB cover still arrives.
+                data = self._read_body(5 * 1024 * 1024)
                 if not data:
                     return self._error(400, "empty body")
                 if len(data) > 5 * 1024 * 1024:
@@ -8690,6 +8875,8 @@ class Handler(BaseHTTPRequestHandler):
 
 class NASMusicServer(ThreadingHTTPServer):
     daemon_threads = True
+    # stdlib default is 5 — a Funnel relay burst drops connections.
+    request_queue_size = 128
 
     def __init__(self, addr, state):
         self.state = state

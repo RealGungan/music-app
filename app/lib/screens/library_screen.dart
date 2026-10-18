@@ -12,6 +12,7 @@ import 'dart:typed_data';
 
 import '../api_client.dart';
 import '../auth_store.dart';
+import '../home_shortcut.dart';
 import '../import_sheet.dart';
 import '../lang.dart';
 import '../meta_cache.dart';
@@ -26,6 +27,13 @@ import '../widgets.dart';
 import 'my_ytmusic_screen.dart';
 import 'settings_screen.dart';
 import 'user_errors_screen.dart';
+
+/// Client budget for `/api/playlists`. Server is ~0.07s warm, but over a
+/// slow tailnet link a genuinely reachable server can take far longer than
+/// the old 6s cap — which turned a merely slow refresh into a throw. Kept
+/// bounded (not the full API timeout) so a dead route still falls back to
+/// the cached rows instead of spinning.
+const Duration kPlaylistsTimeout = Duration(seconds: 20);
 
 /// Slim offline notice: metadata is last-known, grey songs need a
 /// connection. Shared by the library list and playlist detail headers.
@@ -66,6 +74,31 @@ Future<void> _learnOffline(ApiClient api, Object e) async {
       if (!await api.ping()) QueuePlayer.instance.isOffline.value = true;
     } catch (_) {
       QueuePlayer.instance.isOffline.value = true;
+    }
+  }
+}
+
+/// Pin a launcher shortcut for [playlistName] ("Add to home screen").
+/// File-level so the library list ⋮ menu, the long-press sheet and the
+/// playlist detail app bar share one entry point. Android caps pinned
+/// shortcuts at 4, so the 5th pin drops the oldest — the toast names it,
+/// because a shortcut disappearing with no explanation is the confusing
+/// part. Always answers visibly: every path toasts success or failure.
+Future<void> pinPlaylistToHome(BuildContext context, String playlistName) async {
+  try {
+    final evicted = await HomeShortcuts.pin(playlistName);
+    if (!context.mounted) return;
+    toast(
+      context,
+      evicted == null
+          ? tr('Added to home screen')
+          : '${tr('Added to home screen')} · ${tr('max 4 shortcuts')}: '
+              '"$evicted" ${tr('removed')}',
+      icon: Icons.add_to_home_screen,
+    );
+  } catch (e) {
+    if (context.mounted) {
+      toast(context, "${tr('Failed')}: $e", icon: Icons.error_outline);
     }
   }
 }
@@ -342,14 +375,15 @@ Future<void> _load({bool forceOnline = false}) async {
     }
 
     // 3. Server refresh when reachable (silent — never flashes a spinner).
-    // Capped at 6s: a reachable-looking route with a dead server must fall
-    // back to the cached rows, not spin on the 20s API timeout.
+    // Capped at kPlaylistsTimeout: a reachable-looking route with a dead
+    // server must fall back to the cached rows, not spin on the full API
+    // timeout.
     try {
       // Server returns playlists in the persisted display order (respects a
       // user drag-reorder); a fresh custom order from the server wins.
       final pls = await widget.api
           .playlists()
-          .timeout(const Duration(seconds: 6));
+          .timeout(kPlaylistsTimeout);
       if (!mounted) return;
       setState(() {
         _playlists = pls;
@@ -611,17 +645,26 @@ Future<void> _load({bool forceOnline = false}) async {
       ),
     );
     if (confirm != true || !mounted) return;
-    // Snapshot entries for undo BEFORE deleting.
-    List<String> bases = [];
-    try {
-      final d = await widget.api.playlistEntries(pl.name);
-      bases = d.entries.map((e) => e.baseName).toList();
-    } catch (_) {}
     // Optimistic: vanish from the view instantly; the server confirms
     // in the background (its list cache lags a plain reload).
     setState(() => _playlists.removeWhere((p) => p.name == pl.name));
+    // Snapshot entries for undo in the BACKGROUND: awaiting it in front of
+    // the setState was the multi-second "still there" stall. It fills `bases`
+    // in place, so an undo tap later still gets the full order.
+    final bases = <String>[];
+    unawaited(() async {
+      try {
+        final d = await widget.api.playlistEntries(pl.name);
+        bases.addAll(d.entries.map((e) => e.baseName));
+      } catch (_) {}
+    }());
+    // Start the delete but don't block the undo bar on it — the in-flight
+    // future rides along so an instant undo can't race it (see _undelete).
+    final del = widget.api.deletePlaylist(pl.name);
+    showUndoBar(context, "${tr('Deleted')} \"${pl.name}\"",
+        () => _undeletePlaylist(pl.name, bases, del));
     try {
-      await widget.api.deletePlaylist(pl.name);
+      await del;
     } catch (e) {
       if (mounted) {
         await _load();
@@ -629,16 +672,23 @@ Future<void> _load({bool forceOnline = false}) async {
       }
       return;
     }
-    if (!mounted) return;
-    showUndoBar(context, "${tr('Deleted')} \"${pl.name}\"",
-        () => _undeletePlaylist(pl.name, bases));
     await _load();
   }
 
   /// Restore a just-deleted playlist (undo): recreate + re-add entries
   /// in their original order. The custom cover survives a delete (the
   /// server only removes the .m3u), so it comes back too.
-  Future<void> _undeletePlaylist(String name, List<String> bases) async {
+  /// [pendingDelete] is the optimistic delete still in flight — wait it out
+  /// first, or createPlaylist hits a still-present name (409 duplicate).
+  Future<void> _undeletePlaylist(String name, List<String> bases,
+      [Future<void>? pendingDelete]) async {
+    try {
+      await pendingDelete;
+    } catch (_) {
+      // Delete never landed: it's already back in the list (the delete path
+      // reloaded + toasted), so there is nothing to undo.
+      return;
+    }
     try {
       await widget.api.createPlaylist(name);
       for (final b in bases) {
@@ -705,6 +755,11 @@ Future<void> _load({bool forceOnline = false}) async {
               onTap: () => Navigator.pop(context, 'cover'),
             ),
             ListTile(
+              leading: const Icon(Icons.add_to_home_screen),
+              title: Text(tr('Add to home screen')),
+              onTap: () => Navigator.pop(context, 'pin'),
+            ),
+            ListTile(
               leading: const Icon(Icons.fact_check_outlined),
               title: Text(tr('Verify against source')),
               onTap: () => Navigator.pop(context, 'verify'),
@@ -741,6 +796,10 @@ Future<void> _load({bool forceOnline = false}) async {
     }
     if (action == 'verify') {
       await _verifyAgainstSource(context, widget.api, pl.name);
+      return;
+    }
+    if (action == 'pin') {
+      await pinPlaylistToHome(context, pl.name);
       return;
     }
     if (action == 'delete') {
@@ -1180,6 +1239,7 @@ try {
                             if (v == 'delete') _deletePlaylist(pl);
                             if (v == 'download') _downloadWholePlaylist(pl);
                             if (v == 'cover') _changePlaylistCover(pl);
+                            if (v == 'pin') pinPlaylistToHome(context, pl.name);
                             if (v == 'rename') _renamePlaylist(pl);
                             if (v == 'verify') {
                               _verifyAgainstSource(context, widget.api, pl.name);
@@ -1197,6 +1257,10 @@ try {
                             PopupMenuItem(
                               value: 'cover',
                               child: Text(tr('Change cover')),
+                            ),
+                            PopupMenuItem(
+                              value: 'pin',
+                              child: Text(tr('Add to home screen')),
                             ),
                             PopupMenuItem(
                               value: 'rename',
@@ -2636,6 +2700,12 @@ Future<void> _playFrom(int i) async {
             icon: const Icon(Icons.photo_outlined),
             tooltip: tr('Change cover'),
             onPressed: _busy ? null : _editPhoto,
+          ),
+          IconButton(
+            icon: const Icon(Icons.add_to_home_screen),
+            tooltip: tr('Add to home screen'),
+            onPressed:
+                _busy ? null : () => pinPlaylistToHome(context, widget.name),
           ),
           IconButton(
             icon: const Icon(Icons.fact_check_outlined),

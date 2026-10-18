@@ -18,6 +18,7 @@ import 'package:workmanager/workmanager.dart';
 import 'api_client.dart';
 import 'announcer.dart';
 import 'deep_link.dart';
+import 'home_shortcut.dart';
 import 'audio_handler.dart';
 import 'audio_session_state.dart';
 import 'auth_store.dart';
@@ -140,7 +141,7 @@ void _decodeAudioJson(String json) {
           } else {
             qp.report('resume-fire', 'focus $phase ${m?['type']}');
           }
-          unawaited(qp.onResumed());
+          unawaited(qp.onResumed(src: 'focus-$phase'));
         }
       }
       return;
@@ -363,6 +364,18 @@ const _kAudioEventChannel = MethodChannel('com.nasmusic.nasmusic/audio_events');
 /// cold-start URL and forwards warm ones via this channel).
 const _kDeepLinkChannel = MethodChannel('com.nasmusic.nasmusic/deep_links');
 
+/// Native MediaSession flag tuning (MainActivity). Best-effort: a miss costs
+/// BT media-button routing, never audio, so failures are logged and dropped.
+const _kSystemChannel = MethodChannel('com.nasmusic.nasmusic/system');
+
+Future<void> _enableMediaButtons() async {
+  try {
+    await _kSystemChannel.invokeMethod<bool>('enableMediaButtons');
+  } catch (e) {
+    debugPrint('[audio] media-button flags not set: $e');
+  }
+}
+
 Future<void> _initAudioService() async {
   if (!_mobileOnlyAudio()) return;
   try {
@@ -398,9 +411,16 @@ Future<void> _initAudioService() async {
     // Push the current (possibly idle) state once the session is up.
     _pushAudioState();
     audioSessionReady.value = true;
-    // Qualify for BT media-button routing (headset single/double-press):
-    // plays a blip of silence so Android treats us as real audio output.
-    await AudioService.androidForceEnableMediaButtons();
+    // Qualify for BT media-button routing (headset single/double-press).
+    // Was AudioService.androidForceEnableMediaButtons — it plays a blip of
+    // SILENCE through the music stream to convince Android we're real audio
+    // output — that blip IS the audible noise on app open (1.0.305). Dropped.
+    // The qualifiers that matter are session FLAGS, not a noise burst, so set
+    // those natively instead (MainActivity → AudioService's MediaSessionCompat):
+    // FLAG_HANDLES_MEDIA_BUTTONS | FLAG_HANDLES_TRANSPORT_CONTROLS (OR-ed onto
+    // whatever audio_service already set). Best-effort: a failure here costs
+    // BT routing, never audio, so it never blocks init.
+    await _enableMediaButtons();
     // Catch ACTION_AUDIO_BECOMING_NOISY ourselves. NOTE: we deliberately do
     // NOT use audio_session.setActive(true) + its becomingNoisyEventStream:
     // audioplayers requests its own audio focus when a song starts, which
@@ -681,7 +701,12 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
     AuthStore.instance.addListener(_onAuthChanged);
     _validateSession();
     _wireAudioStateBridge();
+    // Resume-sync armed? Logs the same resume-sync row shape the resume
+    // hook emits, so an app that never logs a resume line afterwards has
+    // proven the hook is dead (not just silent).
+    QueuePlayer.instance.traceResumeSyncAtStart();
     _wireDeepLinks();
+    unawaited(HomeShortcuts.load());
     _wireReplacePopup();
     _wireOfflinePopup();
     _wireAnnouncements();
@@ -733,7 +758,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
   /// receive warm links whenever onNewIntent fires. Each one opens the song
   /// like a tapped discovery row.
   Future<void> _wireDeepLinks() async {
-    _traceDl('BUILD=V41');
+    _traceDl('BUILD=V42');
     String? initial;
     try {
       initial = await _kDeepLinkChannel.invokeMethod<String>('getInitialLink');
@@ -806,6 +831,22 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
       return;
     }
     final kind = classifyDeepLink(rawUrl);
+    // Home-screen shortcut: gunganfm://playlist/<name> opens that playlist
+    // directly. Checked BEFORE the share-link gate below, which would
+    // reject it as "not a music share link".
+    if (kind == DeepLinkKind.playlist) {
+      final name = parsePlaylistDeepLink(rawUrl);
+      _traceDl('playlist shortcut -> "$name"');
+      final nav = _navigatorKey.currentState;
+      if (name.isEmpty || nav == null) {
+        _dlToast(tr("Can't open that playlist"));
+        return;
+      }
+      nav.push(MaterialPageRoute(
+        builder: (_) => PlaylistDetailScreen(api: _api, name: name),
+      ));
+      return;
+    }
     final host = (url.host.isNotEmpty ? url.host : url.path).toLowerCase();
     final isSpotify = kind == DeepLinkKind.spotify;
     final isYt = kind == DeepLinkKind.youtube;
@@ -1002,7 +1043,7 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
       // the existing bridge into RemoteEngine.feedRemoteEvent to correct
       // stale _lastState (frozen play icon), and re-push metadata so a
       // restarted handler recovers _hasMedia/title instead of dropping play.
-      qp.onResumed();
+      qp.onResumed(src: 'app-resumed');
       _pushAudioState();
     }
   }

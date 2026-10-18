@@ -235,6 +235,11 @@ class RemoteEngine implements PlaybackEngine {
   SendPort? get _handlerPort =>
       IsolateNameServer.lookupPortByName(kAudioStatePort);
 
+  /// Is the handler isolate's command port reachable right now? Resume-sync
+  /// telemetry: proves whether a null [queryTruthDirect] answer means "no
+  /// port" (nothing to ask) or "port sent, no reply in the timeout".
+  bool get handlerPortAlive => _handlerPort != null;
+
   void _tryEngage() {
     if (_remoteUp || _handlerPort == null) return;
     _remoteUp = true;
@@ -308,20 +313,7 @@ class RemoteEngine implements PlaybackEngine {
     }
   }
 
-  static PlayerState _parseState(dynamic s) {
-    switch (s) {
-      case 'playing':
-        return PlayerState.playing;
-      case 'paused':
-        return PlayerState.paused;
-      case 'completed':
-        return PlayerState.completed;
-      case 'disposed':
-        return PlayerState.disposed;
-      default:
-        return PlayerState.stopped;
-    }
-  }
+  static PlayerState _parseState(dynamic s) => engineStateFromName('$s');
 
   @override
   Stream<void> get onPlayerComplete => _sbComplete.stream;
@@ -473,6 +465,33 @@ class RemoteEngine implements PlaybackEngine {
     }
   }
 
+  /// Resume/focus truth query, asked DIRECTLY of the handler port and
+  /// bypassing [_remoteUp]. Returns the handler's own answer (the first
+  /// state event after the getState send), or null when the port is missing
+  /// or the handler doesn't answer in [timeout] — the caller then falls back
+  /// to [resync]'s local correction.
+  ///
+  /// Why not just [resync]: resync's handler leg is gated on the `_remoteUp`
+  /// latch, which [_send] clears the moment a send finds the port missing.
+  /// On resume that latch is exactly what's in doubt, so the query — the one
+  /// thing that could correct a stale icon — got skipped and the local
+  /// fallback force-paused live audio. This path has no latch to lose.
+  Future<PlayerState?> queryTruthDirect({
+    Duration timeout = const Duration(milliseconds: 1200),
+  }) async {
+    final sp = _handlerPort;
+    if (sp == null) return null;
+    // Subscribe BEFORE the send so a state event queued in between can't be
+    // missed; broadcast streams drop events with no listener.
+    final stateFut = _sbState.stream.first.timeout(timeout);
+    sp.send(jsonEncode({'cmd': 'getState'}));
+    try {
+      return await stateFut;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Single-tap recover: refresh truth first, then act on FRESH state.
   /// A stale cached playing (event died while suspended) becomes a resume,
   /// not a pause of a ghost — no double-tap.
@@ -582,5 +601,24 @@ class RemoteEngine implements PlaybackEngine {
     _engageTimer?.cancel();
     _healthTimer?.cancel();
     _local.dispose();
+  }
+}
+
+/// Handler state-name → native PlayerState. Pure (no engine) so unit tests
+/// pin the resume-truth mapping without a live handler isolate. Unknown /
+/// missing names map to `stopped` (non-playing) — never to a false "playing",
+/// so a garbled reply can only ever un-freeze a stale icon, not invent one.
+PlayerState engineStateFromName(String s) {
+  switch (s) {
+    case 'playing':
+      return PlayerState.playing;
+    case 'paused':
+      return PlayerState.paused;
+    case 'completed':
+      return PlayerState.completed;
+    case 'disposed':
+      return PlayerState.disposed;
+    default:
+      return PlayerState.stopped;
   }
 }

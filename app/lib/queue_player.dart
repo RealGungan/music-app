@@ -345,6 +345,78 @@ bool completionIsFinish({
   return positionSec >= durationSec - 5;
 }
 
+/// A dead stream (pure, unit-tested): the relay answered with an HTTP error
+/// — the 502 of a removed/expired video — instead of audio bytes. These are
+/// the errors an identity swap can actually fix; anything else (401, a codec
+/// complaint, a missing local file) must NOT burn the one swap an attempt
+/// gets. A plain network flap is left to heal, which retries cheaper.
+final RegExp _deadStreamRe = RegExp(r'\b(404|410|500|502|503|504)\b');
+
+bool deadStreamError(String e) => _deadStreamRe.hasMatch(e);
+
+/// The result of one dead-stream identity swap: [url] to replay (null =
+/// nothing was swapped), plus what it carries. [spent] means this play
+/// attempt used its swap — the caller latches even when the resolve failed,
+/// because a second try in the same attempt is exactly the loop this kills.
+typedef NameFallback = ({
+  String? url,
+  String? videoId,
+  int? durationS,
+  bool preview,
+  bool spent,
+});
+
+/// Dead-stream identity fallback (pure, unit-tested): when a stream attempt
+/// dies with a 502/dead-URL error AND the row still knows its artist+title
+/// ([QueueItem.resolveName]), ask the server for a replacement ONCE per play
+/// attempt ([gen], latched by [spent]) — a fresh relay URL, or a 30s Deezer
+/// clip flagged [preview] when YouTube has nothing. Never hands back the URL
+/// that just died (never retry the same corpse twice) and never resolves
+/// twice in one generation, so a dead stream can't loop.
+Future<NameFallback> nameFallbackOnce({
+  required String error,
+  required QueueItem? item,
+  required int gen,
+  required int fallbackGen,
+  required NameResolver? nameResolver,
+}) async {
+  final rn = item?.resolveName;
+  if (fallbackGen == gen ||
+      rn == null ||
+      nameResolver == null ||
+      !deadStreamError(error)) {
+    return (
+      url: null,
+      videoId: null,
+      durationS: null,
+      preview: false,
+      spent: false,
+    );
+  }
+  final it = item!;
+  try {
+    final res = await nameResolver(rn.artist, rn.title);
+    final fresh = res.url.isNotEmpty && res.url != it.url;
+    return (
+      url: fresh ? res.url : null,
+      videoId: res.videoId,
+      durationS: res.durationS,
+      preview: res.preview,
+      spent: true,
+    );
+  } catch (_) {
+    // The resolve itself died: spent all the same (a retry here would be
+    // the loop). Caller falls back to heal/skip as usual.
+    return (
+      url: null,
+      videoId: null,
+      durationS: null,
+      preview: false,
+      spent: true,
+    );
+  }
+}
+
 /// App-wide playback queue with shuffle — the "streaming engine".
 class QueuePlayer {
   QueuePlayer._() {
@@ -446,7 +518,7 @@ class QueuePlayer {
         unawaited(_maybeAutoplay());
       }
     });
-    _player.onError.listen((e) {
+    _player.onError.listen((e) async {
       lastError.value = e;
       // Log playback error for debugging
       _api?.logClientError(
@@ -459,6 +531,9 @@ class QueuePlayer {
         _api?.onAuthFailure?.call();
         return;
       }
+      // Dead relay URL (502 / corpse) on an internet row: one identity swap
+      // + replay. Claimed here so the heal below never re-resolves it.
+      if (await _maybeNameFallback(e)) return;
       // A playback error usually means a dead stream (network switch,
       // expired URL) — try to heal before the user even notices. Skipped
       // when a heal just ran: its own failures report back here, and the
@@ -632,7 +707,13 @@ class QueuePlayer {
     return buildSingleEngine(remote: false);
   }
 
-  final PlaybackEngine _player = _createEngine();
+  /// Test seam: a fake engine in place of the platform player, so queue
+  /// decisions can be asserted without audio hardware. Always null in the
+  /// app (set only by tests, before the first `instance` access).
+  @visibleForTesting
+  static PlaybackEngine? engineOverride;
+
+  final PlaybackEngine _player = engineOverride ?? _createEngine();
 
   List<QueueItem> items = [];
   int index = -1;
@@ -707,6 +788,10 @@ class QueuePlayer {
   static const int kMaxHealsPerTrack = 3;
   int _healStrikes = 0;
   Object? _healTrackId;
+  /// Play attempt that already spent its dead-stream identity swap
+  /// ([_maybeNameFallback]). Every [_playGen] bump (new track / retry) starts
+  /// a fresh attempt, so one corpse costs at most one extra resolve.
+  int _nameFallbackGen = -1;
   // URL bytes currently loaded in the engine. Heals resuming the SAME song
   // skip the setSource teardown (decoder reset = keyframe snapback).
   String? _loadedUrl;
@@ -1804,6 +1889,10 @@ class QueuePlayer {
           // pause-intent check: play+instant-pause must NOT resume via
           // the cached fallback.
           if (gen != _playGen || playHeal != _healGen) return;
+          // Dead relay (502 / corpse) on an internet row: swap in one
+          // identity resolve and replay instead of an error for a song the
+          // server can still hand us (fresh URL, or a 30s preview).
+          if (await _maybeNameFallback(e.toString())) return;
           // Dead relay/network URL on explicit tap: cached file now at 0
           // instead of a stuck error (not only when isOffline is set).
           final fb = await _cachedUriFor(items[index]);
@@ -2003,7 +2092,10 @@ class QueuePlayer {
         // Late fill (the resolve decided it is a 30s Deezer preview): ping
         // title listeners so Now Playing can label it without a track switch.
         currentTitle.notifyListeners();
-      } else if (item.resolveName != null && nameResolver != null) {
+      } else if (item.resolveName != null &&
+          nameResolver != null &&
+          (url.contains('/staging/resolve/') ||
+              url.contains('/staging/api/stream'))) {
         var rn = item.resolveName!;
         // The tapped song is resolved by the caller, so it already has a real
         // URL; only rows further down the album need the lazy lookup.
@@ -2041,7 +2133,11 @@ class QueuePlayer {
         // album forever and the album button never renders.
         currentTitle.notifyListeners();
       }
-      return url;
+      // An empty resolve is a DEAD row, not a playable URL. Hand it back as
+      // null so the caller's null path (auto-skip / offline redirect /
+      // unplayable log) fires, instead of player.play("") wedging the queue
+      // on a silent track. Same guard as _refreshEngineNext's two branches.
+      return url.isEmpty ? null : url;
     } catch (_) {
       // Network fail/timeout on resolve: cached file now regardless of the
       // offline flag (same as heal failover), else let the caller handle it.
@@ -2128,6 +2224,76 @@ class QueuePlayer {
     } catch (_) {
       return false;
     }
+  }
+
+  /// Claim a dead stream (502 / corpse) on an internet row that still knows
+  /// its artist+title: swap in ONE fresh resolve and replay it. Returns true
+  /// when this error was claimed — the caller must then NOT heal, because a
+  /// heal re-resolves the same corpse (the 14-day `ry:` row hands back the
+  /// dead video) and loops until the heal budget runs out.
+  Future<bool> _maybeNameFallback(String err) async {
+    if (index < 0 || index >= items.length) return false;
+    final item = items[index];
+    final gen = _playGen;
+    final fb = await nameFallbackOnce(
+      error: err,
+      item: item,
+      gen: gen,
+      fallbackGen: _nameFallbackGen,
+      nameResolver: nameResolver,
+    );
+    // Latch whenever the swap was spent — a failed resolve included, or the
+    // next 502 in this same attempt would resolve again (the loop).
+    if (fb.spent) _nameFallbackGen = gen;
+    final url = fb.url;
+    if (url == null) return false;
+    // A newer play/track switch means the swap is dead on arrival.
+    if (gen != _playGen ||
+        index >= items.length ||
+        !identical(items[index], item)) {
+      return true;
+    }
+    items[index] = QueueItem(
+      item.title,
+      url,
+      thumbUrl: item.thumbUrl,
+      baseName: item.baseName,
+      videoId: fb.videoId ?? item.videoId,
+      // Kept: a later replay must still be able to re-resolve by name.
+      resolveName: item.resolveName,
+      manuallyPlaced: item.manuallyPlaced,
+      fromInternet: item.fromInternet,
+      // A 30s Deezer swap: flagged so completionIsFinish reads the clip's
+      // end as the end of the track instead of healing the same 30s forever.
+      preview: fb.preview,
+      album: item.album,
+      albumImage: item.albumImage,
+      lyricsArtist: item.lyricsArtist,
+      lyricsTitle: item.lyricsTitle,
+      liked: item.liked,
+      durationMs: durationMsFor(fb.durationS) ?? item.durationMs,
+    );
+    // A watchdog/stall heal may already be racing the corpse: bump the heal
+    // token so it dies at its next check instead of overwriting the swap.
+    _healGen++;
+    _loadedUrl = url;
+    _lastPlayStartAt = DateTime.now();
+    _lastHealEnd = DateTime.now();
+    _setLoading(false);
+    DiagLog.restart.log(
+      'name-fallback idx=$index preview=${fb.preview} '
+      'vid=${fb.videoId ?? item.videoId}',
+    );
+    try {
+      await _player.play(url, durMs: items[index].durationMs);
+    } catch (e) {
+      lastError.value = e.toString();
+    }
+    // Same title: ping listeners so the preview label/30s readout show up
+    // without a track switch (same value still notifies).
+    currentTitle.notifyListeners();
+    _refreshEngineNext();
+    return true;
   }
 
   /// Re-establish the current track after a network dropout: re-resolve a
@@ -2400,8 +2566,10 @@ class QueuePlayer {
         await PrefetchStore.fileFor(it.title, it.baseName) ??
         await PrefetchStore.fileFor(it.identity, it.title);
     if (pre != null) return Uri.file(pre).toString();
-    return OfflineStore.localUriFor(it.title, it.baseName) ??
+    final uri = OfflineStore.localUriFor(it.title, it.baseName) ??
         OfflineStore.localUriFor(it.identity, it.title);
+    if (uri == null || uri.trim().isEmpty) return null;
+    return uri;
   }
 
   /// Next queue row (forward wrap) with a playable local copy.

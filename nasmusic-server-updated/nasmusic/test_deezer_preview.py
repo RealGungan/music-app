@@ -113,7 +113,7 @@ def _handler(db_rows=None, misc=None, preview_tid="1234567", minted=None):
         def query(self, sql, args=()):
             return [{"value": v, "seen_at": 9e9} for v in db_rows or []]
 
-        def misc_get(self, key, ttl):
+        def misc_get(self, key, ttl=0):
             return misc.get(key)
 
         def misc_put(self, key, value):
@@ -211,6 +211,83 @@ class PreviewFlagPropagation(unittest.TestCase):
         h.server.state.db = _DB()
         self.assertIn("dzcdn.net",
                       h._resolve_shared("ImXNU8Kg4H0"))
+
+
+class VidIdentityFallback(unittest.TestCase):
+    """Deep-linked videos never get an rz: row, so /api/open-url writes a
+    'vid:<id>' identity row and _preview_marker falls back to it."""
+
+    def test_open_url_writes_the_identity_row(self):
+        h = _handler()
+        h._yt_video_meta = lambda vid: ("Pantera", "Hollow")
+        out = h._open_url("https://music.youtube.com/watch?v=ImXNU8Kg4H0")
+        self.assertEqual(out["kind"], "youtube")
+        self.assertEqual(
+            h.server.state.db.misc_get("vid:ImXNU8Kg4H0"),
+            {"artist": "Pantera", "title": "Hollow", "album": "Album"})
+
+    def test_unknown_song_does_not_write_the_row(self):
+        h = _handler()
+        h._yt_video_meta = lambda vid: ("", "")
+        h._open_url("https://youtu.be/ImXNU8Kg4H0")
+        self.assertIsNone(h.server.state.db.misc_get("vid:ImXNU8Kg4H0"))
+
+    def test_oembed_fallback_names_a_gated_video(self):
+        """YTMusic/yt-dlp egress is IP-throttled, so _yt_video_meta must
+        still name the video via the ungated oEmbed endpoint."""
+        import json as _json
+        from . import httpd as _h
+        h = _handler()
+        body = _json.dumps({"title": "Quiero Repetir",
+                            "author_name": "Ozuna - Topic"}).encode()
+
+        class _Resp:
+            def read(self, _n):
+                return body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        import urllib.request as _ur
+        _real = _ur.urlopen
+        _ur.urlopen = lambda req, timeout=10: _Resp()
+        self.addCleanup(setattr, _ur, "urlopen", _real)
+        # ytmusicapi answers, but with an EMPTY payload (what the
+        # IP-throttled NAS actually sees) — the oEmbed fallback must still
+        # name the video instead of returning "".
+        import sys as _sys
+        _ytm = _sys.modules.get("ytmusicapi")
+        _sys.modules["ytmusicapi"] = types.SimpleNamespace(
+            YTMusic=lambda: types.SimpleNamespace(
+                get_song=lambda vid: {"videoDetails": {}}))
+        self.addCleanup(
+            lambda: _sys.modules.__setitem__("ytmusicapi", _ytm)
+            if _ytm else _sys.modules.pop("ytmusicapi", None))
+        self.assertEqual(_h.Handler._yt_video_meta(h, "nBcVa2HxY_0"),
+                         ("Ozuna", "Quiero Repetir"))
+        self.assertEqual(
+            h.server.state.db.misc_get("ytm:nBcVa2HxY_0"),
+            {"artist": "Ozuna", "title": "Quiero Repetir"})
+
+    def test_marker_falls_back_to_the_vid_row(self):
+        h = _handler(db_rows=[],
+                     misc={"vid:ImXNU8Kg4H0": {"artist": "Pantera",
+                                               "title": "Hollow"}})
+        self.assertEqual(h._preview_marker("ImXNU8Kg4H0"), "pz:1234567")
+
+    def test_rz_row_still_wins(self):
+        # a real rz: row is preferred over the vid: row (it carries the
+        # row's own resolved identity)
+        h = _handler(db_rows=PreviewFallbackSelection.ROW,
+                     misc={"vid:ImXNU8Kg4H0": {"artist": "Totally Other",
+                                               "title": "Nope"}})
+        self.assertEqual(h._preview_marker("ImXNU8Kg4H0"), "pz:1234567")
+
+    def test_no_identity_anywhere_still_refuses(self):
+        h = _handler(db_rows=[], misc={})
+        self.assertIsNone(h._preview_marker("ImXNU8Kg4H0"))
 
 
 if __name__ == "__main__":

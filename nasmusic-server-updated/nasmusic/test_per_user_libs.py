@@ -22,6 +22,7 @@ def _handler(db, env_off=True, staging_dir="/stg"):
     h.server = types.SimpleNamespace(state=st)
     h._auth_user = None
     _h.Handler._owner_map_cache = (0.0, {})
+    _h.Handler._per_user_libs_cache = (0.0, None)
     return h
 
 

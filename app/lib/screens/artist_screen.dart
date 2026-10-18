@@ -9,6 +9,11 @@ import '../toast.dart';
 import '../widgets.dart';
 import 'album_screen.dart';
 
+/// Client budget for `/api/artist`. Measured server cost is ~144s cold
+/// (discography hydration) and ~0.5s warm, so any budget below the cold
+/// cost just throws a TimeoutException on a first visit.
+const Duration kArtistTimeout = Duration(seconds: 180);
+
 /// Spotify-style artist page: all this artist's songs, albums and singles.
 class ArtistScreen extends StatefulWidget {
   const ArtistScreen({super.key, required this.api, required this.name});
@@ -69,7 +74,7 @@ class _ArtistScreenState extends State<ArtistScreen> {
     try {
       final page = await widget.api
           .artist(widget.name)
-          .timeout(const Duration(seconds: 20));
+          .timeout(kArtistTimeout);
       if (!mounted) return;
       setState(() {
         _page = page;
@@ -109,7 +114,7 @@ class _ArtistScreenState extends State<ArtistScreen> {
       try {
         final page = await widget.api
             .artist(widget.name)
-            .timeout(const Duration(seconds: 20));
+            .timeout(kArtistTimeout);
         if (!mounted) return;
         if (!page.pending) {
           setState(() {
