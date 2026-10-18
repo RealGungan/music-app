@@ -459,6 +459,10 @@ const Map<String, String> _es = {
   'Importing': 'Importando',
   'Infinite queue OFF': 'Cola infinita OFF',
   'Infinite queue ON': 'Cola infinita ON',
+  'Infinite queue ON but nothing to refill from':
+      'Cola infinita ON pero no hay nada de dónde rellenar',
+  'Infinite queue ON but this is a single song':
+      'Cola infinita ON pero esta es una sola canción',
   'Jan': 'Ene',
   'Jul': 'Jul',
   'Jun': 'Jun',

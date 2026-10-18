@@ -1231,23 +1231,42 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
   }
 
   Widget _autoplayButton() {
-    return ValueListenableBuilder<bool>(
-      valueListenable: qp.autoplayEnabled,
-      builder: (_, auto, __) => IconButton(
-        visualDensity: VisualDensity.compact,
-        style: auto
-            ? ButtonStyle(
-                backgroundColor: WidgetStateProperty.all(
-                  Spots.green.withValues(alpha: .18),
-                ),
-              )
-            : null,
-        icon: Icon(
-          Icons.all_inclusive,
-          color: auto ? Spots.green : Colors.white54,
-        ),
-        onPressed: qp.toggleAutoplay,
-        tooltip: auto ? tr('Infinite queue ON') : tr('Infinite queue OFF'),
+    // Outer builder on currentTitle: `explicitSingle`/`relatedSource`/`items`
+    // are plain fields on QueuePlayer (not a ChangeNotifier), but every queue
+    // swap rewrites currentTitle, so this re-reads autoplayEffective whenever
+    // the blocked state can flip. Toggling stays unconditionally enabled.
+    return ValueListenableBuilder<String>(
+      valueListenable: qp.currentTitle,
+      builder: (_, __, ___) => ValueListenableBuilder<bool>(
+        valueListenable: qp.autoplayEnabled,
+        builder: (_, auto, ____) {
+          final on = auto;
+          final live = qp.autoplayEffective;
+          return IconButton(
+            visualDensity: VisualDensity.compact,
+            style: live
+                ? ButtonStyle(
+                    backgroundColor: WidgetStateProperty.all(
+                      Spots.green.withValues(alpha: .18),
+                    ),
+                  )
+                : null,
+            icon: Icon(
+              Icons.all_inclusive,
+              color: on
+                  ? (live ? Spots.green : Colors.orange)
+                  : Colors.white54,
+            ),
+            onPressed: qp.toggleAutoplay,
+            tooltip: !on
+                ? tr('Infinite queue OFF')
+                : live
+                ? tr('Infinite queue ON')
+                : qp.explicitSingle
+                ? tr('Infinite queue ON but this is a single song')
+                : tr('Infinite queue ON but nothing to refill from'),
+          );
+        },
       ),
     );
   }

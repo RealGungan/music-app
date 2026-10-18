@@ -1093,6 +1093,18 @@ class QueuePlayer {
   final ValueNotifier<bool> autoplayEnabled = ValueNotifier(true);
   static const _autoplayKey = 'autoplay';
 
+  /// TRUTHFULNESS: [autoplayEnabled] is the *setting*; this is whether the
+  /// queue can ACTUALLY refill right now — the same conditions [_maybeAutoplay]
+  /// gates on (excluding `shouldRefill`, which is a normal transient, not a
+  /// blocked state). A single-song play sets [explicitSingle], so the setting
+  /// can read ON while no refill will ever fire: that is the ghost button.
+  /// Read-only, side-effect free.
+  bool get autoplayEffective =>
+      autoplayEnabled.value &&
+      items.isNotEmpty &&
+      !explicitSingle &&
+      relatedSource != null;
+
   /// Reopen the app on the last song + queue. Opt-in: with it off nothing is
   /// ever written (see [_persistQueue]), so behaviour is identical to before.
   final ValueNotifier<bool> restoreQueueEnabled = ValueNotifier(false);
