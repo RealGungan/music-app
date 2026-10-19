@@ -3688,13 +3688,13 @@ class Handler(BaseHTTPRequestHandler):
             if full:
                 dur = self.state.duration_for(full)
         if dur is None:
-            try:
-                title = base.split(" - ", 1)[1].strip() if " - " in base else ""
-                got = self._studio_duration(artist or "", title) \
-                    if title else None
+            title = base.split(" - ", 1)[1].strip() if " - " in base else ""
+            if title:
+                key = ("sd:" + self._norm(artist or "")
+                       + "\x00" + self._norm(title))
+                got = self.state.studio_duration_cached(
+                    key, artist or "", title)
                 dur = got if isinstance(got, (int, float)) and got > 0 else None
-            except Exception:                            # noqa: BLE001
-                dur = None                                  # never break payload
         if isinstance(dur, (int, float)) and dur > 0:
             d["duration_s"] = int(round(dur))
 

@@ -115,7 +115,8 @@ class State:
 
     __slots__ = ("config", "db", "scorer", "pipeline", "users",
                  "_warm_lock", "_warm_started", "lyrics_bundle",
-                 "_index_lock", "_index_cache", "_index_ts", "_index_ttl")
+                 "_index_lock", "_index_cache", "_index_ts", "_index_ttl",
+                 "_sd_lock", "_sd_inflight")
 
     def __init__(self, config: Config):
         self.config = config
@@ -131,6 +132,8 @@ class State:
         self.pipeline = Pipeline(self)
         self._warm_lock = threading.Lock()
         self._warm_started = False
+        self._sd_lock = threading.Lock()
+        self._sd_inflight = set()
         self._index_lock = threading.Lock()
         self._index_cache = None
         self._index_ts = 0.0
@@ -291,6 +294,43 @@ class State:
             self._warm_started = True
         threading.Thread(target=self.warm_duration_cache,
                          daemon=True).start()
+
+    def studio_duration_cached(self, key, artist, title, spawn=None):
+        """Cached Deezer studio duration, or None while a background lookup
+        warms it. NEVER blocks on the network: one lookup costs ~0.7s
+        (Deezer round trip + a deliberate 0.4s rate-limit sleep), so the
+        per-track /api/metainfo path used to blow the app's 30s budget on a
+        playlist. `spawn` is a test seam; leave it None in production."""
+        got = self.db.misc_get(key, 90 * 86400)
+        if got is not None:
+            # 0 = "Deezer has no studio match" (negative cache): already
+            # resolved, so it must not schedule another lookup.
+            return got if isinstance(got, (int, float)) and got > 0 else None
+        self.studio_duration_warm(key, artist, title, spawn=spawn)
+        return None
+
+    def studio_duration_warm(self, key, artist, title, spawn=None):
+        """One background Deezer lookup per key. Unknown results are cached
+        as 0 so they are not retried on every request (misc_get cannot
+        distinguish a stored null from a missing row)."""
+        with self._sd_lock:
+            if key in self._sd_inflight:
+                return False
+            self._sd_inflight.add(key)
+
+        def work():
+            try:
+                d = self.scorer.deezer_duration(key, artist, title)
+                self.db.misc_put(
+                    key, d if isinstance(d, (int, float)) and d > 0 else 0)
+            except Exception:                            # noqa: BLE001
+                pass
+            finally:
+                with self._sd_lock:
+                    self._sd_inflight.discard(key)
+
+        (spawn or threading.Thread)(target=work, daemon=True).start()
+        return True
 
     def playlist_cover_path(self, name):
         m3u = self.m3u_for(name)
