@@ -243,7 +243,7 @@ class _ArtistScreenState extends State<ArtistScreen> {
     return ListTile(
       leading: CoverThumb(
         title: a.album,
-        thumbUrl: a.image,
+        thumbUrl: a.image == null ? null : widget.api.imageProxy(a.image!),
         size: 44,
         fallbackUrl: null,
       ),
@@ -384,7 +384,7 @@ class _ArtistScreenState extends State<ArtistScreen> {
                 borderRadius: BorderRadius.circular(12),
                 child: page.photo != null
                     ? Image.network(
-                        page.photo!,
+                        widget.api.imageProxy(page.photo!),
                         width: 86,
                         height: 86,
                         fit: BoxFit.cover,
@@ -495,8 +495,14 @@ class _ArtistScreenState extends State<ArtistScreen> {
             leading: CoverThumb(
               title: s.baseName,
               thumbUrl:
-                  s.albumImage ??
-                  (s.url != null ? widget.api.coverUrl(s.url!) : null),
+                  (s.albumImage ??
+                          (s.url != null ? widget.api.coverUrl(s.url!) : null)) ==
+                      null
+                  ? null
+                  : widget.api.imageProxy(
+                      (s.albumImage ??
+                          (s.url != null ? widget.api.coverUrl(s.url!) : null))!,
+                    ),
               size: 44,
             ),
             title: Text(

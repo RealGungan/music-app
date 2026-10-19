@@ -563,6 +563,10 @@ class _NasMusicAppState extends State<NasMusicApp> with WidgetsBindingObserver {
       }
       final mode = OfflineStore.mode;
       if (mode == 'off') return;
+      // Never yank the queue out from under a song that is playing: losing
+      // connectivity must not interrupt audio by itself. An explicit tap in
+      // the dialog below still swaps (that is a deliberate choice).
+      if (qp.playing) return;
       final pl = qp.fromPlaylist.value ? qp.playlistName : null;
       final mine = (pl != null && pl.isNotEmpty)
           ? OfflineStore.songsIn(pl)

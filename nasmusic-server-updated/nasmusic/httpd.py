@@ -156,7 +156,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.321"
+APP_VERSION = "1.0.322"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -8609,7 +8609,7 @@ class Handler(BaseHTTPRequestHandler):
                 f"https://i.ytimg.com/vi/{row['video_id']}/hqdefault.jpg")
 
         if os.path.exists(path):
-            cover = state.scorer._deezer_cover(base_name)
+            cover = self._deezer_cover_cached(base_name)
             if cover:
                 return self._relay_image(cover)
         return self.send_error(404, "no artwork")

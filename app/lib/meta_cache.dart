@@ -45,8 +45,30 @@ class MetaCache {
     if (user.isEmpty || name.isEmpty) return;
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_entriesKey(user, name),
-          jsonEncode([for (final e in entries) e.toJson()]));
+      final key = _entriesKey(user, name);
+      // A duration-less save (e.g. after a timed-out fetch) must not wipe
+      // durations already cached. Carry forward the last known value,
+      // matching on the entry's base-name identity.
+      final prevDur = <String, int>{};
+      final raw = prefs.getString(key);
+      if (raw != null && raw.isNotEmpty) {
+        for (final j in jsonDecode(raw) as List) {
+          if (j is Map<String, dynamic>) {
+            final b = j['base_name']?.toString() ?? '';
+            final d = j['duration_s'];
+            if (b.isNotEmpty && d is num && d > 0) prevDur[b] = d.toInt();
+          }
+        }
+      }
+      final out = [
+        for (final e in entries)
+          {
+            ...e.toJson(),
+            if (e.durationS == null && prevDur[e.baseName] != null)
+              'duration_s': prevDur[e.baseName],
+          }
+      ];
+      await prefs.setString(key, jsonEncode(out));
     } catch (_) {}
   }
 

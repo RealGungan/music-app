@@ -247,7 +247,18 @@ class State:
             st = os.stat(abs_path)
         except OSError:
             return None
-        return self.db.duration_get(abs_path, st.st_size)
+        d = self.db.duration_get(abs_path, st.st_size)
+        if d is not None:
+            return d
+        # Fallback: downloads.duration_s (recorded at download time) covers a
+        # file added/replaced or living in a per-user home AFTER the one-shot
+        # warm_duration_cache pass, which only walks music_root + playlist_dir.
+        # One indexed lookup on downloads.base_name (UNIQUE); no ffprobe here.
+        base = os.path.splitext(os.path.basename(abs_path))[0]
+        rows = self.db.query(
+            "SELECT duration_s FROM downloads WHERE base_name=? "
+            "AND duration_s IS NOT NULL", (base,))
+        return rows[0]["duration_s"] if rows else None
 
     def warm_duration_cache(self, limit=30000):
         """Compute missing mp3 durations in the background (best-effort)."""

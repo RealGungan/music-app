@@ -47,8 +47,8 @@ class PrefetchStore {
   static final http.Client _http = http.Client();
 
   /// Pure window computation for the look-ahead pass: a slice of [count]
-  /// rows starting at [index], clamped to the queue. Callers pass
-  /// index+1 for next-only (the playing song streams; never prefetched).
+  /// rows starting at [index], clamped to the queue. The window begins at
+  /// the current row (the playing song streams; never prefetched).
   static List<T> window<T>(List<T> items, int index, int count) {
     if (items.isEmpty || index < 0 || count <= 0) return <T>[];
     final start = index.clamp(0, items.length);

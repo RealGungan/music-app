@@ -951,7 +951,9 @@ class _SearchScreenState extends State<SearchScreen> {
                     _DiscoveryTile(
                       api: widget.api,
                       track: vis[i],
-                      thumbUrl: vis[i].albumImage,
+                      thumbUrl: vis[i].albumImage == null
+                          ? null
+                          : widget.api.imageProxy(vis[i].albumImage!),
                       onPlay: () => _playDiscovery(_results!, vis, i),
                       onKeep: () => _keep(vis[i]),
                       onLongPress: () => _showSongContext(
@@ -1085,7 +1087,9 @@ class _SearchScreenState extends State<SearchScreen> {
                               title: s.title?.isNotEmpty == true
                                   ? s.title!
                                   : s.baseName,
-                              thumbUrl: s.albumImage,
+                              thumbUrl: s.albumImage == null
+                                  ? null
+                                  : widget.api.imageProxy(s.albumImage!),
                               size: 44,
                               fallbackUrl: null,
                             ),
@@ -1271,14 +1275,31 @@ class _DiscoveryTile extends StatelessWidget {
           // Provider album art first, else hi-res YouTube art: maxres
           // primary, hq fallback (some videos have no maxres). Decoded
           // at physical pixels (CoverThumb), never upscaled.
-          thumbUrl: (thumbUrl?.isNotEmpty ?? false)
-              ? thumbUrl
-              : (track.videoId.isNotEmpty
-                    ? 'https://i.ytimg.com/vi/${track.videoId}/maxresdefault.jpg'
-                    : null),
-          fallbackUrl: track.videoId.isNotEmpty
-              ? 'https://i.ytimg.com/vi/${track.videoId}/hqdefault.jpg'
-              : null,
+          thumbUrl:
+              ((thumbUrl?.isNotEmpty ?? false)
+                  ? thumbUrl
+                  : (track.videoId.isNotEmpty
+                        ? 'https://i.ytimg.com/vi/${track.videoId}/maxresdefault.jpg'
+                        : null)) ==
+              null
+              ? null
+              : api.imageProxy(
+                  ((thumbUrl?.isNotEmpty ?? false)
+                      ? thumbUrl
+                      : (track.videoId.isNotEmpty
+                            ? 'https://i.ytimg.com/vi/${track.videoId}/maxresdefault.jpg'
+                            : null))!,
+                ),
+          fallbackUrl: (track.videoId.isNotEmpty
+                  ? 'https://i.ytimg.com/vi/${track.videoId}/hqdefault.jpg'
+                  : null) ==
+              null
+              ? null
+              : api.imageProxy(
+                  (track.videoId.isNotEmpty
+                      ? 'https://i.ytimg.com/vi/${track.videoId}/hqdefault.jpg'
+                      : null)!,
+                ),
           size: 44,
         ),
         title: Text(track.title, maxLines: 1, overflow: TextOverflow.ellipsis),

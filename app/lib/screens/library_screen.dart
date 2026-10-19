@@ -2356,6 +2356,7 @@ Future<void> _playFrom(int i) async {
           _itemUrl(e),
           thumbUrl: _thumbFor(e),
           liked: e.liked,
+          durationMs: durationMsFor(e.durationS),
         ),
   ];
 

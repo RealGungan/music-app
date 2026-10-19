@@ -2094,8 +2094,8 @@ class QueuePlayer {
         );
       });
       _prefetchNext();
-      // Look-ahead covers NEXT songs only — the playing URL streams live
-      // and is never fetched (no double-GET with the engine).
+      // Look-ahead covers the playing song too, so its bytes are cached
+      // before connectivity drops.
       _loadedUrl = url;
       _prefetchAheadFiles(gen);
       _maybeAutoplay();
@@ -3507,10 +3507,10 @@ class QueuePlayer {
     }
   }
 
-  /// Look-ahead file cache: while online, fetch the NEXT few queue songs'
-  /// bytes into [PrefetchStore] so going offline mid-queue doesn't stop
-  /// playback (the playing song streams live and is never fetched — no
-  /// double-GET with the engine). Best-effort background pass
+  /// Look-ahead file cache: while online, fetch the current and next few
+  /// queue songs' bytes into [PrefetchStore] so going offline mid-queue
+  /// doesn't stop playback (the playing song is included, so its bytes are
+  /// cached too). Best-effort background pass
   /// (WiFi-gated + capped inside the store). The first wave (next 3)
   /// starts IMMEDIATELY on play — no stagger delay, no resumed requirement —
   /// so the most urgent bytes land before any offline switch; songs past
@@ -3530,7 +3530,7 @@ class QueuePlayer {
     if (items.isEmpty || index < 0) return;
     final upcoming = PrefetchStore.window(
       items,
-      index + 1,
+      index,
       PrefetchStore.aheadCount,
     );
     if (upcoming.isEmpty) return;

@@ -229,7 +229,10 @@ class _AlbumScreenState extends State<AlbumScreen> {
               CoverArt(
                 seed: page.album,
                 icon: Icons.album,
-                networkUrl: widget.coverImage ?? page.image,
+                networkUrl: (widget.coverImage ?? page.image) == null
+                    ? null
+                    : widget.api
+                        .imageProxy((widget.coverImage ?? page.image)!),
                 size: 96,
               ),
               const SizedBox(width: 14),
@@ -349,9 +352,16 @@ class _AlbumScreenState extends State<AlbumScreen> {
             leading: CoverThumb(
               title: s.baseName,
               thumbUrl:
-                  widget.coverImage ??
-                  s.albumImage ??
-                  (s.url != null ? widget.api.coverUrl(s.url!) : null),
+                  (widget.coverImage ??
+                          s.albumImage ??
+                          (s.url != null ? widget.api.coverUrl(s.url!) : null)) ==
+                      null
+                  ? null
+                  : widget.api.imageProxy(
+                      (widget.coverImage ??
+                          s.albumImage ??
+                          (s.url != null ? widget.api.coverUrl(s.url!) : null))!,
+                    ),
               size: 44,
             ),
             title: Text(
