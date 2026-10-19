@@ -156,7 +156,7 @@ def _register_ytm_browser_cookie(path):
 # Security: fully static, zero user-input reflection (the register form
 # uses textContent only, never innerHTML) — no XSS surface. Register
 # spam is covered by the existing per-IP rate limit.
-APP_VERSION = "1.0.320"
+APP_VERSION = "1.0.321"
 
 LANDING_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -311,6 +311,47 @@ def _thumb_url(node):
     except Exception:                                        # noqa: BLE001
         pass
     return ""
+
+
+def _ytm_link_target(url):
+    """(kind, id) for a YouTube / YT-Music link: 'playlist', 'album' or ''.
+    Accepts ?list=<id> playlists and /browse/MPREb_<id> albums."""
+    try:
+        u = urllib.parse.urlparse((url or "").strip())
+        host = (u.netloc or "").lower()
+        if u.scheme not in ("http", "https"):
+            return ("", "")
+        if not (host == "music.youtube.com" or host.endswith(".youtube.com")
+                or host == "youtu.be"):
+            return ("", "")
+        pid = (urllib.parse.parse_qs(u.query).get("list") or [""])[0].strip()
+        if re.fullmatch(r"[A-Za-z0-9_\-]{5,80}", pid):
+            return ("playlist", pid)
+        m = re.search(r"/browse/(MPREb_[A-Za-z0-9_-]+)", url or "")
+        if m:
+            return ("album", m.group(1))
+    except Exception:                                    # noqa: BLE001
+        pass
+    return ("", "")
+
+
+def _spotify_link_target(url):
+    """(kind, id) for a Spotify link: 'playlist', 'album' or ''.
+    Accepts /playlist/<id>, /album/<id> and their /embed/ forms."""
+    try:
+        u = urllib.parse.urlparse((url or "").strip())
+        if u.scheme not in ("http", "https"):
+            return ("", "")
+        if (u.hostname or "").lower() not in (
+                "open.spotify.com", "www.open.spotify.com"):
+            return ("", "")
+        m = re.search(r"(?:embed/)?(playlist|album)/([A-Za-z0-9]{10,40})",
+                      url or "")
+        if m:
+            return (m.group(1), m.group(2))
+    except Exception:                                    # noqa: BLE001
+        pass
+    return ("", "")
 
 
 def _peek_redirect_location(url, timeout=15):
@@ -616,7 +657,8 @@ class Handler(BaseHTTPRequestHandler):
                 q = (query.get("q") or [""])[0].strip()
                 if not q:
                     return self._error(400, "missing q")
-                return self._json(self._search(q))
+                variants = (query.get("variants") or [""])[0].lower() in ("1", "true")
+                return self._json(self._search(q, variants=variants))
 
         # ---- /api/suggest (live typeahead: NAS-first + online, resp-cached)
         if seg == "suggest" and parts[1:] == []:
@@ -1278,7 +1320,7 @@ class Handler(BaseHTTPRequestHandler):
     _album_count_ttl = 10 * 60
     _album_count_retry = 15        # seconds before retrying a not-ready count
 
-    def _search(self, q):
+    def _search(self, q, variants=False):
         """Search returns LOCAL matches instantly from the cached index and,
         for the ONLINE portion, serves a per-query discovery cache. On a cold
         query the response BLOCKS only briefly (~2s) on a background thread;
@@ -1312,6 +1354,10 @@ class Handler(BaseHTTPRequestHandler):
             artist, title = None, None
 
         qkey = self._norm(q)
+        if variants:
+            # Variants results differ from the normal pool: give them their
+            # own cache + single-flight key so they can never poison sr4:.
+            qkey = "v1:" + qkey
         # sr4: album now attached per row (Deezer, like covers) — older
         # album-less sr3: rows are NOT migrated, they rebuild once.
         cached = state.db.misc_get("sr4:" + qkey, self._search_cache_ttl)
@@ -1395,7 +1441,7 @@ class Handler(BaseHTTPRequestHandler):
             # cold + 1.2s poll gap). Discovery gets up to 1.2s; artists
             # get the remaining budget. Caches sr4:/rz: unchanged.
             _t0 = time.time()
-            ev = self._discovery_sync(q, qkey)
+            ev = self._discovery_sync(q, qkey, variants)
             ev.wait(timeout=1.2)
             _refetch = state.db.misc_get("sr4:" + qkey,
                                          self._search_cache_ttl)
@@ -1458,7 +1504,7 @@ class Handler(BaseHTTPRequestHandler):
                 "artists": artists,
                 "artists_pending": artists_pending}
 
-    def _discover_async(self, q, qkey):
+    def _discover_async(self, q, qkey, variants=False):
         """Background: run the online provider lookup + candidate pick, cache
         it, and pre-warm the direct-stream URLs for ALL discovery rows BEFORE
         the cache is written — so by the time /staging/api/search actually
@@ -1531,7 +1577,7 @@ class Handler(BaseHTTPRequestHandler):
             cands = state.scorer.search(
                 "" if not structured else (c_artist or ""),
                 q if not structured else (c_title or q),
-                quoted=structured)
+                quoted=structured, variants=variants)
             if meta_thread is not None:
                 meta_thread.join(timeout=6)
             if c_title is None:
@@ -1683,7 +1729,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:                             # noqa: BLE001
             logger.exception("discovery failed for %r", q)
 
-    def _discovery_sync(self, q, qkey):
+    def _discovery_sync(self, q, qkey, variants=False):
         """Dedupe a cold /api/search discovery build. Returns the shared Event
         the caller can wait on: a concurrent re-search of the same query joins
         the SAME running build (plus its prewarm) instead of starting a second
@@ -1697,7 +1743,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def _run():
             try:
-                self._discover_async(q, qkey)
+                self._discover_async(q, qkey, variants)
             except Exception:                       # noqa: BLE001
                 logger.exception("discovery worker failed for %r", q)
             finally:
@@ -4359,7 +4405,9 @@ class Handler(BaseHTTPRequestHandler):
         ({"kind", "message"}) so it lands in NAS logs/events instead of
         vanishing on the phone. Rate-limited per user; text capped."""
         me = self._me() or "?"
-        if not _rate_allow("clog:" + me, 60, 3600):
+        # A client error storm must not blind diagnostics by throttling the
+        # very reports that describe it; this cap only stops a runaway loop.
+        if not _rate_allow("clog:" + me, 600, 3600):
             return self._error(429, "too many client logs")
         body = self._body_json()
         if not isinstance(body, dict):
@@ -6534,29 +6582,28 @@ class Handler(BaseHTTPRequestHandler):
         (via _error) on bad/private/unparseable input."""
         import json as _json
         import re as _re
-        p = urllib.parse.urlparse((url or "").strip())
-        if p.scheme not in ("http", "https"):
-            return self._error(400, "need a Spotify playlist link")
-        if (p.hostname or "").lower() not in (
-                "open.spotify.com", "www.open.spotify.com"):
-            return self._error(400, "need a Spotify playlist link")
-        m = _re.search(r"/(?:embed/)?playlist/([A-Za-z0-9]{10,40})",
-                        p.path or "")
-        if not m:
-            return self._error(400, "need a Spotify playlist link")
-        pid = m.group(1)
+        kind, pid = _spotify_link_target(url)
+        if not kind:
+            return self._error(
+                400, "need a Spotify playlist link or album link")
+        # Albums must stay on the embed scrape: the full pathfinder query
+        # hardcodes the spotify:playlist: URI prefix.
+        if kind == "album":
+            full = False
+        fk = ("spf:" if kind == "playlist" else "spaf:") + pid
+        ck = ("spo:" if kind == "playlist" else "spao:") + pid
         state = self.state
         if full:
             # Never serve the 100-cap embed cache for a full request.
             try:
-                cached = state.db.misc_get("spf:" + pid, 6 * 3600)
+                cached = state.db.misc_get(fk, 6 * 3600)
             except Exception:                            # noqa: BLE001
                 cached = None
             if isinstance(cached, dict) and cached.get("tracks"):
                 return cached
         else:
             try:
-                cached = state.db.misc_get("spo:" + pid, 6 * 3600)
+                cached = state.db.misc_get(ck, 6 * 3600)
             except Exception:                            # noqa: BLE001
                 cached = None
             if isinstance(cached, dict) and cached.get("tracks"):
@@ -6568,12 +6615,12 @@ class Handler(BaseHTTPRequestHandler):
                        "full": True, "total": len(tracks),
                        "cover": self._spotify_oembed_cover(url)}
                 try:
-                    state.db.misc_put("spf:" + pid, out)
+                    state.db.misc_put(fk, out)
                 except Exception:                        # noqa: BLE001
                     pass
                 return out
             # else: fall through to the embed (hash may have rotated)
-        embed = "https://open.spotify.com/embed/playlist/" + pid
+        embed = "https://open.spotify.com/embed/%s/%s" % (kind, pid)
         try:
             body, _ = _fetch_public(embed, timeout=20,
                                     max_bytes=2 * 1024 * 1024)
@@ -6604,7 +6651,7 @@ class Handler(BaseHTTPRequestHandler):
         if not tracks:
             return self._error(502, "no track data (private playlist?)")
         try:
-            state.db.misc_put("spo:" + pid, out)
+            state.db.misc_put(ck, out)
         except Exception:                                # noqa: BLE001
             pass
         return out
@@ -7453,21 +7500,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(502, f"YouTube read failed: {e}"[:200])
 
     def _ytmusic_playlist_order(self, url):
-        """YouTube Music playlist link -> [{artist,title,duration_s}] in
-        playlist order, via ytmusicapi (unauthenticated: public playlists
-        only). Raises _HTTPError (via _error) on bad/private input."""
-        import re as _re
-        p = urllib.parse.urlparse((url or "").strip())
-        if p.scheme not in ("http", "https"):
-            return self._error(400, "need a YouTube Music playlist link")
-        if (p.hostname or "").lower() not in (
-                "music.youtube.com", "www.youtube.com", "youtube.com",
-                "youtu.be"):
-            return self._error(400, "need a YouTube Music playlist link")
-        qs = urllib.parse.parse_qs(p.query or "")
-        pid = (qs.get("list") or [""])[0].strip()
-        if not pid or not _re.fullmatch(r"[A-Za-z0-9_\-]{5,80}", pid):
-            return self._error(400, "need a YouTube Music playlist link")
+        """YouTube Music playlist/album link -> [{artist,title,duration_s}]
+        in source order, via ytmusicapi (unauthenticated: public only).
+        Raises _HTTPError (via _error) on bad/private input."""
+        kind, pid = _ytm_link_target(url)
+        if not pid:
+            return self._error(
+                400, "need a YouTube Music playlist or album link")
         try:
             cached = self.state.db.misc_get("spyt:" + pid, 6 * 3600)
         except Exception:                                # noqa: BLE001
@@ -7476,7 +7515,9 @@ class Handler(BaseHTTPRequestHandler):
             return cached
         try:
             from ytmusicapi import YTMusic
-            pl = YTMusic().get_playlist(pid, limit=None)
+            ytm = YTMusic()
+            pl = (ytm.get_album(pid) if kind == "album"
+                  else ytm.get_playlist(pid, limit=None))
         except Exception:                                # noqa: BLE001
             return self._error(
                 502, "playlist unreadable (private or unavailable?)")

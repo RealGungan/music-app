@@ -173,14 +173,14 @@ class Scorer:
             return type("R", (), {"stdout": "", "stderr": "timeout",
                                   "returncode": -1})()
 
-    def search_ytmusic(self, query):
+    def search_ytmusic(self, query, variants=False):
         """Structured YouTube Music candidates (no safe-search filter).
 
         Results are cached in-memory 60s by normalized query: the suggest
         path calls this per keystroke, and a live YTMusic round-trip is
         ~0.7s (the dominant cost of typeahead)."""
         try:
-            key = "ytm:" + norm(query)
+            key = ("ytm:v1:" if variants else "ytm:") + norm(query)
             now = time.time()
             cache = getattr(self, "_ytm_cache_local", None)
             if cache is None:
@@ -193,7 +193,17 @@ class Scorer:
         out = []
         try:
             from ytmusicapi import YTMusic
-            for r in (YTMusic().search(query, filter="songs", limit=15) or []):
+            ytm = YTMusic()
+            rows = list(ytm.search(query, filter="songs", limit=15) or [])
+            if variants:
+                extra = []
+                try:
+                    extra = list(ytm.search(query, filter="videos", limit=15) or [])
+                except Exception:                        # noqa: BLE001
+                    extra = []
+                have = {r.get("videoId") for r in rows}
+                rows += [r for r in extra if r.get("videoId") not in have]
+            for r in rows:
                 vid = r.get("videoId")
                 if not vid:
                     continue
@@ -226,7 +236,7 @@ class Scorer:
             except Exception:                           # noqa: BLE001
                 pass
 
-    def search(self, artist, title, quoted=True):
+    def search(self, artist, title, quoted=True, variants=False):
         """Merge YouTube + YouTube Music candidates for the query.
 
         With an artist -> quoted pair (exact for a resolved song); free text ->
@@ -246,7 +256,8 @@ class Scorer:
 
         def _ytm():
             try:
-                ytm_box[:] = self.search_ytmusic(f"{artist} {title}".strip())
+                ytm_box[:] = self.search_ytmusic(
+                    f"{artist} {title}".strip(), variants=variants)
             except Exception:                           # noqa: BLE001
                 ytm_box[:] = []
 

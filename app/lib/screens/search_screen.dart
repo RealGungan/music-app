@@ -132,7 +132,9 @@ class _SearchScreenState extends State<SearchScreen> {
       return;
     }
     try {
-      final r = await widget.api.search(query).timeout(kSearchTimeout);
+      final r = await widget.api.search(query,
+          variants: QueuePlayer.instance.variantsEnabled.value)
+          .timeout(kSearchTimeout);
       if (!mounted) return;
       setState(() {
         _results = r;
@@ -211,7 +213,8 @@ class _SearchScreenState extends State<SearchScreen> {
       await Future<void>.delayed(const Duration(milliseconds: 1200));
       if (!mounted) return;
       try {
-        final r = await widget.api.search(query);
+        final r = await widget.api.search(query,
+            variants: QueuePlayer.instance.variantsEnabled.value);
         if (!mounted) return;
         setState(() {
           _results = r;

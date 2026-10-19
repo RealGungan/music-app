@@ -1376,8 +1376,11 @@ class ApiClient {
     return j;
   }
 
-  Future<SearchResultPage> search(String q) async {
-    final j = _decode(await _client.get(_uri('/api/search', {'q': q})));
+  Future<SearchResultPage> search(String q, {bool variants = false}) async {
+    final j = _decode(await _client.get(_uri('/api/search', {
+      'q': q,
+      if (variants) 'variants': '1',
+    })));
     return SearchResultPage.fromJson(j);
   }
 

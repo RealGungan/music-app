@@ -729,60 +729,64 @@ Future<void> _load({bool forceOnline = false}) async {
     final action = await showModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
+      isScrollControlled: true,
       builder: (_) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.play_arrow),
-              title: Text("${tr('Play')} ${pl.name}"),
-              onTap: () => Navigator.pop(context, 'play'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.shuffle),
-              title: Text(tr('Shuffle')),
-              trailing: sh0
-                  ? const Icon(Icons.check,
-                      color: Colors.green, size: 20)
-                  : null,
-              onTap: () => Navigator.pop(context, 'shuffle'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.arrow_upward),
-              title: Text(tr('Move up')),
-              onTap: () => Navigator.pop(context, 'up'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.arrow_downward),
-              title: Text(tr('Move down')),
-              onTap: () => Navigator.pop(context, 'down'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.download_outlined),
-              title: Text(tr('Download playlist')),
-              onTap: () => Navigator.pop(context, 'download'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.photo_outlined),
-              title: Text(tr('Change cover')),
-              onTap: () => Navigator.pop(context, 'cover'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.add_to_home_screen),
-              title: Text(tr('Add to home screen')),
-              onTap: () => Navigator.pop(context, 'pin'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.fact_check_outlined),
-              title: Text(tr('Verify against source')),
-              onTap: () => Navigator.pop(context, 'verify'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.delete_outline),
-              title: Text(tr('Delete playlist')),
-              onTap: () => Navigator.pop(context, 'delete'),
-            ),
-          ],
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.play_arrow),
+                title: Text("${tr('Play')} ${pl.name}"),
+                onTap: () => Navigator.pop(context, 'play'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.shuffle),
+                title: Text(tr('Shuffle')),
+                trailing: sh0
+                    ? const Icon(Icons.check,
+                        color: Colors.green, size: 20)
+                    : null,
+                onTap: () => Navigator.pop(context, 'shuffle'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.arrow_upward),
+                title: Text(tr('Move up')),
+                onTap: () => Navigator.pop(context, 'up'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.arrow_downward),
+                title: Text(tr('Move down')),
+                onTap: () => Navigator.pop(context, 'down'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.download_outlined),
+                title: Text(tr('Download playlist')),
+                onTap: () => Navigator.pop(context, 'download'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_outlined),
+                title: Text(tr('Change cover')),
+                onTap: () => Navigator.pop(context, 'cover'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.add_to_home_screen),
+                title: Text(tr('Add to home screen')),
+                onTap: () => Navigator.pop(context, 'pin'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.fact_check_outlined),
+                title: Text(tr('Verify against source')),
+                onTap: () => Navigator.pop(context, 'verify'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.delete_outline),
+                title: Text(tr('Delete playlist')),
+                onTap: () => Navigator.pop(context, 'delete'),
+              ),
+            ],
+          ),
         ),
       ),
     );

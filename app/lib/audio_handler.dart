@@ -268,7 +268,7 @@ bool isSelfFocusEcho({
 
 /// Auto-close delay: nothing playing for this long and the media notification
 /// is dismissed (Spotify / YT-Music behaviour). THE knob — retune here.
-const kIdleDismissAfter = Duration(minutes: 2);
+const kIdleDismissAfter = Duration(minutes: 3);
 
 /// Auto-close seam (pure apart from a one-shot Timer, unit-tested with a 10ms
 /// `after`). One-shot only: NO polling / ticker — this app already paid for a
@@ -314,8 +314,7 @@ class IdleDismisser {
     });
   }
 
-  /// Playback is starting (play/resume/pre-push/getState): lift the dismissal
-  /// and re-arm.
+  /// Playback is starting (play/resume/pre-push): lift the dismissal.
   void start() {
     _cancel();
     _dismissed = false;
@@ -1054,7 +1053,6 @@ class NASMusicAudioHandler extends BaseAudioHandler {
         // re-asserting the lie we just corrected.
         _playing = ans == 'playing';
         _paused = ans == 'paused';
-        _idle.start();
         _publishPlayback();
         _sendEvent({'ev': 'state', 's': ans});
         _sendEvent({'ev': 'pos', 'ms': _position.inMilliseconds});
